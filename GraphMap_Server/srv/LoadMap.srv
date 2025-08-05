@@ -1,0 +1,7 @@
+# Request: Map file path
+string map_file_path
+---
+# Response: Complete map data in GraphMap format
+GraphMap graph_map
+bool success
+string message

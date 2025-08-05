@@ -1,0 +1,12 @@
+string id
+string admin_code
+int32 node_type
+string its_node_id
+string maker
+string update_date
+string version
+string remark
+string hist_type
+string hist_remark
+GpsInfo gps_info
+UtmInfo utm_info
