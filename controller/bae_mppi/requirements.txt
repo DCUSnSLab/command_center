@@ -1,0 +1,7 @@
+# PyTorch & GPU 
+torch==2.7.1
+torchvision==0.22.1
+
+# Math and transformations
+transforms3d
+arm_pytorch_utilities

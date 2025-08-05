@@ -1,0 +1,63 @@
+/bae_mppi/mppi_core:
+  ros__parameters:
+    # 디바이스 설정
+    use_gpu: true                # GPU 사용 여부 (성능 향상)
+    
+    # 제어 설정 (log-MPPI 스타일 고빈도 제어)
+    control_frequency: 10.0       # Hz - 제어 주파수 (log-MPPI 수준)
+    viz_frequency: 10.0           # Hz - 시각화 주파수 (성능 최적화)
+    dt: 0.1                     # seconds - 시간 간격 (더 정밀한 제어)
+    
+    # 시각화 설정 (성능 최적화를 위해 끄기 가능)
+    enable_visualization: true    # 전체 시각화 활성화 여부
+    enable_path_viz: true        # 최적 경로 시각화 여부
+    enable_obstacle_viz: true    # 장애물 시각화 여부  
+    enable_goal_viz: true        # 목표 마커 시각화 여부
+    enable_best_paths: true      # cost 낮은 경로들 시각화 여부 (최적 경로 포함)
+    num_best_paths: 10           # 시각화할 최적 경로 개수
+    
+    # 동역학 모델 선택
+    motion_model: 'ackermann'    # 'twist' 또는 'ackermann' - 물리적 정확성을 위해 ackermann 사용
+    
+    # MPPI 알고리즘 파라미터 (log-MPPI 수준 효율성)
+    horizon_steps: 30           # 예측 시간 스텝 수 (5초 예측으로 단축)
+    num_samples: 3000           # 샘플 궤적 개수 (성능 고려하여 감소)
+    lambda_: 1.0                # 온도 파라미터 (exploration vs exploitation)
+    sigma: [2.0, 1.0]           # [속도_노이즈, 조향각_노이즈] - Ackermann 모델용 (속도, 조향각)
+    
+    # 차량 제약 조건 (Ackermann 모델)
+    max_linear_vel: 1.0         # m/s - 최대 후륜 속도
+    max_angular_vel: 3.0        # rad/s - (Twist 호환성용, Ackermann에서는 미사용)
+    max_steering_angle: 0.461   # rad - 최대 전륜 조향각 (~26.4도)
+    wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
+    
+    # 비용 함수 가중치 설정 (균형잡힌 실용적 설정)
+    obstacle_cost:
+      safety_radius: 0.8         # m - 안전 반경 (HUNTER 2.0 크기 고려한 장애물과의 최소 거리)
+      max_range: 100.0           # m - 레이저 센서 최대 감지 거리
+      penalty_weight: 50.0       # 장애물 페널티 가중치 (안전하지만 유연한 회피)
+      exponential_factor: 2.5    # 지수 페널티 계수 (부드러운 회피)
+    
+    goal_cost:
+      goal_weight: 10.0          # 목표점 추적 가중치 (적극적이지만 안전한 추적)
+      angle_weight: 0.1          # 방향 추적 가중치 (향상된 방향 정렬)
+    
+    control_cost:
+      linear_weight: 3.0         # 직진 제어 노력 가중치 (부드러운 가속/감속)
+      angular_weight: 1.5        # 회전 제어 노력 가중치 (부드러운 회전)
+    
+    # 레이저 스캔 처리 설정
+    laser:
+      min_range: 0.1             # m - 최소 감지 거리
+      max_range: 100.0           # m - 최대 감지 거리 (시뮬레이션 환경)
+      angle_increment_filter: 1  # 각도 증분 필터
+      cluster_radius: 0.3        # m - 클러스터 반경
+      robot_radius: 0.2          # m - 로봇 반경
+    
+    # 로봇 외형 정의 (HUNTER 2.0: 980x745mm, 평면화된 좌표: [x1,y1,x2,y2,x3,y3,x4,y4])
+    footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+    footprint_padding: 0.05      # m - 외형 패딩 (안전 여유)
+
+/bae_mppi/sensor_processor:
+  ros__parameters:
+    processing_frequency: 20.0
