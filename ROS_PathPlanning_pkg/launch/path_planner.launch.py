@@ -4,16 +4,23 @@ import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
+from launch_ros.substitutions import FindPackageShare
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    
+    map_file = PathJoinSubstitution([
+                    FindPackageShare('gmserver'),
+                    'maps',
+                    '3x3_map.json'
+                ])
+
     # Declare launch argument for map file path
     map_file_arg = DeclareLaunchArgument(
         'map_file_path',
-        default_value='/home/d2-521-30/repo/local_ws/src/GraphMap_Server/maps/3x3_map.json',
+        # default_value='/home/d2-521-30/repo/local_ws/src/GraphMap_Server/maps/3x3_map.json',
+        default_value=map_file,
         description='Path to the JSON map file'
     )
     
