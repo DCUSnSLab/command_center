@@ -70,6 +70,9 @@ class MPPICoreNode(Node):
         self.declare_parameter('motion_cost.reverse_penalty_weight', 10.0)
         self.declare_parameter('motion_cost.min_forward_speed_preference', 0.2)
         self.declare_parameter('motion_cost.reverse_max_speed', -1.0)
+        self.declare_parameter('smoothness_cost.curvature_weight', 15.0)
+        self.declare_parameter('smoothness_cost.acceleration_weight', 10.0)
+        self.declare_parameter('goal_reached_threshold', 0.5)
         
         # Get parameters
         use_gpu = self.get_parameter('use_gpu').get_parameter_value().bool_value
@@ -116,7 +119,11 @@ class MPPICoreNode(Node):
             'min_forward_speed_preference': self.get_parameter('motion_cost.min_forward_speed_preference').get_parameter_value().double_value,
             'reverse_max_speed': self.get_parameter('motion_cost.reverse_max_speed').get_parameter_value().double_value,
         }
-        self.cost_function = CombinedCostFunction(device=self.device, obstacle_params=obstacle_params, motion_params=motion_params)
+        smoothness_params = {
+            'curvature_weight': self.get_parameter('smoothness_cost.curvature_weight').get_parameter_value().double_value,
+            'acceleration_weight': self.get_parameter('smoothness_cost.acceleration_weight').get_parameter_value().double_value,
+        }
+        self.cost_function = CombinedCostFunction(device=self.device, obstacle_params=obstacle_params, motion_params=motion_params, smoothness_params=smoothness_params)
         
         # Set goal cost parameters
         self.cost_function.goal_cost.goal_weight = self.get_parameter('goal_cost.goal_weight').get_parameter_value().double_value
@@ -179,7 +186,7 @@ class MPPICoreNode(Node):
         self.goal_pose = None
         self.latest_obstacles = None
         self.current_goal_id = ""
-        self.goal_reached_threshold = 0.5  # 50cm
+        self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
         
         # QoS profiles
         reliable_qos = QoSProfile(

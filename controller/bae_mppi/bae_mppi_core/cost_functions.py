@@ -388,6 +388,60 @@ class ControlEffortCost:
         return total_cost
 
 
+class SmoothnessCost:
+    """Cost function for encouraging smooth trajectories (penalize sudden changes)"""
+    
+    def __init__(self, curvature_weight=5.0, acceleration_weight=3.0, device='cpu'):
+        """
+        Initialize smoothness cost
+        
+        Args:
+            curvature_weight (float): Weight for penalizing high curvature (sharp turns)
+            acceleration_weight (float): Weight for penalizing rapid acceleration changes
+            device (str): PyTorch device
+        """
+        self.curvature_weight = curvature_weight
+        self.acceleration_weight = acceleration_weight
+        self.device = device
+        self.last_action = None
+    
+    def __call__(self, state, action):
+        """
+        Compute smoothness cost
+        
+        Args:
+            state (torch.Tensor): Robot states (K x 3)
+            action (torch.Tensor): Control actions [v, w/delta] (K x 2)
+            
+        Returns:
+            torch.Tensor: Smoothness costs (K,)
+        """
+        costs = torch.zeros(action.shape[0], device=self.device)
+        
+        # Penalize high curvature (sharp steering for Ackermann model)
+        if action.shape[1] > 1:  # Has steering/angular component
+            steering_angles = torch.abs(action[:, 1])  # |delta| or |w|
+            curvature_cost = self.curvature_weight * (steering_angles ** 2)
+            costs += curvature_cost
+        
+        # Penalize sudden acceleration changes
+        if self.last_action is not None and self.last_action.shape[0] == action.shape[0]:
+            velocity_diff = torch.abs(action[:, 0] - self.last_action[:, 0])
+            acceleration_cost = self.acceleration_weight * (velocity_diff ** 2)
+            costs += acceleration_cost
+            
+            # Penalize sudden steering changes
+            if action.shape[1] > 1:
+                steering_diff = torch.abs(action[:, 1] - self.last_action[:, 1])
+                steering_smooth_cost = self.acceleration_weight * (steering_diff ** 2)
+                costs += steering_smooth_cost
+        
+        # Update last action for next iteration
+        self.last_action = action.clone().detach()
+        
+        return costs
+
+
 class MotionDirectionCost:
     """Cost function for controlling motion direction (forward/reverse preference)"""
     
@@ -472,7 +526,7 @@ class MotionDirectionCost:
 class CombinedCostFunction:
     """Combined cost function that includes all individual costs"""
     
-    def __init__(self, device='cpu', obstacle_params=None, motion_params=None):
+    def __init__(self, device='cpu', obstacle_params=None, motion_params=None, smoothness_params=None):
         """
         Initialize combined cost function
         
@@ -480,6 +534,7 @@ class CombinedCostFunction:
             device (str): PyTorch device
             obstacle_params (dict): Parameters for obstacle avoidance cost
             motion_params (dict): Parameters for motion direction cost
+            smoothness_params (dict): Parameters for smoothness cost
         """
         self.device = device
         
@@ -509,6 +564,16 @@ class CombinedCostFunction:
             )
         else:
             self.motion_cost = MotionDirectionCost(device=device)
+        
+        # Initialize smoothness cost with custom parameters
+        if smoothness_params:
+            self.smoothness_cost = SmoothnessCost(
+                curvature_weight=smoothness_params.get('curvature_weight', 5.0),
+                acceleration_weight=smoothness_params.get('acceleration_weight', 3.0),
+                device=device
+            )
+        else:
+            self.smoothness_cost = SmoothnessCost(device=device)
     
     def update_obstacles(self, obstacle_points):
         """Update obstacles for avoidance cost"""
@@ -537,7 +602,8 @@ class CombinedCostFunction:
         goal_cost = self.goal_cost(state, action)
         control_cost = self.control_cost(state, action)
         motion_cost = self.motion_cost(state, action)
+        smoothness_cost = self.smoothness_cost(state, action)
         
-        total_cost = obstacle_cost + goal_cost + control_cost + motion_cost
+        total_cost = obstacle_cost + goal_cost + control_cost + motion_cost + smoothness_cost
         
         return total_cost
