@@ -66,6 +66,10 @@ class MPPICoreNode(Node):
         self.declare_parameter('obstacle_cost.exponential_factor', 3.0)
         self.declare_parameter('goal_cost.goal_weight', 0.3)
         self.declare_parameter('goal_cost.angle_weight', 0.5)
+        self.declare_parameter('motion_cost.allow_reverse', True)
+        self.declare_parameter('motion_cost.reverse_penalty_weight', 10.0)
+        self.declare_parameter('motion_cost.min_forward_speed_preference', 0.2)
+        self.declare_parameter('motion_cost.reverse_max_speed', -1.0)
         
         # Get parameters
         use_gpu = self.get_parameter('use_gpu').get_parameter_value().bool_value
@@ -106,7 +110,13 @@ class MPPICoreNode(Node):
             'penalty_weight': self.get_parameter('obstacle_cost.penalty_weight').get_parameter_value().double_value,
             'exponential_factor': self.get_parameter('obstacle_cost.exponential_factor').get_parameter_value().double_value,
         }
-        self.cost_function = CombinedCostFunction(device=self.device, obstacle_params=obstacle_params)
+        motion_params = {
+            'allow_reverse': self.get_parameter('motion_cost.allow_reverse').get_parameter_value().bool_value,
+            'reverse_penalty_weight': self.get_parameter('motion_cost.reverse_penalty_weight').get_parameter_value().double_value,
+            'min_forward_speed_preference': self.get_parameter('motion_cost.min_forward_speed_preference').get_parameter_value().double_value,
+            'reverse_max_speed': self.get_parameter('motion_cost.reverse_max_speed').get_parameter_value().double_value,
+        }
+        self.cost_function = CombinedCostFunction(device=self.device, obstacle_params=obstacle_params, motion_params=motion_params)
         
         # Set goal cost parameters
         self.cost_function.goal_cost.goal_weight = self.get_parameter('goal_cost.goal_weight').get_parameter_value().double_value

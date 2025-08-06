@@ -26,7 +26,7 @@
     sigma: [2.0, 1.0]           # [속도_노이즈, 조향각_노이즈] - Ackermann 모델용 (속도, 조향각)
     
     # 차량 제약 조건 (Ackermann 모델)
-    max_linear_vel: 1.0         # m/s - 최대 후륜 속도
+    max_linear_vel: 3.0         # m/s - 최대 후륜 속도
     max_angular_vel: 3.0        # rad/s - (Twist 호환성용, Ackermann에서는 미사용)
     max_steering_angle: 0.461   # rad - 최대 전륜 조향각 (~26.4도)
     wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
@@ -45,6 +45,12 @@
     control_cost:
       linear_weight: 3.0         # 직진 제어 노력 가중치 (부드러운 가속/감속)
       angular_weight: 1.5        # 회전 제어 노력 가중치 (부드러운 회전)
+    
+    motion_cost:
+      allow_reverse: true        # 후진 허용 여부
+      reverse_penalty_weight: 0.0  # 후진 페널티 가중치 (후진을 선호하지 않음)
+      min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s)
+      reverse_max_speed: -2.0    # 최대 후진 속도 제한 (m/s, 음수 값)
     
     # 레이저 스캔 처리 설정
     laser:

@@ -388,16 +388,98 @@ class ControlEffortCost:
         return total_cost
 
 
+class MotionDirectionCost:
+    """Cost function for controlling motion direction (forward/reverse preference)"""
+    
+    def __init__(self, allow_reverse=True, reverse_penalty_weight=10.0, 
+                 min_forward_speed_preference=0.2, reverse_max_speed=-1.0, device='cpu'):
+        """
+        Initialize motion direction cost
+        
+        Args:
+            allow_reverse (bool): Whether to allow reverse motion
+            reverse_penalty_weight (float): Penalty weight for reverse motion
+            min_forward_speed_preference (float): Speed below which forward motion is preferred
+            reverse_max_speed (float): Maximum allowed reverse speed (negative value)
+            device (str): PyTorch device
+        """
+        self.allow_reverse = allow_reverse
+        self.reverse_penalty_weight = reverse_penalty_weight
+        self.min_forward_speed_preference = min_forward_speed_preference
+        self.reverse_max_speed = reverse_max_speed
+        self.device = device
+        
+        # Status tracking for debugging
+        self.last_reverse_count = 0
+        self.last_forward_slow_count = 0
+    
+    def __call__(self, state, action):
+        """
+        Compute motion direction cost
+        
+        Args:
+            state (torch.Tensor): Robot states (K x 3)
+            action (torch.Tensor): Control actions [v, w/delta] (K x 2)
+            
+        Returns:
+            torch.Tensor: Motion direction costs (K,)
+        """
+        velocity = action[:, 0]  # Extract linear velocity
+        costs = torch.zeros_like(velocity, device=self.device)
+        
+        if not self.allow_reverse:
+            # Complete prohibition of reverse motion
+            backward_mask = velocity < 0.0
+            costs[backward_mask] = 1000.0  # High penalty for reverse
+            self.last_reverse_count = int(torch.sum(backward_mask))
+        else:
+            # Penalize reverse motion with configurable weight
+            backward_mask = velocity < 0.0
+            if torch.any(backward_mask):
+                # Apply penalty proportional to reverse speed
+                reverse_speeds = torch.abs(velocity[backward_mask])
+                costs[backward_mask] = self.reverse_penalty_weight * reverse_speeds
+            
+            self.last_reverse_count = int(torch.sum(backward_mask))
+            
+            # Limit excessive reverse speed
+            too_fast_reverse = velocity < self.reverse_max_speed
+            if torch.any(too_fast_reverse):
+                costs[too_fast_reverse] += 500.0  # High penalty for too fast reverse
+            
+            # Encourage forward motion at low speeds
+            if self.min_forward_speed_preference > 0.0:
+                slow_forward_mask = (velocity >= 0.0) & (velocity < self.min_forward_speed_preference)
+                if torch.any(slow_forward_mask):
+                    # Gentle encouragement for faster forward motion
+                    forward_bonus = (self.min_forward_speed_preference - velocity[slow_forward_mask]) * 2.0
+                    costs[slow_forward_mask] += forward_bonus
+                
+                self.last_forward_slow_count = int(torch.sum(slow_forward_mask))
+        
+        return costs
+    
+    def get_debug_info(self):
+        """Get debugging information about motion constraints"""
+        return {
+            'allow_reverse': self.allow_reverse,
+            'reverse_penalty_weight': self.reverse_penalty_weight,
+            'last_reverse_samples': self.last_reverse_count,
+            'last_slow_forward_samples': self.last_forward_slow_count
+        }
+
+
 class CombinedCostFunction:
     """Combined cost function that includes all individual costs"""
     
-    def __init__(self, device='cpu', obstacle_params=None):
+    def __init__(self, device='cpu', obstacle_params=None, motion_params=None):
         """
         Initialize combined cost function
         
         Args:
             device (str): PyTorch device
             obstacle_params (dict): Parameters for obstacle avoidance cost
+            motion_params (dict): Parameters for motion direction cost
         """
         self.device = device
         
@@ -415,6 +497,18 @@ class CombinedCostFunction:
             
         self.goal_cost = GoalTrackingCost(device=device)
         self.control_cost = ControlEffortCost(device=device)
+        
+        # Initialize motion direction cost with custom parameters
+        if motion_params:
+            self.motion_cost = MotionDirectionCost(
+                allow_reverse=motion_params.get('allow_reverse', True),
+                reverse_penalty_weight=motion_params.get('reverse_penalty_weight', 10.0),
+                min_forward_speed_preference=motion_params.get('min_forward_speed_preference', 0.2),
+                reverse_max_speed=motion_params.get('reverse_max_speed', -1.0),
+                device=device
+            )
+        else:
+            self.motion_cost = MotionDirectionCost(device=device)
     
     def update_obstacles(self, obstacle_points):
         """Update obstacles for avoidance cost"""
@@ -442,8 +536,8 @@ class CombinedCostFunction:
         obstacle_cost = self.obstacle_cost(state, action)
         goal_cost = self.goal_cost(state, action)
         control_cost = self.control_cost(state, action)
+        motion_cost = self.motion_cost(state, action)
         
-        total_cost = obstacle_cost + goal_cost + control_cost
-        
+        total_cost = obstacle_cost + goal_cost + control_cost + motion_cost
         
         return total_cost
