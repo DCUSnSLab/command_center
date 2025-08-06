@@ -6,6 +6,13 @@ colcon build --packages-select bae_mppi
 source install/setup.bash
 ```
 
+## Install dependency
+
+```bash
+pip install torch
+pip install arm_pytorch_utilities
+```
+
 ## Usage
 
 ### Launch the controller:
