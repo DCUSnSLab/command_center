@@ -17,6 +17,7 @@ from std_msgs.msg import Header
 
 # Custom messages
 from bae_mppi.msg import ProcessedObstacles, MPPIState, OptimalPath, HighCostPath
+from command_center_interfaces.msg import ControllerGoalStatus
 
 # Local modules
 from bae_mppi_core.pytorch_mppi import MPPI
@@ -36,6 +37,7 @@ class MPPICoreNode(Node):
         self.declare_parameter('topics.input.goal_pose', '/goal_pose')
         self.declare_parameter('topics.output.cmd_vel', '/ackermann_like_controller/cmd_vel')
         self.declare_parameter('topics.output.optimal_path', 'optimal_path')
+        self.declare_parameter('topics.output.goal_status', '/goal_status')
         
         # Parameters
         self.declare_parameter('use_gpu', True)
@@ -160,11 +162,14 @@ class MPPICoreNode(Node):
         goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
         cmd_vel_topic = self.get_parameter('topics.output.cmd_vel').get_parameter_value().string_value
         optimal_path_topic = self.get_parameter('topics.output.optimal_path').get_parameter_value().string_value
+        goal_status_topic = self.get_parameter('topics.output.goal_status').get_parameter_value().string_value
         
         # State variables
         self.current_state = None
         self.goal_pose = None
         self.latest_obstacles = None
+        self.current_goal_id = ""
+        self.goal_reached_threshold = 0.5  # 50cm
         
         # QoS profiles
         reliable_qos = QoSProfile(
@@ -186,6 +191,8 @@ class MPPICoreNode(Node):
             Twist, cmd_vel_topic, reliable_qos)
         self.optimal_path_pub = self.create_publisher(
             OptimalPath, optimal_path_topic, reliable_qos)
+        self.goal_status_pub = self.create_publisher(
+            ControllerGoalStatus, goal_status_topic, reliable_qos)
         
         # Control timer
         self.control_timer = self.create_timer(
@@ -232,7 +239,13 @@ class MPPICoreNode(Node):
         self.goal_pose = [x, y, yaw]
         self.cost_function.set_goal(self.goal_pose)
         
-        self.get_logger().info(f'New goal received: {self.goal_pose}')
+        # Extract goal_id from frame_id if available, otherwise generate one
+        if hasattr(msg.header, 'frame_id') and msg.header.frame_id:
+            self.current_goal_id = msg.header.frame_id
+        else:
+            self.current_goal_id = f"goal_{int(time.time())}"
+        
+        self.get_logger().info(f'New goal received: {self.goal_pose}, ID: {self.current_goal_id}')
     
     def control_callback(self):
         """Main control computation"""
@@ -307,10 +320,15 @@ class MPPICoreNode(Node):
             if self.enable_visualization and self.enable_path_viz:
                 self.publish_optimal_path(action)
             
-            # Check if goal reached (more lenient threshold)
+            # Check if goal reached and publish goal status
             goal_distance = torch.norm(self.current_state[:2] - torch.tensor(self.goal_pose[:2], device=self.device))
-            if goal_distance < 0.5:  # 20cm → 50cm (more forgiving goal achievement)
-                self.get_logger().info('Goal reached!')
+            goal_distance_float = float(goal_distance)
+            
+            # Publish goal status
+            self.publish_goal_status(goal_distance_float)
+            
+            if goal_distance < self.goal_reached_threshold:
+                self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m')
                 stop_msg = Twist()
                 self.cmd_vel_pub.publish(stop_msg)
             
@@ -323,6 +341,30 @@ class MPPICoreNode(Node):
         computation_time = (end_time - start_time) * 1000
         if computation_time > 150:  # Log if too slow
             self.get_logger().warn(f'MPPI computation: {computation_time:.1f}ms')
+    
+    def publish_goal_status(self, distance_to_goal: float):
+        """Publish goal status information"""
+        if self.goal_pose is None:
+            return
+            
+        status_msg = ControllerGoalStatus()
+        status_msg.header = Header()
+        status_msg.header.stamp = self.get_clock().now().to_msg()
+        status_msg.header.frame_id = 'odom'
+        
+        # Set goal information
+        status_msg.goal_id = self.current_goal_id
+        status_msg.distance_to_goal = distance_to_goal
+        
+        # Determine status
+        if distance_to_goal <= self.goal_reached_threshold:
+            status_msg.goal_reached = True
+            status_msg.status_code = 1  # SUCCEEDED
+        else:
+            status_msg.goal_reached = False
+            status_msg.status_code = 0  # PENDING
+        
+        self.goal_status_pub.publish(status_msg)
     
     def publish_optimal_path(self, action):
         """Publish optimal path for visualization"""

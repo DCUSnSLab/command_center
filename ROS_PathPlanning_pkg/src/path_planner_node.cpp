@@ -17,7 +17,7 @@
 #include <gmserver/msg/map_link.hpp>
 #include <gmserver/msg/gps_info.hpp>
 #include <gmserver/msg/utm_info.hpp>
-#include <scv_global_planner/msg/planned_path.hpp>
+#include <command_center_interfaces/msg/planned_path.hpp>
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -109,7 +109,7 @@ public:
         
         // Create publishers
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", 10);
-        planned_path_publisher_ = this->create_publisher<scv_global_planner::msg::PlannedPath>("planned_path_detailed", 10);
+        planned_path_publisher_ = this->create_publisher<command_center_interfaces::msg::PlannedPath>("planned_path_detailed", 10);
         nodes_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_nodes_viz", 10);
         links_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_links_viz", 10);
         map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
@@ -472,12 +472,12 @@ private:
         if (!path_nodes.empty()) {
             // Convert to ROS Path message and adjust for RViz
             nav_msgs::msg::Path planned_path;
-            planned_path.header.frame_id = "map";
+            planned_path.header.frame_id = "odom";
             planned_path.header.stamp = this->get_clock()->now();
             
             for (const auto& node : path_nodes) {
                 geometry_msgs::msg::PoseStamped pose_stamped;
-                pose_stamped.header.frame_id = "map";
+                pose_stamped.header.frame_id = "odom";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
                 pose_stamped.pose.position.x -= gps_ref_utm_easting_;
@@ -870,11 +870,11 @@ private:
     }
     
     // Create detailed planned path with nodes and links
-    scv_global_planner::msg::PlannedPath createDetailedPlannedPath(
+    command_center_interfaces::msg::PlannedPath createDetailedPlannedPath(
         const std::vector<std::shared_ptr<AStarNode>>& path_nodes,
         int start_node_id, int goal_node_id)
     {
-        scv_global_planner::msg::PlannedPath detailed_path;
+        command_center_interfaces::msg::PlannedPath detailed_path;
         
         // Set header
         detailed_path.header.frame_id = "map";
@@ -921,16 +921,20 @@ private:
             // UTM 좌표는 그대로 유지 (visualization용은 따로 조정됨)
             if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
                 node_idx != temp_start_node_id_ && node_idx != temp_goal_node_id_) {
-                // 실제 맵 노드의 경우 원본 GPS/UTM 정보 유지
+                // 실제 맵 노드의 경우 GPS 정보는 원본 유지, UTM은 odom frame으로 변환
                 map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
+                // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
+                map_node.utm_info.easting -= gps_ref_utm_easting_;
+                map_node.utm_info.northing -= gps_ref_utm_northing_;
             } else {
                 // Temporary 노드의 경우 pose에서 역산
                 map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
                 map_node.gps_info.longitude = 0.0;
                 map_node.gps_info.alt = path_nodes[i]->pose.position.z;
-                map_node.utm_info.easting = path_nodes[i]->pose.position.x;
-                map_node.utm_info.northing = path_nodes[i]->pose.position.y;
+                // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
+                map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
+                map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
                 map_node.utm_info.zone = "52N"; // K-City 기본 zone
             }
             
@@ -1048,7 +1052,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
-    rclcpp::Publisher<scv_global_planner::msg::PlannedPath>::SharedPtr planned_path_publisher_;
+    rclcpp::Publisher<command_center_interfaces::msg::PlannedPath>::SharedPtr planned_path_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr links_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;

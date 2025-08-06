@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(scv_global_planner)
+project(simple_behavior_planner)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -7,37 +7,18 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
+find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(gmserver REQUIRED)
 find_package(command_center_interfaces REQUIRED)
 
-# Add executable
-add_executable(path_planner_node src/path_planner_node.cpp)
+# Install Python modules
+ament_python_install_package(${PROJECT_NAME})
 
-# Specify libraries to link a library or executable target against
-ament_target_dependencies(path_planner_node
-  rclcpp
-  std_msgs
-  geometry_msgs
-  visualization_msgs
-  nav_msgs
-  sensor_msgs
-  tf2_ros
-  tf2
-  gmserver
-  command_center_interfaces
-)
-
-# Install executables
-install(TARGETS
-  path_planner_node
+# Install Python scripts
+install(PROGRAMS
+  scripts/simple_behavior_planner_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -58,8 +39,5 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
-
-# Export dependencies
-ament_export_dependencies(command_center_interfaces)
 
 ament_package()
