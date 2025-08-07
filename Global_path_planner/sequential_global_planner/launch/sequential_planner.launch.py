@@ -33,6 +33,12 @@ def generate_launch_description():
             description='Path publishing frequency in Hz'
         ),
         
+        DeclareLaunchArgument(
+            'gps_topic',
+            default_value='/gps/fix',
+            description='GPS topic name for reference point'
+        ),
+        
         # Sequential planner node
         Node(
             package='sequential_global_planner',
@@ -44,6 +50,7 @@ def generate_launch_description():
                 'auto_start': LaunchConfiguration('auto_start'),
                 'loop_path': LaunchConfiguration('loop_path'),
                 'publish_frequency': LaunchConfiguration('publish_frequency'),
+                'gps_topic': LaunchConfiguration('gps_topic'),
             }],
             remappings=[
                 ('/planned_path_detailed', '/planned_path_detailed'),

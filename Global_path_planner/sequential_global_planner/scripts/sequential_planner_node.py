@@ -17,6 +17,7 @@ from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import Header, String
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
+from sensor_msgs.msg import NavSatFix
 
 # Custom messages
 from command_center_interfaces.msg import PlannedPath
@@ -35,17 +36,22 @@ class SequentialPlannerNode(Node):
         self.declare_parameter('loop_path', False)
         self.declare_parameter('publish_frequency', 1.0)  # Hz
         
+        # GPS subscription parameter
+        self.declare_parameter('gps_topic', '/gps/fix')
+        
         # Get parameters
         self.map_file = self.get_parameter('map_file').get_parameter_value().string_value
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
         self.loop_path = self.get_parameter('loop_path').get_parameter_value().bool_value
         self.publish_freq = self.get_parameter('publish_frequency').get_parameter_value().double_value
+        self.gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
         
-        # GPS reference will be set from first waypoint in map file
+        # GPS reference - will be set from first GPS message
         self.gps_ref_lat = 0.0
         self.gps_ref_lon = 0.0
         self.gps_ref_utm_easting = 0.0
         self.gps_ref_utm_northing = 0.0
+        self.gps_reference_set = False
         
         # QoS profiles
         reliable_qos = QoSProfile(
@@ -63,6 +69,10 @@ class SequentialPlannerNode(Node):
             MarkerArray, '/sequential_path_markers', reliable_qos)
         self.status_pub = self.create_publisher(
             String, '/sequential_planner_status', reliable_qos)
+        
+        # GPS subscriber
+        self.gps_sub = self.create_subscription(
+            NavSatFix, self.gps_topic, self.gps_callback, reliable_qos)
         
         # Services (for future expansion)
         # self.start_service = self.create_service(...)
@@ -109,17 +119,9 @@ class SequentialPlannerNode(Node):
             for node in nodes:
                 self.nodes_data[node['ID']] = node
             
-            # Set GPS reference from first node
-            if nodes:
-                first_node = nodes[0]
-                self.gps_ref_lat = first_node['GpsInfo']['Lat']
-                self.gps_ref_lon = first_node['GpsInfo']['Long'] 
-                self.gps_ref_utm_easting = first_node['UtmInfo']['Easting']
-                self.gps_ref_utm_northing = first_node['UtmInfo']['Northing']
-                
-                self.get_logger().info(f'GPS reference set from first waypoint:')
-                self.get_logger().info(f'  GPS: ({self.gps_ref_lat:.8f}, {self.gps_ref_lon:.8f})')
-                self.get_logger().info(f'  UTM: ({self.gps_ref_utm_easting:.4f}, {self.gps_ref_utm_northing:.4f})')
+            # GPS reference will be set from first GPS message
+            self.get_logger().info('Waiting for first GPS message to set reference point...')
+            self.get_logger().info(f'Subscribed to GPS topic: {self.gps_topic}')
             
             # Store links
             self.links_data = map_data.get('Link', [])
@@ -409,7 +411,7 @@ class SequentialPlannerNode(Node):
     
     def publish_callback(self) -> None:
         """Timer callback to publish path and visualization"""
-        if not self.is_loaded or not self.auto_start:
+        if not self.is_loaded or not self.auto_start or not self.gps_reference_set:
             return
         
         # Publish PlannedPath only once
@@ -426,6 +428,51 @@ class SequentialPlannerNode(Node):
         # Publish visualization markers
         markers = self.create_visualization_markers()
         self.marker_pub.publish(markers)
+    
+    def gps_callback(self, msg: NavSatFix) -> None:
+        """GPS callback to set reference point from first GPS message"""
+        if not self.gps_reference_set:
+            # Convert GPS to UTM (simplified conversion)
+            import math
+            
+            lat_rad = math.radians(msg.latitude)
+            lon_rad = math.radians(msg.longitude)
+            
+            # Simple UTM conversion (zone 52N for Korea)
+            zone = 52
+            central_meridian = math.radians((zone - 1) * 6 - 180 + 3)
+            
+            # UTM conversion formulas
+            a = 6378137.0  # WGS84 semi-major axis
+            e2 = 0.00669437999014  # WGS84 eccentricity squared
+            k0 = 0.9996  # UTM scale factor
+            
+            N = a / math.sqrt(1 - e2 * math.sin(lat_rad)**2)
+            T = math.tan(lat_rad)**2
+            C = (e2 / (1 - e2)) * math.cos(lat_rad)**2
+            A = math.cos(lat_rad) * (lon_rad - central_meridian)
+            
+            M = a * ((1 - e2/4 - 3*e2**2/64) * lat_rad -
+                    (3*e2/8 + 3*e2**2/32) * math.sin(2*lat_rad) +
+                    (15*e2**2/256) * math.sin(4*lat_rad))
+            
+            easting = k0 * N * (A + (1-T+C)*A**3/6 + (5-18*T+T**2+72*C)*A**5/120) + 500000
+            northing = k0 * (M + N*math.tan(lat_rad)*(A**2/2 + (5-T+9*C+4*C**2)*A**4/24))
+            
+            # Set reference point
+            self.gps_ref_lat = msg.latitude
+            self.gps_ref_lon = msg.longitude
+            self.gps_ref_utm_easting = easting
+            self.gps_ref_utm_northing = northing
+            self.gps_reference_set = True
+            
+            self.get_logger().info('GPS reference point set from first GPS message:')
+            self.get_logger().info(f'  GPS: ({self.gps_ref_lat:.8f}, {self.gps_ref_lon:.8f})')
+            self.get_logger().info(f'  UTM: ({self.gps_ref_utm_easting:.4f}, {self.gps_ref_utm_northing:.4f})')
+            
+            # Now that we have GPS reference, start publishing if auto_start is enabled
+            if self.auto_start and self.is_loaded and not self.path_published:
+                self.publish_status("GPS reference set - starting path publication")
     
     def publish_status(self, message: str) -> None:
         """Publish status message"""
