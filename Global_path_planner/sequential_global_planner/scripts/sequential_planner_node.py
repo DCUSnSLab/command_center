@@ -31,23 +31,21 @@ class SequentialPlannerNode(Node):
         
         # Parameters
         self.declare_parameter('map_file', 'mando_full_map.json')
-        self.declare_parameter('gps_ref_latitude', 37.23965631)  # First waypoint as reference
-        self.declare_parameter('gps_ref_longitude', 126.7736361)
-        self.declare_parameter('gps_ref_utm_easting', 302516.9182)
-        self.declare_parameter('gps_ref_utm_northing', 4123781.294)
         self.declare_parameter('auto_start', True)
         self.declare_parameter('loop_path', False)
         self.declare_parameter('publish_frequency', 1.0)  # Hz
         
         # Get parameters
         self.map_file = self.get_parameter('map_file').get_parameter_value().string_value
-        self.gps_ref_lat = self.get_parameter('gps_ref_latitude').get_parameter_value().double_value
-        self.gps_ref_lon = self.get_parameter('gps_ref_longitude').get_parameter_value().double_value
-        self.gps_ref_utm_easting = self.get_parameter('gps_ref_utm_easting').get_parameter_value().double_value
-        self.gps_ref_utm_northing = self.get_parameter('gps_ref_utm_northing').get_parameter_value().double_value
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
         self.loop_path = self.get_parameter('loop_path').get_parameter_value().bool_value
         self.publish_freq = self.get_parameter('publish_frequency').get_parameter_value().double_value
+        
+        # GPS reference will be set from first waypoint in map file
+        self.gps_ref_lat = 0.0
+        self.gps_ref_lon = 0.0
+        self.gps_ref_utm_easting = 0.0
+        self.gps_ref_utm_northing = 0.0
         
         # QoS profiles
         reliable_qos = QoSProfile(
@@ -107,8 +105,21 @@ class SequentialPlannerNode(Node):
                 map_data = json.load(file)
             
             # Store nodes as dictionary for fast lookup
-            for node in map_data.get('Node', []):
+            nodes = map_data.get('Node', [])
+            for node in nodes:
                 self.nodes_data[node['ID']] = node
+            
+            # Set GPS reference from first node
+            if nodes:
+                first_node = nodes[0]
+                self.gps_ref_lat = first_node['GpsInfo']['Lat']
+                self.gps_ref_lon = first_node['GpsInfo']['Long'] 
+                self.gps_ref_utm_easting = first_node['UtmInfo']['Easting']
+                self.gps_ref_utm_northing = first_node['UtmInfo']['Northing']
+                
+                self.get_logger().info(f'GPS reference set from first waypoint:')
+                self.get_logger().info(f'  GPS: ({self.gps_ref_lat:.8f}, {self.gps_ref_lon:.8f})')
+                self.get_logger().info(f'  UTM: ({self.gps_ref_utm_easting:.4f}, {self.gps_ref_utm_northing:.4f})')
             
             # Store links
             self.links_data = map_data.get('Link', [])

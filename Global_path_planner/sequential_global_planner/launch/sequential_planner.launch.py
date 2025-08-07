@@ -44,10 +44,6 @@ def generate_launch_description():
                 'auto_start': LaunchConfiguration('auto_start'),
                 'loop_path': LaunchConfiguration('loop_path'),
                 'publish_frequency': LaunchConfiguration('publish_frequency'),
-                'gps_ref_latitude': 37.23965631,  # First waypoint from mando.csv
-                'gps_ref_longitude': 126.7736361,
-                'gps_ref_utm_easting': 302516.9182,
-                'gps_ref_utm_northing': 4123781.294,
             }],
             remappings=[
                 ('/planned_path_detailed', '/planned_path_detailed'),

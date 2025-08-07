@@ -50,6 +50,7 @@ class MPPICoreNode(Node):
         self.declare_parameter('max_steering_angle', 0.39)
         self.declare_parameter('max_angular_vel', 1.0)  # Added for twist model
         self.declare_parameter('wheelbase', 0.65)
+        self.declare_parameter('track_width', 0.0)  # Hunter track width parameter
         self.declare_parameter('dt', 0.1)
         self.declare_parameter('motion_model', 'twist')  # 'ackermann' or 'twist'
         
@@ -89,6 +90,7 @@ class MPPICoreNode(Node):
         max_steering_angle = self.get_parameter('max_steering_angle').get_parameter_value().double_value
         max_angular_vel = self.get_parameter('max_angular_vel').get_parameter_value().double_value
         wheelbase = self.get_parameter('wheelbase').get_parameter_value().double_value
+        self.track_width = self.get_parameter('track_width').get_parameter_value().double_value
         dt = self.get_parameter('dt').get_parameter_value().double_value
         self.motion_model = self.get_parameter('motion_model').get_parameter_value().string_value
         
@@ -319,12 +321,22 @@ class MPPICoreNode(Node):
                 cmd_msg.linear.x = float(action[0])   # vx
                 cmd_msg.angular.z = float(action[1])  # wz
             else:
-                # Ackermann model conversion (original logic)
+                # Ackermann model conversion (Hunter-compatible formula)
                 rear_wheel_velocity = float(action[0])
                 front_steering_angle = float(action[1])
                 
-                if abs(rear_wheel_velocity) > 0.01:
-                    angular_velocity = (rear_wheel_velocity / self.wheelbase) * torch.tan(action[1])
+                if abs(rear_wheel_velocity) > 0.01 and abs(front_steering_angle) > 0.005:
+                    # Hunter 공식과 동일: R = L/tan(δ) + track/2
+                    turning_radius = self.wheelbase / torch.tan(torch.abs(action[1])) + self.track_width / 2
+                    angular_velocity = rear_wheel_velocity / turning_radius
+                    
+                    # 조향 방향 고려
+                    if front_steering_angle < 0:
+                        angular_velocity = -angular_velocity
+                    
+                    # 후진시 각속도 방향 반전
+                    if rear_wheel_velocity < 0:
+                        angular_velocity = -angular_velocity
                 else:
                     angular_velocity = 0.0
                     

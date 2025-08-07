@@ -30,6 +30,7 @@
     max_angular_vel: 3.0        # rad/s - (Twist 호환성용, Ackermann에서는 미사용)
     max_steering_angle: 0.461   # rad - 최대 전륜 조향각 (~26.4도)
     wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
+    track_width: 0.0            # m - 좌우 바퀴 간격 (0이면 단순 Ackermann)
     
     # 비용 함수 가중치 설정 (균형잡힌 실용적 설정)
     obstacle_cost:
