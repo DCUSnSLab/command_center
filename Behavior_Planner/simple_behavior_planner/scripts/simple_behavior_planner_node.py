@@ -25,6 +25,11 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String, Header
 
+# TF2 for coordinate transformation
+import tf2_ros
+from tf2_ros import Buffer, TransformListener
+import tf2_geometry_msgs.tf2_geometry_msgs as tf2_geometry_msgs
+
 # Custom messages
 from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus
 
@@ -63,6 +68,11 @@ class SimpleBehaviorPlannerNode(Node):
         self.is_path_following = False
         self.emergency_stop_requested = False
         self.subgoal_published = False  # 현재 서브골이 발행되었는지 추적
+        self.last_completed_goal_id = None  # 마지막으로 완료된 goal_id 추적
+        
+        # TF2 for coordinate transformation
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # QoS profiles
         reliable_qos = QoSProfile(
@@ -139,12 +149,12 @@ class SimpleBehaviorPlannerNode(Node):
         self.planned_path = msg
         self.path_nodes = []
         
-        # Extract node positions from planned path
+        # Extract node positions from planned path (in map frame - absolute coordinates)
         for node in msg.path_data.nodes:
-            # UTM 좌표를 사용
+            # Store nodes in map frame coordinates (absolute UTM)
             node_pose = {
                 'id': node.id,
-                'x': node.utm_info.easting,
+                'x': node.utm_info.easting,  # Absolute UTM coordinates in map frame
                 'y': node.utm_info.northing,
                 'z': node.gps_info.alt
             }
@@ -154,6 +164,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.current_target_node_index = 0
         self.is_path_following = True
         self.subgoal_published = False  # 새로운 경로에 대해 서브골 발행 준비
+        self.last_completed_goal_id = None  # 새로운 경로 시작 시 완료된 goal_id 리셋
         
         self.get_logger().info(f'Received new planned path with {len(self.path_nodes)} nodes')
         self.get_logger().info(f'Path ID: {msg.path_id}, Start: {msg.start_node_id}, Goal: {msg.goal_node_id}')
@@ -165,8 +176,26 @@ class SimpleBehaviorPlannerNode(Node):
     
     def goal_status_callback(self, msg: ControllerGoalStatus):
         """목표 도달 상태 수신"""
+        # 현재 목표 노드가 있는지 확인
+        if not self.path_nodes or self.current_target_node_index >= len(self.path_nodes):
+            self.get_logger().debug(f'Received goal_status for {msg.goal_id} but no current target node')
+            return
+            
+        current_target_id = self.path_nodes[self.current_target_node_index]['id']
+        
+        # 현재 목표와 일치하는지 확인
+        if msg.goal_id != current_target_id:
+            self.get_logger().debug(f'Received goal_status for {msg.goal_id}, but current target is {current_target_id}. Ignoring.')
+            return
+            
+        # 이미 처리된 goal인지 확인 (중복 방지)
+        if self.last_completed_goal_id == msg.goal_id:
+            self.get_logger().debug(f'Goal {msg.goal_id} already processed. Ignoring duplicate status.')
+            return
+        
         if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
             self.get_logger().info(f'Goal {msg.goal_id} reached! Distance: {msg.distance_to_goal:.3f}m. Moving to next target node.')
+            self.last_completed_goal_id = msg.goal_id  # 완료된 goal_id 기록
             self.advance_to_next_node()
             self.subgoal_published = False  # 다음 서브골 발행 준비
         elif msg.status_code == 2:  # FAILED
@@ -213,34 +242,65 @@ class SimpleBehaviorPlannerNode(Node):
             return None
     
     def publish_subgoal(self, target_node: dict):
-        """서브골 발행"""
-        subgoal_msg = PoseStamped()
-        subgoal_msg.header = Header()
-        subgoal_msg.header.stamp = self.get_clock().now().to_msg()
-        subgoal_msg.header.frame_id = target_node['id']  # goal_id를 frame_id에 설정
-        
-        # UTM 좌표를 그대로 사용
-        subgoal_msg.pose.position.x = target_node['x']
-        subgoal_msg.pose.position.y = target_node['y']
-        subgoal_msg.pose.position.z = target_node['z']
-        
-        # 방향은 현재 위치에서 목표점으로의 방향으로 설정
-        if self.current_pose:
-            dx = target_node['x'] - self.current_pose.pose.position.x
-            dy = target_node['y'] - self.current_pose.pose.position.y
-            yaw = math.atan2(dy, dx)
+        """서브골 발행 - map 좌표를 odom 좌표로 변환하여 발행"""
+        try:
+            # Create pose in map frame
+            map_pose = PoseStamped()
+            map_pose.header = Header()
+            map_pose.header.stamp = self.get_clock().now().to_msg()
+            map_pose.header.frame_id = 'map'
             
-            # Quaternion 변환
-            subgoal_msg.pose.orientation.z = math.sin(yaw / 2.0)
-            subgoal_msg.pose.orientation.w = math.cos(yaw / 2.0)
-        else:
+            # Set position in map frame (absolute UTM coordinates)
+            map_pose.pose.position.x = target_node['x']
+            map_pose.pose.position.y = target_node['y'] 
+            map_pose.pose.position.z = target_node['z']
+            map_pose.pose.orientation.w = 1.0  # Default orientation
+            
+            # Transform from map to odom frame  
+            transform = self.tf_buffer.lookup_transform('odom', 'map', rclpy.time.Time())
+            odom_pose = tf2_geometry_msgs.do_transform_pose_stamped(map_pose, transform)
+            
+            # Set frame_id and goal_id
+            odom_pose.header.frame_id = target_node['id']  # goal_id를 frame_id에 설정
+            
+            # 방향은 현재 위치에서 목표점으로의 방향으로 설정 (odom 좌표계에서)
+            if self.current_pose:
+                dx = odom_pose.pose.position.x - self.current_pose.pose.position.x
+                dy = odom_pose.pose.position.y - self.current_pose.pose.position.y
+                yaw = math.atan2(dy, dx)
+                
+                # Quaternion 변환
+                odom_pose.pose.orientation.z = math.sin(yaw / 2.0)
+                odom_pose.pose.orientation.w = math.cos(yaw / 2.0)
+            
+            self.subgoal_pub.publish(odom_pose)
+            
+            # 서브골 발행 시마다 로그 출력
+            self.get_logger().info(f'Published NEW subgoal: Node {target_node["id"]} '
+                                 f'map({target_node["x"]:.2f}, {target_node["y"]:.2f}) -> '
+                                 f'odom({odom_pose.pose.position.x:.2f}, {odom_pose.pose.position.y:.2f})')
+        
+        except Exception as e:
+            self.get_logger().warn(f'Failed to transform subgoal from map to odom: {str(e)}')
+            self.get_logger().warn(f'Error details: {type(e).__name__}')
+            
+            # Check what transforms are available
+            all_frames = self.tf_buffer.all_frames_as_string()
+            self.get_logger().warn(f'Available frames: {all_frames}')
+            
+            # Fallback: publish without transformation (assumes map==odom for now)
+            subgoal_msg = PoseStamped()
+            subgoal_msg.header = Header()
+            subgoal_msg.header.stamp = self.get_clock().now().to_msg()
+            subgoal_msg.header.frame_id = target_node['id']
+            
+            subgoal_msg.pose.position.x = target_node['x']
+            subgoal_msg.pose.position.y = target_node['y']
+            subgoal_msg.pose.position.z = target_node['z']
             subgoal_msg.pose.orientation.w = 1.0
-        
-        self.subgoal_pub.publish(subgoal_msg)
-        
-        # 서브골 발행 시마다 로그 출력 (반복 발행이 없으므로)
-        self.get_logger().info(f'Published NEW subgoal: Node {target_node["id"]} '
-                             f'at UTM ({target_node["x"]:.2f}, {target_node["y"]:.2f})')
+            
+            self.subgoal_pub.publish(subgoal_msg)
+            self.get_logger().warn(f'Published subgoal without TF transformation: Node {target_node["id"]} at absolute coords')
     
     def advance_to_next_node(self):
         """다음 노드로 이동"""

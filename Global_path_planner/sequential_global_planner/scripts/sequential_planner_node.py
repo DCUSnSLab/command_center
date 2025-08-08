@@ -46,12 +46,10 @@ class SequentialPlannerNode(Node):
         self.publish_freq = self.get_parameter('publish_frequency').get_parameter_value().double_value
         self.gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
         
-        # GPS reference - will be set from first GPS message
-        self.gps_ref_lat = 0.0
-        self.gps_ref_lon = 0.0
-        self.gps_ref_utm_easting = 0.0
-        self.gps_ref_utm_northing = 0.0
-        self.gps_reference_set = False
+        # Map origin - will be set from localization map_origin topic
+        self.map_origin_utm_easting = 0.0
+        self.map_origin_utm_northing = 0.0
+        self.map_origin_set = False
         
         # QoS profiles
         reliable_qos = QoSProfile(
@@ -70,9 +68,8 @@ class SequentialPlannerNode(Node):
         self.status_pub = self.create_publisher(
             String, '/sequential_planner_status', reliable_qos)
         
-        # GPS subscriber
-        self.gps_sub = self.create_subscription(
-            NavSatFix, self.gps_topic, self.gps_callback, reliable_qos)
+        # Localization node name for parameter access
+        self.localization_node_name = 'tiny_localization_node'
         
         # Services (for future expansion)
         # self.start_service = self.create_service(...)
@@ -88,11 +85,17 @@ class SequentialPlannerNode(Node):
         self.publish_timer = self.create_timer(
             1.0 / self.publish_freq, self.publish_callback)
         
+        # Timer to check for map origin parameters
+        self.param_check_timer = self.create_timer(1.0, self.check_map_origin_params)
+        
         # Load map data
         self.load_map_file()
         
         if self.auto_start and self.is_loaded:
             self.publish_status("Sequential planner started - auto publishing path")
+            
+        # Try to get parameters immediately on startup
+        self.check_map_origin_params()
         
         self.get_logger().info(f'Sequential Planner Node initialized')
         self.get_logger().info(f'Map file: {self.map_file}')
@@ -119,9 +122,9 @@ class SequentialPlannerNode(Node):
             for node in nodes:
                 self.nodes_data[node['ID']] = node
             
-            # GPS reference will be set from first GPS message
-            self.get_logger().info('Waiting for first GPS message to set reference point...')
-            self.get_logger().info(f'Subscribed to GPS topic: {self.gps_topic}')
+            # Map origin will be set from localization parameters
+            self.get_logger().info('Waiting for map origin parameters from localization...')
+            self.get_logger().info(f'Will check parameters from /{self.localization_node_name}')
             
             # Store links
             self.links_data = map_data.get('Link', [])
@@ -222,9 +225,9 @@ class SequentialPlannerNode(Node):
             map_node.gps_info.longitude = node_data['GpsInfo']['Long']
             map_node.gps_info.alt = node_data['GpsInfo']['Alt']
             
-            # UTM info - convert to odom frame (subtract reference)
-            map_node.utm_info.easting = node_data['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            map_node.utm_info.northing = node_data['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            # UTM info - use absolute coordinates in map frame
+            map_node.utm_info.easting = node_data['UtmInfo']['Easting']
+            map_node.utm_info.northing = node_data['UtmInfo']['Northing'] 
             map_node.utm_info.zone = node_data['UtmInfo']['Zone']
             
             map_data.nodes.append(map_node)
@@ -271,9 +274,9 @@ class SequentialPlannerNode(Node):
             pose = PoseStamped()
             pose.header = nav_path.header
             
-            # Convert UTM to odom frame
-            pose.pose.position.x = node_data['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            pose.pose.position.y = node_data['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            # Convert UTM to odom frame (subtract map origin)
+            pose.pose.position.x = node_data['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            pose.pose.position.y = node_data['UtmInfo']['Northing'] - self.map_origin_utm_northing
             pose.pose.position.z = 0.0
             
             # Set orientation (pointing to next node)
@@ -303,8 +306,8 @@ class SequentialPlannerNode(Node):
             marker.action = Marker.ADD
             
             # Position
-            marker.pose.position.x = node_data['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            marker.pose.position.y = node_data['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            marker.pose.position.x = node_data['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            marker.pose.position.y = node_data['UtmInfo']['Northing'] - self.map_origin_utm_northing
             marker.pose.position.z = 0.0
             
             # Orientation
@@ -343,14 +346,14 @@ class SequentialPlannerNode(Node):
             
             # Start point
             start_point = Point()
-            start_point.x = from_node['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            start_point.y = from_node['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            start_point.x = from_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            start_point.y = from_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
             start_point.z = 0.0
             
             # End point  
             end_point = Point()
-            end_point.x = to_node['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            end_point.y = to_node['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            end_point.x = to_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            end_point.y = to_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
             end_point.z = 0.0
             
             marker.points = [start_point, end_point]
@@ -383,13 +386,13 @@ class SequentialPlannerNode(Node):
             marker.action = Marker.ADD
             
             start_point = Point()
-            start_point.x = from_node['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            start_point.y = from_node['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            start_point.x = from_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            start_point.y = from_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
             start_point.z = 0.0
             
             end_point = Point()
-            end_point.x = to_node['UtmInfo']['Easting'] - self.gps_ref_utm_easting
-            end_point.y = to_node['UtmInfo']['Northing'] - self.gps_ref_utm_northing
+            end_point.x = to_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
+            end_point.y = to_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
             end_point.z = 0.0
             
             marker.points = [start_point, end_point]
@@ -411,7 +414,7 @@ class SequentialPlannerNode(Node):
     
     def publish_callback(self) -> None:
         """Timer callback to publish path and visualization"""
-        if not self.is_loaded or not self.auto_start or not self.gps_reference_set:
+        if not self.is_loaded or not self.auto_start or not self.map_origin_set:
             return
         
         # Publish PlannedPath only once
@@ -429,50 +432,55 @@ class SequentialPlannerNode(Node):
         markers = self.create_visualization_markers()
         self.marker_pub.publish(markers)
     
-    def gps_callback(self, msg: NavSatFix) -> None:
-        """GPS callback to set reference point from first GPS message"""
-        if not self.gps_reference_set:
-            # Convert GPS to UTM (simplified conversion)
-            import math
-            
-            lat_rad = math.radians(msg.latitude)
-            lon_rad = math.radians(msg.longitude)
-            
-            # Simple UTM conversion (zone 52N for Korea)
-            zone = 52
-            central_meridian = math.radians((zone - 1) * 6 - 180 + 3)
-            
-            # UTM conversion formulas
-            a = 6378137.0  # WGS84 semi-major axis
-            e2 = 0.00669437999014  # WGS84 eccentricity squared
-            k0 = 0.9996  # UTM scale factor
-            
-            N = a / math.sqrt(1 - e2 * math.sin(lat_rad)**2)
-            T = math.tan(lat_rad)**2
-            C = (e2 / (1 - e2)) * math.cos(lat_rad)**2
-            A = math.cos(lat_rad) * (lon_rad - central_meridian)
-            
-            M = a * ((1 - e2/4 - 3*e2**2/64) * lat_rad -
-                    (3*e2/8 + 3*e2**2/32) * math.sin(2*lat_rad) +
-                    (15*e2**2/256) * math.sin(4*lat_rad))
-            
-            easting = k0 * N * (A + (1-T+C)*A**3/6 + (5-18*T+T**2+72*C)*A**5/120) + 500000
-            northing = k0 * (M + N*math.tan(lat_rad)*(A**2/2 + (5-T+9*C+4*C**2)*A**4/24))
-            
-            # Set reference point
-            self.gps_ref_lat = msg.latitude
-            self.gps_ref_lon = msg.longitude
-            self.gps_ref_utm_easting = easting
-            self.gps_ref_utm_northing = northing
-            self.gps_reference_set = True
-            
-            self.get_logger().info('GPS reference point set from first GPS message:')
-            self.get_logger().info(f'  GPS: ({self.gps_ref_lat:.8f}, {self.gps_ref_lon:.8f})')
-            self.get_logger().info(f'  UTM: ({self.gps_ref_utm_easting:.4f}, {self.gps_ref_utm_northing:.4f})')
-            
-            # Now that we have GPS reference, start publishing if auto_start is enabled
-            if self.auto_start and self.is_loaded and not self.path_published:
-                self.publish_status("GPS reference set - starting path publication")
+    def check_map_origin_params(self) -> None:
+        """Check if map origin parameters are available from localization node"""
+        if not self.map_origin_set:
+            try:
+                import subprocess
+                import json
+                
+                # Use ros2 param get command directly - more reliable
+                cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_easting']
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+                
+                if result.returncode == 0:
+                    # Extract the value from output like "Double value is: 482253.6011915017"
+                    easting_line = result.stdout.strip()
+                    if "Double value is:" in easting_line:
+                        easting = float(easting_line.split(":")[-1].strip())
+                        
+                        # Get northing
+                        cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_northing']
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+                        if result.returncode == 0 and "Double value is:" in result.stdout:
+                            northing = float(result.stdout.split(":")[-1].strip())
+                            
+                            # Get zone
+                            cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_zone']
+                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+                            if result.returncode == 0 and "Integer value is:" in result.stdout:
+                                zone = int(result.stdout.split(":")[-1].strip())
+                                
+                                # Successfully got all parameters
+                                self.map_origin_utm_easting = easting
+                                self.map_origin_utm_northing = northing
+                                self.map_origin_set = True
+                                
+                                # Cancel parameter check timer
+                                self.param_check_timer.cancel()
+                                
+                                self.get_logger().info('Map origin received from localization parameters:')
+                                self.get_logger().info(f'  UTM: ({self.map_origin_utm_easting:.4f}, {self.map_origin_utm_northing:.4f}) Zone {zone}')
+                                
+                                # Now that we have map origin, start publishing if auto_start is enabled
+                                if self.auto_start and self.is_loaded and not self.path_published:
+                                    self.publish_status("Map origin set - starting path publication")
+                                return
+                
+                self.get_logger().debug('Map origin parameters not ready yet')
+                        
+            except Exception as e:
+                self.get_logger().debug(f'Map origin parameters not ready: {e}')
     
     def publish_status(self, message: str) -> None:
         """Publish status message"""

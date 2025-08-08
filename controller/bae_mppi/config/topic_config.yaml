@@ -11,11 +11,11 @@
         odometry: '/odom'
         goal_pose: '/subgoal'
         # 제어 명령 모니터링 (steering validation용)
-        cmd_vel_monitor: '/cmd_vel'
+        cmd_vel_monitor: '/ackermann_like_controller/cmd_vel'
       
       output:
         # 제어 명령
-        cmd_vel: '/cmd_vel'
+        cmd_vel: '/ackermann_like_controller/cmd_vel'
         # 검증 및 디버깅
         steering_validation: '/steering_validation'
         # 내부 통신 토픽 (MPPI 노드간 통신)
