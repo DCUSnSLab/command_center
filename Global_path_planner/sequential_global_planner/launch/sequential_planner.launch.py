@@ -11,7 +11,7 @@ def generate_launch_description():
         # Launch arguments
         DeclareLaunchArgument(
             'map_file',
-            default_value='mando_full_map.json',
+            default_value='m.json',
             description='JSON map file to load'
         ),
         

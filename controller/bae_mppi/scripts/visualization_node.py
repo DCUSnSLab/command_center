@@ -158,19 +158,12 @@ class VisualizationNode(Node):
             self.get_logger().warn(f'Best paths visualization failed: {str(e)}')
     
     def publish_optimal_path(self):
-        """Publish optimal path as line marker"""
+        """Publish optimal path as line marker - Optimized"""
         if not self.latest_path or len(self.latest_path.path_points) == 0:
             return
         
-        # Convert to numpy array for visualizer
-        path_points = []
-        for point in self.latest_path.path_points:
-            path_points.append([point.x, point.y, 0.0])
-        
-        if len(path_points) < 2:
+        if len(self.latest_path.path_points) < 2:
             return
-        
-        path_array = np.array(path_points)
         
         # Create line marker
         marker = Marker()
@@ -187,14 +180,8 @@ class VisualizationNode(Node):
         marker.color.b = 0.0
         marker.color.a = 1.0
         
-        # Add points
-        from geometry_msgs.msg import Point
-        for point in path_points:
-            p = Point()
-            p.x = point[0]
-            p.y = point[1]
-            p.z = point[2]
-            marker.points.append(p)
+        # Direct point assignment - no intermediate conversions
+        marker.points = self.latest_path.path_points
         
         self.optimal_path_pub.publish(marker)
     
@@ -240,56 +227,60 @@ class VisualizationNode(Node):
         self.goal_marker_pub.publish(goal_marker)
     
     def publish_obstacle_markers(self):
-        """Publish obstacle markers"""
+        """Publish obstacle markers - Optimized single POINTS marker"""
         if not self.latest_obstacles or len(self.latest_obstacles.obstacle_points) == 0:
             return
         
         markers = MarkerArray()
         
-        for i, point in enumerate(self.latest_obstacles.obstacle_points):
-            marker = Marker()
-            marker.header = self.latest_obstacles.header
-            marker.ns = 'obstacles'
-            marker.id = i
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = point.x
-            marker.pose.position.y = point.y
-            marker.pose.position.z = point.z
-            marker.pose.orientation.w = 1.0
-            
-            marker.scale.x = 0.1
-            marker.scale.y = 0.1
-            marker.scale.z = 0.1
-            
-            marker.color.r = 1.0
-            marker.color.g = 0.0
-            marker.color.b = 0.0
-            marker.color.a = 0.8
-            
-            marker.lifetime.sec = 1  # 1 second lifetime
-            
-            markers.markers.append(marker)
+        # Single POINTS marker for all obstacles - much more efficient
+        marker = Marker()
+        marker.header = self.latest_obstacles.header
+        marker.ns = 'obstacles'
+        marker.id = 0
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
         
+        marker.pose.orientation.w = 1.0
+        
+        # Point size
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        marker.scale.z = 0.1
+        
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+        
+        marker.lifetime.sec = 1
+        
+        # Add all points to single marker
+        marker.points = self.latest_obstacles.obstacle_points
+        
+        markers.markers.append(marker)
         self.obstacle_markers_pub.publish(markers)
     
     def publish_best_paths(self):
-        """Publish best paths (lowest cost) as line markers"""
+        """Publish best paths (lowest cost) as line markers - Optimized"""
         if not self.latest_path or len(self.latest_path.high_cost_paths) == 0:
             return
         
+        # Limit number of best paths for performance
+        max_best_paths = min(5, len(self.latest_path.high_cost_paths))  # Show only top 5
+        
         markers = MarkerArray()
         
-        # Get cost range for normalization
-        all_costs = [path.path_cost for path in self.latest_path.high_cost_paths]
-        max_cost = max(all_costs) if all_costs else 1.0
-        min_cost = min(all_costs) if all_costs else 0.0
+        # Get cost range for normalization - only for paths we'll display
+        valid_paths = [path for path in self.latest_path.high_cost_paths[:max_best_paths] if len(path.path_points) >= 2]
+        if not valid_paths:
+            return
+            
+        all_costs = [path.path_cost for path in valid_paths]
+        max_cost = max(all_costs)
+        min_cost = min(all_costs)
         
-        for i, best_path in enumerate(self.latest_path.high_cost_paths):
-            if len(best_path.path_points) < 2:
-                continue
-                
+        for i, best_path in enumerate(valid_paths):
             marker = Marker()
             marker.header = self.latest_path.header
             marker.ns = 'best_paths'
@@ -297,23 +288,22 @@ class VisualizationNode(Node):
             marker.type = Marker.LINE_STRIP
             marker.action = Marker.ADD
             
-            # Set line properties - blue with varying alpha based on cost (lower cost = more opaque)
-            marker.scale.x = 0.03  # Slightly thicker than obstacles, thinner than main optimal path
+            # Set line properties - blue with varying alpha
+            marker.scale.x = 0.03
             marker.color.r = 0.2
             marker.color.g = 0.6
             marker.color.b = 1.0
-            # Use cost to determine transparency (lower cost = more opaque for best paths)
+            
+            # Use cost to determine transparency
             if max_cost > min_cost:
                 normalized_cost = (best_path.path_cost - min_cost) / (max_cost - min_cost)
-                marker.color.a = 0.8 - 0.4 * normalized_cost  # Alpha from 0.4 to 0.8 (inverted)
+                marker.color.a = 0.8 - 0.4 * normalized_cost
             else:
                 marker.color.a = 0.6
             
-            # Add points to marker
-            for point in best_path.path_points:
-                marker.points.append(point)
-            
-            marker.lifetime.sec = 1  # 1 second lifetime
+            # Direct point assignment
+            marker.points = best_path.path_points
+            marker.lifetime.sec = 1
             markers.markers.append(marker)
         
         self.best_paths_pub.publish(markers)
