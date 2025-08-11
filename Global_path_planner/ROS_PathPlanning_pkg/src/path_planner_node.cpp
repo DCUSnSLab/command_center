@@ -221,7 +221,7 @@ private:
         }
         
         map_nodes_.header.frame_id = "map";
-        map_nodes_.header.stamp = this->now();
+        map_nodes_.header.stamp = this->get_clock()->now();
         
         RCLCPP_INFO(this->get_logger(), "Converted %zu nodes from GraphMap to PoseArray", 
                    map_nodes_.poses.size());
@@ -304,7 +304,7 @@ private:
                 pose.position.y -= gps_ref_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
-                viz_marker.header.stamp = this->now();
+                viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
                 viz_marker.type = visualization_msgs::msg::Marker::CUBE;
@@ -322,7 +322,7 @@ private:
 
                 i++;
             }
-            viz_nodes.header.stamp = this->now();
+            viz_nodes.header.stamp = this->get_clock()->now();
             nodes_publisher_->publish(viz_nodes);
         }
         
@@ -334,7 +334,7 @@ private:
                 pose.position.y -= gps_ref_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
-                viz_marker.header.stamp = this->now();
+                viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
                 viz_marker.type = visualization_msgs::msg::Marker::SPHERE;
@@ -352,7 +352,7 @@ private:
 
                 i++;
             }
-            viz_links.header.stamp = this->now();
+            viz_links.header.stamp = this->get_clock()->now();
             links_publisher_->publish(viz_links);
             
         }
@@ -472,12 +472,12 @@ private:
         if (!path_nodes.empty()) {
             // Convert to ROS Path message and adjust for RViz
             nav_msgs::msg::Path planned_path;
-            planned_path.header.frame_id = "odom";
+            planned_path.header.frame_id = "map";
             planned_path.header.stamp = this->get_clock()->now();
             
             for (const auto& node : path_nodes) {
                 geometry_msgs::msg::PoseStamped pose_stamped;
-                pose_stamped.header.frame_id = "odom";
+                pose_stamped.header.frame_id = "map";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
                 pose_stamped.pose.position.x -= gps_ref_utm_easting_;
@@ -877,7 +877,7 @@ private:
         command_center_interfaces::msg::PlannedPath detailed_path;
         
         // Set header
-        detailed_path.header.frame_id = "map";
+        detailed_path.header.frame_id = "odom";
         detailed_path.header.stamp = this->get_clock()->now();
         
         // Set path metadata
@@ -1013,7 +1013,7 @@ private:
         // Create transform from map to odom based on GPS position
         geometry_msgs::msg::TransformStamped transform_stamped;
         
-        transform_stamped.header.stamp = this->now();
+        transform_stamped.header.stamp = this->get_clock()->now();
         transform_stamped.header.frame_id = "map";
         transform_stamped.child_frame_id = "odom";
         
@@ -1037,7 +1037,7 @@ private:
         }
         
         // Broadcast the transform
-        tf_broadcaster_->sendTransform(transform_stamped);
+        // tf_broadcaster_->sendTransform(transform_stamped);
         
         RCLCPP_DEBUG(this->get_logger(), 
                     "Published map->odom transform: GPS(%.6f, %.6f) -> UTM(%.2f, %.2f) -> offset(%.2f, %.2f), IMU: %s",

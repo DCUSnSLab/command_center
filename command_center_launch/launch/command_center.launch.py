@@ -15,6 +15,8 @@ def generate_launch_description():
     sequential_planner_launch_dir = os.path.join(get_package_share_directory('sequential_global_planner'), 'launch')
     
     return LaunchDescription([
+        use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+
         # Launch arguments
         DeclareLaunchArgument(
             'map_file',
@@ -45,7 +47,8 @@ def generate_launch_description():
                     ),
                     launch_arguments={
                         'current_position_topic': LaunchConfiguration('current_position_topic'),
-                        'goal_tolerance': '1.0'
+                        'goal_tolerance': '1.0',
+                        'use_sim_time': use_sim_time
                     }.items()
                 )
             ]
@@ -63,7 +66,8 @@ def generate_launch_description():
                         'map_file': LaunchConfiguration('map_file'),
                         'auto_start': 'true',
                         'loop_path': 'false',
-                        'publish_frequency': '1.0'
+                        'publish_frequency': '1.0',
+                        'use_sim_time': use_sim_time
                     }.items()
                 )
             ]

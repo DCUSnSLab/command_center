@@ -9,6 +9,8 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+
     # Launch arguments
     current_position_topic_arg = DeclareLaunchArgument(
         'current_position_topic',
@@ -73,6 +75,7 @@ def generate_launch_description():
             'emergency_stop_topic': LaunchConfiguration('emergency_stop_topic'),
             'lookahead_distance': LaunchConfiguration('lookahead_distance'),
             'goal_tolerance': LaunchConfiguration('goal_tolerance'),
+            'use_sim_time': use_sim_time
         }],
         remappings=[
             # Add topic remappings if needed
