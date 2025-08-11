@@ -2,11 +2,18 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
+from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    map_file = PathJoinSubstitution([
+                FindPackageShare('sequential_global_planner'),
+                'maps',
+                'm.json'
+            ])
+
     return LaunchDescription([
         # Launch arguments
         DeclareLaunchArgument(
