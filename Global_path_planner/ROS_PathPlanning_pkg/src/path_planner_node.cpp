@@ -72,17 +72,6 @@ public:
         // Declare parameters
         this->declare_parameter<std::string>("map_file_path", 
             "/home/ros2/ros2_ws/src/gmserver/maps/3x3_map.json");
-        this->declare_parameter<double>("gps_reference_latitude", 37.5665);
-        this->declare_parameter<double>("gps_reference_longitude", 126.9780);
-        this->declare_parameter<double>("gps_reference_altitude", 50.0);
-        
-        // Get GPS reference coordinates
-        this->get_parameter("gps_reference_latitude", gps_ref_lat_);
-        this->get_parameter("gps_reference_longitude", gps_ref_lon_);
-        this->get_parameter("gps_reference_altitude", gps_ref_alt_);
-        
-        // Calculate GPS reference UTM coordinates for goal transformation
-        gpsToUTM(gps_ref_lat_, gps_ref_lon_, gps_ref_utm_easting_, gps_ref_utm_northing_);
         
         // Initialize state variables
         current_gps_received_ = false;
@@ -93,6 +82,7 @@ public:
         has_temp_start_node_ = false;
         temp_goal_node_id_ = -2;
         temp_start_node_id_ = -3;
+        gps_ref_initialized_ = false;
         
         // Create service client for map loading
         map_client_ = this->create_client<gmserver::srv::LoadMap>("load_map");
@@ -375,11 +365,28 @@ private:
             return; // Invalid GPS fix
         }
         
+        // Initialize GPS reference coordinates from first valid GPS reading
+        if (!gps_ref_initialized_) {
+            gps_ref_lat_ = msg->latitude;
+            gps_ref_lon_ = msg->longitude;
+            gps_ref_alt_ = msg->altitude;
+            
+            // Calculate GPS reference UTM coordinates for goal transformation
+            gpsToUTM(gps_ref_lat_, gps_ref_lon_, gps_ref_utm_easting_, gps_ref_utm_northing_);
+            
+            gps_ref_initialized_ = true;
+            
+            RCLCPP_INFO(this->get_logger(), 
+                       "GPS reference initialized from first GPS reading: lat=%.6f, lon=%.6f, alt=%.2f -> UTM(%.2f, %.2f)", 
+                       gps_ref_lat_, gps_ref_lon_, gps_ref_alt_,
+                       gps_ref_utm_easting_, gps_ref_utm_northing_);
+        }
+        
         current_gps_ = *msg;
         current_gps_received_ = true;
         
         // Publish GPS-based map->odom transform
-        publishMapToOdomTransform(*msg);
+        // publishMapToOdomTransform(*msg); // 우선은 임시로 비활성화, tiny_localization에 있는 map->odom 변환을 사용하기로..
         
         RCLCPP_DEBUG(this->get_logger(), "GPS received: lat=%.6f, lon=%.6f", 
                     msg->latitude, msg->longitude);
@@ -392,7 +399,7 @@ private:
         
         // Update map->odom transform with new orientation if GPS is also available
         if (current_gps_received_) {
-            publishMapToOdomTransform(current_gps_);
+            // publishMapToOdomTransform(current_gps_); # 위의 gps 콜백과 마찬가지 내용
         }
         
         RCLCPP_DEBUG(this->get_logger(), "IMU received: orientation(%.3f, %.3f, %.3f, %.3f)", 
@@ -401,8 +408,8 @@ private:
     
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
-        if (!current_gps_received_) {
-            RCLCPP_WARN(this->get_logger(), "Goal received, but no GPS data yet. Waiting for GPS.");
+        if (!gps_ref_initialized_) {
+            RCLCPP_WARN(this->get_logger(), "Goal received, but GPS reference not initialized yet. Waiting for first GPS reading.");
             return;
         }
 
@@ -482,8 +489,8 @@ private:
     
     void checkAndPlanPath()
     {
-        // Only plan path when we have both current GPS and goal, and haven't planned for current goal yet
-        if (current_gps_received_ && goal_received_ && !path_planned_for_current_goal_) {
+        // Only plan path when we have GPS reference initialized, current GPS and goal, and haven't planned for current goal yet
+        if (gps_ref_initialized_ && current_gps_received_ && goal_received_ && !path_planned_for_current_goal_) {
             planPathFromGpsToGoal();
         }
     }
@@ -495,8 +502,8 @@ private:
             return;
         }
         
-        if (!current_gps_received_ || !goal_received_) {
-            RCLCPP_WARN(this->get_logger(), "GPS or Goal not available for path planning");
+        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
             return;
         }
         
@@ -544,6 +551,7 @@ private:
                 pose_stamped.pose = node->pose;
                 pose_stamped.pose.position.x -= gps_ref_utm_easting_;
                 pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                pose_stamped.pose.position.z = 0;
                 
                 planned_path.poses.push_back(pose_stamped);
             }
@@ -1143,12 +1151,13 @@ private:
     bool goal_received_;
     bool path_planned_for_current_goal_; // Flag to ensure single path planning per goal
     
-    // GPS reference coordinates for goal transformation
+    // GPS reference coordinates for goal transformation  
     double gps_ref_lat_;
     double gps_ref_lon_;
     double gps_ref_alt_;
     double gps_ref_utm_easting_;
     double gps_ref_utm_northing_;
+    bool gps_ref_initialized_; // Flag to track GPS reference initialization
     
     // A* algorithm data structures
     std::unordered_map<int, std::shared_ptr<AStarNode>> node_map_;
