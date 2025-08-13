@@ -4,9 +4,9 @@
     use_gpu: true                # GPU 사용 여부 (성능 향상)
     
     # 제어 설정 (log-MPPI 스타일 고빈도 제어)
-    control_frequency: 10.0       # Hz - 제어 주파수 (log-MPPI 수준)
+    control_frequency: 20.0       # Hz - 제어 주파수 (log-MPPI 수준)
     viz_frequency: 10.0           # Hz - 시각화 주파수 (성능 최적화)
-    dt: 0.1                     # seconds - 시간 간격 (더 정밀한 제어)
+    dt: 0.05                     # seconds - 시간 간격 (더 정밀한 제어)
     
     # 시각화 설정 (성능 최적화를 위해 끄기 가능)
     enable_visualization: true    # 전체 시각화 활성화 여부
@@ -20,15 +20,15 @@
     motion_model: 'ackermann'    # 'twist' 또는 'ackermann' - 물리적 정확성을 위해 ackermann 사용
     
     # MPPI 알고리즘 파라미터 (극도로 부드러운 경로 선호 설정)
-    horizon_steps: 40           # 예측 시간 스텝 수 (더 긴 예측으로 부드러운 계획)
-    num_samples: 3000           # 샘플 궤적 개수 (성능 고려하여 감소)
+    horizon_steps: 80           # 예측 시간 스텝 수 (더 긴 예측으로 부드러운 계획)
+    num_samples: 1000           # 샘플 궤적 개수 (성능 고려하여 감소)
     lambda_: 5.0                # 온도 파라미터 (5.0: 매우 보수적, 극도로 부드러운 선택)
     sigma: [0.5, 0.2]           # [속도_노이즈, 조향각_노이즈] - 매우 집중된 탐색
     
     # 차량 제약 조건 (Ackermann 모델)
-    max_linear_vel: 3.0         # m/s - 최대 후륜 속도
+    max_linear_vel: 1.5         # m/s - 최대 후륜 속도
     max_angular_vel: 3.0        # rad/s - (Twist 호환성용, Ackermann에서는 미사용)
-    max_steering_angle: 0.461   # rad - 최대 전륜 조향각 (~26.4도)
+    max_steering_angle: 0.19   # rad - 최대 전륜 조향각 (~26.4도)
     wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
     track_width: 0.0            # m - 좌우 바퀴 간격 (0이면 단순 Ackermann)
     
@@ -40,7 +40,7 @@
       exponential_factor: 2.5    # 지수 페널티 계수 (부드러운 회피)
     
     goal_cost:
-      goal_weight: 25.0          # 목표점 추적 가중치 (매우 강한 목표 지향성)
+      goal_weight: 1000.0          # 목표점 추적 가중치 (매우 강한 목표 지향성)
       angle_weight: 5.0          # 방향 추적 가중치 (강력한 방향 정렬)
     
     control_cost:
@@ -54,11 +54,11 @@
       reverse_max_speed: -2.0    # 최대 후진 속도 제한 (m/s, 음수 값)
     
     smoothness_cost:
-      curvature_weight: 15.0     # 급한 회전 억제 가중치 (직선 선호)
+      curvature_weight: 1000.0     # 급한 회전 억제 가중치 (직선 선호)
       acceleration_weight: 10.0  # 급한 가속/감속 억제 가중치 (부드러운 동작)
     
     # Goal 도달 임계값
-    goal_reached_threshold: 3.0  # m - goal 도달 판정 거리 (기본: 50cm)
+    goal_reached_threshold: 2.0  # m - goal 도달 판정 거리 (기본: 50cm)
     
     # 레이저 스캔 처리 설정
     laser:
