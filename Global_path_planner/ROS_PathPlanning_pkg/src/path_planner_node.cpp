@@ -9,6 +9,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -108,7 +109,7 @@ public:
         map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
         
         // Create TF broadcaster for map->odom transform
-        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
         
         // Create TF listener for coordinate transformations
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -164,6 +165,16 @@ private:
             if (response->success) {
                 // Store GraphMap data
                 graph_map_ = response->graph_map;
+
+                // Node 데이터 기반 아래 변수 초기화 진행
+                map_utm_easting_ = graph_map_.map_data.nodes[0].utm_info.easting;
+                map_utm_northing_ = graph_map_.map_data.nodes[0].utm_info.northing;
+                map_gps_lat_ = graph_map_.map_data.nodes[0].gps_info.lat;
+                map_gps_long_ = graph_map_.map_data.nodes[0].gps_info.longitude;
+                RCLCPP_INFO(this->get_logger(), "east %f", map_utm_easting_);
+                RCLCPP_INFO(this->get_logger(), "north %f", map_utm_northing_);
+                RCLCPP_INFO(this->get_logger(), "lat %f", map_gps_lat_);
+                RCLCPP_INFO(this->get_logger(), "long %f", map_gps_long_);
                 
                 // Convert GraphMap to PoseArray for compatibility with existing visualization
                 convertGraphMapToPoseArrays();
@@ -386,7 +397,11 @@ private:
         current_gps_received_ = true;
         
         // Publish GPS-based map->odom transform
-        // publishMapToOdomTransform(*msg); // 우선은 임시로 비활성화, tiny_localization에 있는 map->odom 변환을 사용하기로..
+        if (!map_tf_initialized_) {
+            RCLCPP_INFO(this->get_logger(), "if map_tf_initialized_ called");
+            publishMapToOdomTransform(*msg);
+            map_tf_initialized_ = true;
+        }
         
         RCLCPP_DEBUG(this->get_logger(), "GPS received: lat=%.6f, lon=%.6f", 
                     msg->latitude, msg->longitude);
@@ -396,11 +411,6 @@ private:
     {
         current_imu_ = *msg;
         current_imu_received_ = true;
-        
-        // Update map->odom transform with new orientation if GPS is also available
-        if (current_gps_received_) {
-            // publishMapToOdomTransform(current_gps_); # 위의 gps 콜백과 마찬가지 내용
-        }
         
         RCLCPP_DEBUG(this->get_logger(), "IMU received: orientation(%.3f, %.3f, %.3f, %.3f)", 
                     msg->orientation.x, msg->orientation.y, msg->orientation.z, msg->orientation.w);
@@ -513,6 +523,11 @@ private:
         // Convert GPS to UTM coordinates
         double start_utm_easting, start_utm_northing;
         gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
+
+        RCLCPP_INFO(this->get_logger(), "current gps lat %f", current_gps_.latitude);
+        RCLCPP_INFO(this->get_logger(), "current gps lon %f", current_gps_.longitude);
+        RCLCPP_INFO(this->get_logger(), "start utm east %f", start_utm_easting);
+        RCLCPP_INFO(this->get_logger(), "start utm north %f", start_utm_northing);
         
         // Goal has been converted to UTM coordinates in goalCallback
         double goal_x = goal_pose_.pose.position.x;
@@ -846,6 +861,12 @@ private:
     
     int createTemporaryStartNode(double start_x, double start_y)
     {
+        // 현재 차량의 GPS 위치는 시작 지점(Rviz에서는 odom 프레임)을 기준으로 하므로 Rviz에서의 중심 좌표(map 프레임)를 기준으로 변환 필요
+        geometry_msgs::msg::TransformStamped transform = 
+            tf_buffer_->lookupTransform(
+                "map",      // target frame
+                "odom",    // source frame
+                tf2::TimePointZero);
         temp_start_node_id_ = -3;
         
         // Create temporary start node pose
@@ -854,9 +875,12 @@ private:
         start_pose.position.y = start_y;
         start_pose.position.z = 0.0;
         start_pose.orientation.w = 1.0;
+
+        geometry_msgs::msg::Pose transformed_pose;
+        tf2::doTransform(start_pose, transformed_pose, transform);
         
         // Add temporary node to node map
-        auto temp_node = std::make_shared<AStarNode>(temp_start_node_id_, start_pose);
+        auto temp_node = std::make_shared<AStarNode>(temp_start_node_id_, transformed_pose);
         node_map_[temp_start_node_id_] = temp_node;
         
         // Find closest existing node
@@ -867,7 +891,7 @@ private:
         }
         
         // Calculate distance to closest node
-        double distance = calculateDistance(map_nodes_.poses[closest_node_id], start_pose);
+        double distance = calculateDistance(map_nodes_.poses[closest_node_id], transformed_pose);
         
         // Create bidirectional links between start node and closest existing node
         adjacency_list_[temp_start_node_id_].emplace_back(closest_node_id, temp_start_node_id_, distance);
@@ -1088,8 +1112,10 @@ private:
         transform_stamped.child_frame_id = "odom";
         
         // Set translation to GPS UTM position relative to reference point
-        transform_stamped.transform.translation.x = utm_easting - gps_ref_utm_easting_;
-        transform_stamped.transform.translation.y = utm_northing - gps_ref_utm_northing_;
+        // transform_stamped.transform.translation.x = utm_easting - gps_ref_utm_easting_;
+        // transform_stamped.transform.translation.y = utm_northing - gps_ref_utm_northing_;
+        transform_stamped.transform.translation.x = utm_easting - map_utm_easting_;
+        transform_stamped.transform.translation.y = utm_northing - map_utm_northing_;
         transform_stamped.transform.translation.z = gps.altitude - gps_ref_alt_;
         
         // Set rotation from IMU if available, otherwise no rotation
@@ -1107,7 +1133,7 @@ private:
         }
         
         // Broadcast the transform
-        // tf_broadcaster_->sendTransform(transform_stamped);
+        tf_broadcaster_->sendTransform(transform_stamped);
         
         RCLCPP_DEBUG(this->get_logger(), 
                     "Published map->odom transform: GPS(%.6f, %.6f) -> UTM(%.2f, %.2f) -> offset(%.2f, %.2f), IMU: %s",
@@ -1127,7 +1153,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr links_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    // std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     
@@ -1157,7 +1184,14 @@ private:
     double gps_ref_alt_;
     double gps_ref_utm_easting_;
     double gps_ref_utm_northing_;
+
+    double map_utm_easting_; // utm value of first Node in map data
+    double map_utm_northing_;
+    double map_gps_lat_; // lat lon value of first Node in map data
+    double map_gps_long_;
+
     bool gps_ref_initialized_; // Flag to track GPS reference initialization
+    bool map_tf_initialized_;
     
     // A* algorithm data structures
     std::unordered_map<int, std::shared_ptr<AStarNode>> node_map_;
