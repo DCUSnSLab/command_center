@@ -9,6 +9,9 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <gmserver/srv/load_map.hpp>
 #include <gmserver/msg/graph_map.hpp>
@@ -116,6 +119,10 @@ public:
         
         // Create TF broadcaster for map->odom transform
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        
+        // Create TF listener for coordinate transformations
+        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+        tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
         
         // Create timer for checking path planning conditions
         timer_ = this->create_wall_timer(
@@ -399,20 +406,75 @@ private:
             return;
         }
 
-        // RViz goal is relative to map origin, convert to absolute UTM coordinates
-        // Add GPS reference UTM coordinates to get absolute position
-        goal_pose_ = *msg;
-        goal_pose_.pose.position.x += gps_ref_utm_easting_;
-        goal_pose_.pose.position.y += gps_ref_utm_northing_;
-        // z coordinate can remain relative
+        // Transform goal to map frame based on frame_id
+        geometry_msgs::msg::PoseStamped goal_in_map_frame = *msg;
+        
+        if (msg->header.frame_id == "map") {
+            // Goal is already in map frame, convert to absolute UTM coordinates
+            goal_pose_ = *msg;
+            goal_pose_.pose.position.x += gps_ref_utm_easting_;
+            goal_pose_.pose.position.y += gps_ref_utm_northing_;
+            
+            RCLCPP_INFO(this->get_logger(), 
+                       "Goal received in map frame - Relative: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
+                       msg->pose.position.x, msg->pose.position.y,
+                       goal_pose_.pose.position.x, goal_pose_.pose.position.y);
+        } 
+        else if (msg->header.frame_id == "odom") {
+            // Goal is in odom frame, transform to map frame first
+            try {
+                // Transform from odom to map frame
+                geometry_msgs::msg::PoseStamped goal_in_map;
+                tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                
+                // Convert to absolute UTM coordinates
+                goal_pose_ = goal_in_map;
+                goal_pose_.pose.position.x += gps_ref_utm_easting_;
+                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                           "Goal received in odom frame - Odom: (%.2f, %.2f) -> Map: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
+                           msg->pose.position.x, msg->pose.position.y,
+                           goal_in_map.pose.position.x, goal_in_map.pose.position.y,
+                           goal_pose_.pose.position.x, goal_pose_.pose.position.y);
+            }
+            catch (const tf2::TransformException& ex) {
+                RCLCPP_ERROR(this->get_logger(), 
+                           "Failed to transform goal from odom to map frame: %s", ex.what());
+                return;
+            }
+        }
+        else {
+            // Unsupported frame_id, try to transform to map frame
+            try {
+                geometry_msgs::msg::PoseStamped goal_in_map;
+                tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                
+                // Convert to absolute UTM coordinates
+                goal_pose_ = goal_in_map;
+                goal_pose_.pose.position.x += gps_ref_utm_easting_;
+                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                           "Goal received in %s frame - Transformed to Map: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
+                           msg->header.frame_id.c_str(),
+                           goal_in_map.pose.position.x, goal_in_map.pose.position.y,
+                           goal_pose_.pose.position.x, goal_pose_.pose.position.y);
+            }
+            catch (const tf2::TransformException& ex) {
+                RCLCPP_ERROR(this->get_logger(), 
+                           "Failed to transform goal from %s to map frame: %s. Treating as map frame.", 
+                           msg->header.frame_id.c_str(), ex.what());
+                
+                // Fallback: treat as map frame
+                goal_pose_ = *msg;
+                goal_pose_.pose.position.x += gps_ref_utm_easting_;
+                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+            }
+        }
         
         goal_received_ = true;
         path_planned_for_current_goal_ = false; // Reset flag for new goal
-        
-        RCLCPP_INFO(this->get_logger(), 
-                   "Goal received - RViz: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
-                   msg->pose.position.x, msg->pose.position.y,
-                   goal_pose_.pose.position.x, goal_pose_.pose.position.y);
         
         // Trigger immediate path planning
         planPathFromGpsToGoal();
@@ -1058,6 +1120,8 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     
     // GraphMap data from gmserver
     gmserver::msg::GraphMap graph_map_;
