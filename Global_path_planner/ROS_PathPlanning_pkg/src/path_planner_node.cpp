@@ -302,6 +302,12 @@ private:
         visualization_msgs::msg::MarkerArray viz_graph;
         visualization_msgs::msg::Marker viz_marker;
 
+        geometry_msgs::msg::TransformStamped transform = 
+            tf_buffer_->lookupTransform(
+                "map",      // target frame
+                "odom",    // source frame
+                tf2::TimePointZero);
+
         int i = 0;
 
         // Adjust map nodes for RViz visualization
@@ -330,8 +336,13 @@ private:
 
                 i++;
             }
+            viz_nodes.header.frame_id = "odom";
             viz_nodes.header.stamp = this->get_clock()->now();
-            nodes_publisher_->publish(viz_nodes);
+
+            geometry_msgs::msg::PoseArray transformed_viz_nodes;
+            transformPoseArray(viz_nodes, transformed_viz_nodes, transform);
+
+            nodes_publisher_->publish(transformed_viz_nodes);
         }
         
         // Adjust map links for RViz visualization
@@ -361,10 +372,16 @@ private:
                 i++;
             }
             viz_links.header.stamp = this->get_clock()->now();
-            links_publisher_->publish(viz_links);
+
+            geometry_msgs::msg::PoseArray transformed_viz_links;
+            transformPoseArray(viz_links, transformed_viz_links, transform);
+
+            links_publisher_->publish(transformed_viz_links);
             
         }
 
+        visualization_msgs::msg::MarkerArray transformed_viz_graph;
+        transformMarkerArray(viz_graph, transformed_viz_graph, transform);
         map_viz_publisher_->publish(viz_graph);
         
         RCLCPP_DEBUG(this->get_logger(), "Published visualization data");
@@ -868,6 +885,13 @@ private:
                 "odom",    // source frame
                 tf2::TimePointZero);
         temp_start_node_id_ = -3;
+
+        // 차량이 최초 실행 위치(odom)에서 어느 정도 이동한 경우, 최초 시작 지점과 차량의 TF 변환을 추가해준다(odom -> base_link)
+        // geometry_msgs::msg::TransformStamped move_base_transform = 
+        //     tf_buffer_->lookupTransform(
+        //         "odom",      // target frame
+        //         "base_link",    // source frame
+        //         tf2::TimePointZero);
         
         // Create temporary start node pose
         geometry_msgs::msg::Pose start_pose;
@@ -878,6 +902,8 @@ private:
 
         geometry_msgs::msg::Pose transformed_pose;
         tf2::doTransform(start_pose, transformed_pose, transform);
+
+        // tf2::doTransform(transformed_pose, start_pose, move_base_transform);
         
         // Add temporary node to node map
         auto temp_node = std::make_shared<AStarNode>(temp_start_node_id_, transformed_pose);
@@ -1140,6 +1166,57 @@ private:
                     gps.latitude, gps.longitude, utm_easting, utm_northing,
                     transform_stamped.transform.translation.x, transform_stamped.transform.translation.y,
                     current_imu_received_ ? "available" : "not available");
+    }
+
+    // 현재 ROS 버전에서 특정 메시지형의 doTransform 미지원으로 인한 변환 함수 구현.
+    // 다른 코드에서도 쓸 수 있게 향후 tools 같은 디렉토리에 별도 클래스로 작성하는게 좋긴함
+    void transformPoseArray(
+        const geometry_msgs::msg::PoseArray& input,
+        geometry_msgs::msg::PoseArray& output,
+        const geometry_msgs::msg::TransformStamped& transform)
+    {
+        output.header = input.header;
+        output.poses.clear();
+        output.poses.reserve(input.poses.size());
+        
+        for (const auto& pose : input.poses) {
+            geometry_msgs::msg::Pose transformed_pose;
+            tf2::doTransform(pose, transformed_pose, transform);
+            output.poses.push_back(transformed_pose);
+        }
+    }
+
+    void transformMarkerArray(
+        const visualization_msgs::msg::MarkerArray& input,
+        visualization_msgs::msg::MarkerArray& output,
+        const geometry_msgs::msg::TransformStamped& transform)
+    {
+        output.markers.clear();
+        output.markers.reserve(input.markers.size());
+        
+        for (const auto& marker : input.markers) {
+            visualization_msgs::msg::Marker transformed_marker = marker;
+            
+            // Marker의 pose 변환
+            tf2::doTransform(marker.pose, transformed_marker.pose, transform);
+            
+            // Points가 있는 경우 (LINE_STRIP, LINE_LIST, POINTS 등)
+            if (!marker.points.empty()) {
+                transformed_marker.points.clear();
+                transformed_marker.points.reserve(marker.points.size());
+                
+                for (const auto& point : marker.points) {
+                    geometry_msgs::msg::Point transformed_point;
+                    tf2::doTransform(point, transformed_point, transform);
+                    transformed_marker.points.push_back(transformed_point);
+                }
+            }
+            
+            // Frame ID 업데이트 (필요한 경우)
+            transformed_marker.header.frame_id = transform.header.frame_id;
+            
+            output.markers.push_back(transformed_marker);
+        }
     }
     
     // Member variables
