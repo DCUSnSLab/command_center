@@ -10,6 +10,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
@@ -31,7 +33,8 @@ def generate_launch_description():
         name='global_path_planner_node',
         output='screen',
         parameters=[{
-            'map_file_path': LaunchConfiguration('map_file_path')
+            'map_file_path': LaunchConfiguration('map_file_path'),
+            'use_sim_time': use_sim_time
         }]
     )
     

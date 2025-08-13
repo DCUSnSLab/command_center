@@ -8,6 +8,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+
     map_file = PathJoinSubstitution([
                 FindPackageShare('sequential_global_planner'),
                 'maps',
@@ -58,6 +60,7 @@ def generate_launch_description():
                 'loop_path': LaunchConfiguration('loop_path'),
                 'publish_frequency': LaunchConfiguration('publish_frequency'),
                 'gps_topic': LaunchConfiguration('gps_topic'),
+                'use_sim_time': use_sim_time
             }],
             remappings=[
                 ('/planned_path_detailed', '/planned_path_detailed'),
