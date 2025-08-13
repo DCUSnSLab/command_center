@@ -15,6 +15,7 @@ find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(gmserver REQUIRED)
 find_package(command_center_interfaces REQUIRED)
 
@@ -31,6 +32,7 @@ ament_target_dependencies(path_planner_node
   sensor_msgs
   tf2_ros
   tf2
+  tf2_geometry_msgs
   gmserver
   command_center_interfaces
 )
