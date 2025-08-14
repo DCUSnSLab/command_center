@@ -84,6 +84,8 @@ public:
         temp_goal_node_id_ = -2;
         temp_start_node_id_ = -3;
         gps_ref_initialized_ = false;
+        map_tf_initialized_ = false;
+        first_node_initialized_ = false;
         
         // Create service client for map loading
         map_client_ = this->create_client<gmserver::srv::LoadMap>("load_map");
@@ -175,6 +177,8 @@ private:
                 RCLCPP_INFO(this->get_logger(), "north %f", map_utm_northing_);
                 RCLCPP_INFO(this->get_logger(), "lat %f", map_gps_lat_);
                 RCLCPP_INFO(this->get_logger(), "long %f", map_gps_long_);
+
+                first_node_initialized_ = true;
                 
                 // Convert GraphMap to PoseArray for compatibility with existing visualization
                 convertGraphMapToPoseArrays();
@@ -302,11 +306,11 @@ private:
         visualization_msgs::msg::MarkerArray viz_graph;
         visualization_msgs::msg::Marker viz_marker;
 
-        geometry_msgs::msg::TransformStamped transform = 
-            tf_buffer_->lookupTransform(
-                "map",      // target frame
-                "odom",    // source frame
-                tf2::TimePointZero);
+        // geometry_msgs::msg::TransformStamped transform = 
+        //     tf_buffer_->lookupTransform(
+        //         "odom",      // target frame
+        //         "map",    // source frame
+        //         tf2::TimePointZero);
 
         int i = 0;
 
@@ -336,13 +340,12 @@ private:
 
                 i++;
             }
-            viz_nodes.header.frame_id = "odom";
             viz_nodes.header.stamp = this->get_clock()->now();
 
-            geometry_msgs::msg::PoseArray transformed_viz_nodes;
-            transformPoseArray(viz_nodes, transformed_viz_nodes, transform);
+            //geometry_msgs::msg::PoseArray transformed_viz_nodes;
+            //transformPoseArray(viz_nodes, transformed_viz_nodes, transform);
 
-            nodes_publisher_->publish(transformed_viz_nodes);
+            nodes_publisher_->publish(viz_nodes);
         }
         
         // Adjust map links for RViz visualization
@@ -373,15 +376,16 @@ private:
             }
             viz_links.header.stamp = this->get_clock()->now();
 
-            geometry_msgs::msg::PoseArray transformed_viz_links;
-            transformPoseArray(viz_links, transformed_viz_links, transform);
+            //geometry_msgs::msg::PoseArray transformed_viz_links;
+            //transformPoseArray(viz_links, transformed_viz_links, transform);
 
-            links_publisher_->publish(transformed_viz_links);
+            links_publisher_->publish(viz_links);
             
         }
 
-        visualization_msgs::msg::MarkerArray transformed_viz_graph;
-        transformMarkerArray(viz_graph, transformed_viz_graph, transform);
+        //visualization_msgs::msg::MarkerArray transformed_viz_graph;
+        //transformMarkerArray(viz_graph, transformed_viz_graph, transform);
+
         map_viz_publisher_->publish(viz_graph);
         
         RCLCPP_DEBUG(this->get_logger(), "Published visualization data");
@@ -414,8 +418,7 @@ private:
         current_gps_received_ = true;
         
         // Publish GPS-based map->odom transform
-        if (!map_tf_initialized_) {
-            RCLCPP_INFO(this->get_logger(), "if map_tf_initialized_ called");
+        if (!map_tf_initialized_ && first_node_initialized_) {
             publishMapToOdomTransform(*msg);
             map_tf_initialized_ = true;
         }
@@ -581,8 +584,8 @@ private:
                 pose_stamped.header.frame_id = "map";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
-                pose_stamped.pose.position.x -= gps_ref_utm_easting_;
-                pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                // pose_stamped.pose.position.x -= gps_ref_utm_easting_;
+                // pose_stamped.pose.position.y -= gps_ref_utm_northing_;
                 pose_stamped.pose.position.z = 0;
                 
                 planned_path.poses.push_back(pose_stamped);
@@ -1143,6 +1146,11 @@ private:
         transform_stamped.transform.translation.x = utm_easting - map_utm_easting_;
         transform_stamped.transform.translation.y = utm_northing - map_utm_northing_;
         transform_stamped.transform.translation.z = gps.altitude - gps_ref_alt_;
+
+        RCLCPP_INFO(this->get_logger(), "TF utm east\t%f", utm_easting);
+        RCLCPP_INFO(this->get_logger(), "TF map utm east\t%f", map_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "TF utm north\t%f", utm_northing);
+        RCLCPP_INFO(this->get_logger(), "TF map utm north\t%f", map_utm_northing_);
         
         // Set rotation from IMU if available, otherwise no rotation
         if (current_imu_received_) {
@@ -1269,6 +1277,7 @@ private:
 
     bool gps_ref_initialized_; // Flag to track GPS reference initialization
     bool map_tf_initialized_;
+    bool first_node_initialized_;
     
     // A* algorithm data structures
     std::unordered_map<int, std::shared_ptr<AStarNode>> node_map_;
