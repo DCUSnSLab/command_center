@@ -194,8 +194,10 @@ private:
                            "Map loaded successfully: %zu nodes, %zu links", 
                            graph_map_.map_data.nodes.size(), graph_map_.map_data.links.size());
                 
-                // Publish visualization data
-                publishVisualizationData();
+                // Publish visualization data only after GPS reference is initialized
+                if (gps_ref_initialized_) {
+                    publishVisualizationData();
+                }
             } else {
                 RCLCPP_ERROR(this->get_logger(), "Failed to load map: %s", 
                             response->message.c_str());
@@ -314,6 +316,9 @@ private:
 
         int i = 0;
 
+        RCLCPP_INFO(this->get_logger(), "gps east %f", gps_ref_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "gps north %f", gps_ref_utm_northing_);
+
         // Adjust map nodes for RViz visualization
         if (!map_nodes_.poses.empty()) {
             geometry_msgs::msg::PoseArray viz_nodes = map_nodes_;
@@ -388,7 +393,7 @@ private:
 
         map_viz_publisher_->publish(viz_graph);
         
-        RCLCPP_DEBUG(this->get_logger(), "Published visualization data");
+        RCLCPP_INFO(this->get_logger(), "Published visualization data");
     }
     
     void gpsCallback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
@@ -412,6 +417,11 @@ private:
                        "GPS reference initialized from first GPS reading: lat=%.6f, lon=%.6f, alt=%.2f -> UTM(%.2f, %.2f)", 
                        gps_ref_lat_, gps_ref_lon_, gps_ref_alt_,
                        gps_ref_utm_easting_, gps_ref_utm_northing_);
+            
+            // Publish visualization data now that GPS reference is initialized
+            if (first_node_initialized_) {
+                publishVisualizationData();
+            }
         }
         
         current_gps_ = *msg;
@@ -1152,19 +1162,12 @@ private:
         RCLCPP_INFO(this->get_logger(), "TF utm north\t%f", utm_northing);
         RCLCPP_INFO(this->get_logger(), "TF map utm north\t%f", map_utm_northing_);
         
-        // Set rotation from IMU if available, otherwise no rotation
-        if (current_imu_received_) {
-            // Use IMU orientation directly
-            transform_stamped.transform.rotation = current_imu_.orientation;
-        } else {
-            // No rotation if IMU not available
-            tf2::Quaternion q;
-            q.setRPY(0, 0, 0);
-            transform_stamped.transform.rotation.x = q.x();
-            transform_stamped.transform.rotation.y = q.y();
-            transform_stamped.transform.rotation.z = q.z();
-            transform_stamped.transform.rotation.w = q.w();
-        }
+        tf2::Quaternion q;
+        q.setRPY(0, 0, 0);
+        transform_stamped.transform.rotation.x = q.x();
+        transform_stamped.transform.rotation.y = q.y();
+        transform_stamped.transform.rotation.z = q.z();
+        transform_stamped.transform.rotation.w = q.w();
         
         // Broadcast the transform
         tf_broadcaster_->sendTransform(transform_stamped);
