@@ -1,0 +1,30 @@
+# MPPI 시스템 토픽 설정
+# 각 노드별 input/output 토픽명을 관리
+
+/**:
+  ros__parameters:
+    # 토픽 설정
+    topics:
+      input:
+        # 센서 데이터
+        laser_scan: '/ptl/scan'
+        odometry: '/odom'
+        goal_pose: '/subgoal'
+        # 제어 명령 모니터링 (steering validation용)
+        cmd_vel_monitor: '/ackermann_like_controller/cmd_vel'
+      
+      output:
+        # 제어 명령
+        cmd_vel: '/ackermann_like_controller/cmd_vel'
+        # 검증 및 디버깅
+        steering_validation: '/steering_validation'
+        # 내부 통신 토픽 (MPPI 노드간 통신)
+        processed_obstacles: 'obstacles'
+        robot_state: 'state'
+        optimal_path: 'optimal_path'
+        # 시각화 토픽 (RViz 표시용)
+        optimal_path_marker: '/mppi_optimal_path'
+        best_paths_markers: '/mppi_best_paths'
+        nav_path: '/mppi_nav_path'
+        goal_marker: '/mppi_goal'
+        obstacle_markers: '/mppi_obstacles'
