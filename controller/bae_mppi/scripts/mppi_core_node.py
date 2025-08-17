@@ -267,6 +267,7 @@ class MPPICoreNode(Node):
         self.get_logger().info(f'New goal received: {self.goal_pose}, ID: {self.current_goal_id}')
     
     def control_callback(self):
+        # self.get_logger().info(f'control callback called')
         """Main control computation"""
         if self.current_state is None or self.goal_pose is None:
             return

@@ -14,13 +14,13 @@ def generate_launch_description():
     behavior_planner_launch_dir = os.path.join(get_package_share_directory('simple_behavior_planner'), 'launch')
     sequential_planner_launch_dir = os.path.join(get_package_share_directory('sequential_global_planner'), 'launch')
     
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')  # 시뮬레이션 환경인 경우 true, 밖이면 false
+    
     return LaunchDescription([
-        use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
-
         # Launch arguments
         DeclareLaunchArgument(
             'map_file',
-            default_value='mando_full_map.json',
+            default_value='20250807_v3.json',
             description='JSON map file for sequential planner'
         ),
         

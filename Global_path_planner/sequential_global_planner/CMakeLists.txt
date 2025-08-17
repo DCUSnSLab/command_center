@@ -14,10 +14,17 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-# Install Python scripts
+# Install main script with executable permissions
 install(PROGRAMS
   scripts/sequential_planner_node.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install utils module
+install(DIRECTORY
+  scripts/utils/
+  DESTINATION lib/${PROJECT_NAME}/utils
+  FILES_MATCHING PATTERN "*.py"
 )
 
 # Install launch files
@@ -26,7 +33,7 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
-# Install maps, config and utils
+# Install maps and config
 install(DIRECTORY
   maps/
   DESTINATION share/${PROJECT_NAME}/maps
@@ -35,11 +42,6 @@ install(DIRECTORY
 install(DIRECTORY
   config/
   DESTINATION share/${PROJECT_NAME}/config
-)
-
-install(DIRECTORY
-  utils/
-  DESTINATION share/${PROJECT_NAME}/utils
 )
 
 ament_package()

@@ -8,12 +8,12 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false') # 시뮬레이션 환경인 경우 true, 밖이면 false
 
     map_file = PathJoinSubstitution([
                 FindPackageShare('sequential_global_planner'),
                 'maps',
-                'm.json'
+                '20250807_v3.json'
             ])
 
     return LaunchDescription([

@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     """Launch distributed MPPI nodes"""
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false') # 시뮬레이션 환경인 경우 true, 밖이면 false
     # Get package directory
     bae_mppi_dir = get_package_share_directory('bae_mppi')
     config_file = os.path.join(bae_mppi_dir, 'config', 'mppi_params_ssc.yaml')
