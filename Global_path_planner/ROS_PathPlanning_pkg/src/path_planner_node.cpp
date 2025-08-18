@@ -461,8 +461,14 @@ private:
 
         // Transform goal to map frame based on frame_id
         geometry_msgs::msg::PoseStamped goal_in_map_frame = *msg;
+
+        RCLCPP_INFO(this->get_logger(), "gps_ref_utm east %f", gps_ref_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "gps_ref_utm north %f", gps_ref_utm_northing_);
+        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lat %f", current_gps_.latitude);
+        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lon %f", current_gps_.longitude);
         
         if (msg->header.frame_id == "map") {
+            RCLCPP_INFO(this->get_logger(), "frame_id : map");
             // Goal is already in map frame, convert to absolute UTM coordinates
             goal_pose_ = *msg;
             goal_pose_.pose.position.x += gps_ref_utm_easting_;
@@ -474,14 +480,19 @@ private:
                        goal_pose_.pose.position.x, goal_pose_.pose.position.y);
         } 
         else if (msg->header.frame_id == "odom") {
+            RCLCPP_INFO(this->get_logger(), "frame_id : odom");
             // Goal is in odom frame, transform to map frame first
             try {
                 // Transform from odom to map frame
                 geometry_msgs::msg::PoseStamped goal_in_map;
-                tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                // tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                
+                RCLCPP_INFO(this->get_logger(), "transform output x %f", goal_pose_.pose.position.x);
+                RCLCPP_INFO(this->get_logger(), "transform output y %f", goal_pose_.pose.position.y);
                 
                 // Convert to absolute UTM coordinates
-                goal_pose_ = goal_in_map;
+                // goal_pose_ = goal_in_map;
+                goal_pose_ = *msg;
                 goal_pose_.pose.position.x += gps_ref_utm_easting_;
                 goal_pose_.pose.position.y += gps_ref_utm_northing_;
                 
@@ -498,6 +509,7 @@ private:
             }
         }
         else {
+            RCLCPP_INFO(this->get_logger(), "frame_id : none");
             // Unsupported frame_id, try to transform to map frame
             try {
                 geometry_msgs::msg::PoseStamped goal_in_map;
@@ -525,6 +537,8 @@ private:
                 goal_pose_.pose.position.y += gps_ref_utm_northing_;
             }
         }
+        RCLCPP_INFO(this->get_logger(), "goalCallback goal pose x %f", goal_pose_.pose.position.x);
+        RCLCPP_INFO(this->get_logger(), "goalCallback goal pose y %f", goal_pose_.pose.position.y);
         
         goal_received_ = true;
         path_planned_for_current_goal_ = false; // Reset flag for new goal
@@ -568,6 +582,9 @@ private:
         // Goal has been converted to UTM coordinates in goalCallback
         double goal_x = goal_pose_.pose.position.x;
         double goal_y = goal_pose_.pose.position.y;
+
+        RCLCPP_INFO(this->get_logger(), "planPathFromGpsToGoal goal pose x %f", goal_pose_.pose.position.x);
+        RCLCPP_INFO(this->get_logger(), "planPathFromGpsToGoal goal pose y %f", goal_pose_.pose.position.y);
         
         // Create temporary start node at GPS position
         int start_node_id = createTemporaryStartNode(start_utm_easting, start_utm_northing);
