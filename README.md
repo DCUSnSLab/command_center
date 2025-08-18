@@ -31,3 +31,7 @@ ros2 launch pointcloud_to_laserscan velodyne_to_scan.launch.py
 
 - 시뮬레이션 환경에서 tiny_localization 장시간 실행 시 odom -> base_link TF 변환이 반시계축으로 회전하는 drift 발생
     - 해당 현상은 실제 차량에서는 발생하지 않음
+- 때때로 Marker, Path 시각화 맞지 않음
+    - Marker 갱신 문제이므로 Goal 지정 시 실제로는 정상적으로 동작하는듯?
+- Rviz의 fixed_frame이 map인 경우 오동작
+- Path planning 과정에서 Link의 존재 무시
