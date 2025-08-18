@@ -898,36 +898,16 @@ private:
     }
     
     int createTemporaryStartNode(double start_x, double start_y)
-    {
-        // 현재 차량의 GPS 위치는 시작 지점(Rviz에서는 odom 프레임)을 기준으로 하므로 Rviz에서의 중심 좌표(map 프레임)를 기준으로 변환 필요
-        geometry_msgs::msg::TransformStamped transform = 
-            tf_buffer_->lookupTransform(
-                "map",      // target frame
-                "odom",    // source frame
-                tf2::TimePointZero);
-        temp_start_node_id_ = -3;
-
-        // 차량이 최초 실행 위치(odom)에서 어느 정도 이동한 경우, 최초 시작 지점과 차량의 TF 변환을 추가해준다(odom -> base_link)
-        // geometry_msgs::msg::TransformStamped move_base_transform = 
-        //     tf_buffer_->lookupTransform(
-        //         "odom",      // target frame
-        //         "base_link",    // source frame
-        //         tf2::TimePointZero);
-        
+    {   
         // Create temporary start node pose
         geometry_msgs::msg::Pose start_pose;
         start_pose.position.x = start_x;
         start_pose.position.y = start_y;
         start_pose.position.z = 0.0;
         start_pose.orientation.w = 1.0;
-
-        geometry_msgs::msg::Pose transformed_pose;
-        tf2::doTransform(start_pose, transformed_pose, transform);
-
-        // tf2::doTransform(transformed_pose, start_pose, move_base_transform);
         
         // Add temporary node to node map
-        auto temp_node = std::make_shared<AStarNode>(temp_start_node_id_, transformed_pose);
+        auto temp_node = std::make_shared<AStarNode>(temp_start_node_id_, start_pose);
         node_map_[temp_start_node_id_] = temp_node;
         
         // Find closest existing node
@@ -938,7 +918,7 @@ private:
         }
         
         // Calculate distance to closest node
-        double distance = calculateDistance(map_nodes_.poses[closest_node_id], transformed_pose);
+        double distance = calculateDistance(map_nodes_.poses[closest_node_id], start_pose);
         
         // Create bidirectional links between start node and closest existing node
         adjacency_list_[temp_start_node_id_].emplace_back(closest_node_id, temp_start_node_id_, distance);
