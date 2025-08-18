@@ -271,7 +271,7 @@ private:
                 
                 // Add bidirectional links (roads can be traversed in both directions)
                 adjacency_list_[from_node_idx].emplace_back(to_node_idx, from_node_idx, distance);
-                adjacency_list_[to_node_idx].emplace_back(from_node_idx, to_node_idx, distance);
+                // adjacency_list_[to_node_idx].emplace_back(from_node_idx, to_node_idx, distance);
                 
                 RCLCPP_DEBUG(this->get_logger(), "Connected nodes %d (%s) <-> %d (%s) (distance: %.2f)", 
                            from_node_idx, link.from_node_id.c_str(), to_node_idx, link.to_node_id.c_str(), distance);
@@ -323,6 +323,7 @@ private:
 
         // Adjust map nodes for RViz visualization
         if (!map_nodes_.poses.empty()) {
+            RCLCPP_INFO(this->get_logger(), "nodes viz init");
             geometry_msgs::msg::PoseArray viz_nodes = map_nodes_;
             for (auto& pose : viz_nodes.poses) {
                 //pose.position.x -= gps_ref_utm_easting_;
@@ -359,6 +360,7 @@ private:
         
         // Adjust map links for RViz visualization
         if (!map_links_.poses.empty()) {
+            RCLCPP_INFO(this->get_logger(), "links viz init");
             geometry_msgs::msg::PoseArray viz_links = map_links_;
             for (auto& pose : viz_links.poses) {
                 //pose.position.x -= gps_ref_utm_easting_;
@@ -370,7 +372,7 @@ private:
                 viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::SPHERE;
+                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
                 viz_marker.scale.x = 3.0;
                 viz_marker.scale.y = 3.0;
                 viz_marker.scale.z = 3.0;
