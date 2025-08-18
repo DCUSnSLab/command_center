@@ -318,13 +318,17 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "gps east %f", gps_ref_utm_easting_);
         RCLCPP_INFO(this->get_logger(), "gps north %f", gps_ref_utm_northing_);
+        RCLCPP_INFO(this->get_logger(), "map east\t%f", map_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "map north\t%f", map_utm_northing_);
 
         // Adjust map nodes for RViz visualization
         if (!map_nodes_.poses.empty()) {
             geometry_msgs::msg::PoseArray viz_nodes = map_nodes_;
             for (auto& pose : viz_nodes.poses) {
-                pose.position.x -= gps_ref_utm_easting_;
-                pose.position.y -= gps_ref_utm_northing_;
+                //pose.position.x -= gps_ref_utm_easting_;
+                //pose.position.y -= gps_ref_utm_northing_;
+                pose.position.x -= map_utm_easting_;
+                pose.position.y -= map_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
                 viz_marker.header.stamp = this->get_clock()->now();
@@ -357,8 +361,10 @@ private:
         if (!map_links_.poses.empty()) {
             geometry_msgs::msg::PoseArray viz_links = map_links_;
             for (auto& pose : viz_links.poses) {
-                pose.position.x -= gps_ref_utm_easting_;
-                pose.position.y -= gps_ref_utm_northing_;
+                //pose.position.x -= gps_ref_utm_easting_;
+                //pose.position.y -= gps_ref_utm_northing_;
+                pose.position.x -= map_utm_easting_;
+                pose.position.y -= map_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
                 viz_marker.header.stamp = this->get_clock()->now();
@@ -594,8 +600,10 @@ private:
                 pose_stamped.header.frame_id = "map";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
-                // pose_stamped.pose.position.x -= gps_ref_utm_easting_;
-                // pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                //pose_stamped.pose.position.x -= gps_ref_utm_easting_;
+                //pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                pose_stamped.pose.position.x -= map_utm_easting_;
+                pose_stamped.pose.position.y -= map_utm_northing_;
                 pose_stamped.pose.position.z = 0;
                 
                 planned_path.poses.push_back(pose_stamped);
