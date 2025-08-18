@@ -1063,16 +1063,21 @@ private:
                 map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
                 // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
-                map_node.utm_info.easting -= gps_ref_utm_easting_;
-                map_node.utm_info.northing -= gps_ref_utm_northing_;
+                //map_node.utm_info.easting -= gps_ref_utm_easting_;
+                //map_node.utm_info.northing -= gps_ref_utm_northing_;
+                map_node.utm_info.easting -= map_utm_easting_;
+                map_node.utm_info.northing -= map_utm_northing_;
+                
             } else {
                 // Temporary 노드의 경우 pose에서 역산
                 map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
                 map_node.gps_info.longitude = 0.0;
                 map_node.gps_info.alt = path_nodes[i]->pose.position.z;
                 // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
-                map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
-                map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
+                //map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
+                //map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
+                map_node.utm_info.easting = path_nodes[i]->pose.position.x - map_utm_easting_;
+                map_node.utm_info.northing = path_nodes[i]->pose.position.y - map_utm_northing_;
                 map_node.utm_info.zone = "52N"; // K-City 기본 zone
             }
             
