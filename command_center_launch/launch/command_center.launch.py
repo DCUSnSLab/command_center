@@ -14,13 +14,13 @@ def generate_launch_description():
     behavior_planner_launch_dir = os.path.join(get_package_share_directory('simple_behavior_planner'), 'launch')
     sequential_planner_launch_dir = os.path.join(get_package_share_directory('sequential_global_planner'), 'launch')
     
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')  # 시뮬레이션 환경인 경우 true, 밖이면 false
+    
     return LaunchDescription([
-        use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
-
         # Launch arguments
         DeclareLaunchArgument(
             'map_file',
-            default_value='m.json',
+            default_value='20250807_v3.json',
             description='JSON map file for sequential planner'
         ),
         
@@ -30,16 +30,16 @@ def generate_launch_description():
             description='Current position topic for behavior planner'
         ),
         
-        # 1. MPPI Controller - 가장 먼저 시작 (distributed launch)
+        # 1. MPPI Controller
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(bae_mppi_launch_dir, 'mppi_distributed.launch.py')
             )
         ),
         
-        # 2. Simple Behavior Planner - 2초 후 시작
+        # 2. Simple Behavior Planner
         TimerAction(
-            period=2.0,
+            period=1.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(
@@ -54,9 +54,9 @@ def generate_launch_description():
             ]
         ),
         
-        # 3. Sequential Global Planner - 4초 후 시작
+        # 3. Sequential Global Planner
         TimerAction(
-            period=4.0,
+            period=2.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(

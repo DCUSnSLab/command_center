@@ -232,51 +232,90 @@ class MPPI():
         self.U = self.noise_dist.sample((self.T,))
 
     def _compute_rollout_costs(self, perturbed_actions):
+        rollout_start = time.perf_counter()
+        
         K, T, nu = perturbed_actions.shape
         assert nu == self.nu
+        print(f"[ROLLOUT VECTORIZED] Samples K={K}, Time steps T={T}, Controls nu={nu}")
 
-        cost_total = torch.zeros(K, device=self.d, dtype=self.dtype)
-        cost_samples = cost_total.repeat(self.M, 1)
-        cost_var = torch.zeros_like(cost_total)
-
-        # allow propagation of a sample of states (ex. to carry a distribution), or to start with a single state
+        # Setup phase
+        setup_start = time.perf_counter()
+        
+        # Get initial state for all samples
         if self.state.shape == (K, self.nx):
-            state = self.state
+            initial_state = self.state
         else:
-            state = self.state.view(1, -1).repeat(K, 1)
+            initial_state = self.state.view(1, -1).repeat(K, 1)
+        
+        setup_end = time.perf_counter()
+        setup_time = (setup_end - setup_start) * 1000
+        print(f"[ROLLOUT VECTORIZED] Setup: {setup_time:.3f}ms")
 
-        # rollout action trajectory M times to estimate expected cost
-        state = state.repeat(self.M, 1, 1)
+        # VECTORIZED ROLLOUT - Major optimization!
+        vectorized_start = time.perf_counter()
+        
+        # Use vectorized dynamics rollout
+        if hasattr(self.F, 'rollout_batch'):
+            scaled_actions = self.u_scale * perturbed_actions
+            states = self.F.rollout_batch(initial_state, scaled_actions)  # [K, T, nx]
+            print(f"[ROLLOUT VECTORIZED] Using batch dynamics rollout")
+        else:
+            # Fallback to sequential method
+            print(f"[ROLLOUT VECTORIZED] Fallback to sequential dynamics")
+            states = torch.zeros(K, T, self.nx, device=self.d, dtype=self.dtype)
+            current_state = initial_state
+            for t in range(T):
+                u = self.u_scale * perturbed_actions[:, t]
+                next_state = self._dynamics(current_state, u, t)
+                next_state = self._sample_specific_dynamics(next_state, current_state, u, t)
+                states[:, t] = next_state
+                current_state = next_state
+        
+        vectorized_end = time.perf_counter()
+        vectorized_time = (vectorized_end - vectorized_start) * 1000
+        print(f"[ROLLOUT VECTORIZED] Dynamics computation: {vectorized_time:.3f}ms")
 
-        states = []
-        actions = []
-        for t in range(T):
-            u = self.u_scale * perturbed_actions[:, t].repeat(self.M, 1, 1)
-            next_state = self._dynamics(state, u, t)
-            # potentially handle dynamics in a specific way for the specific action sampler
-            next_state = self._sample_specific_dynamics(next_state, state, u, t)
-            state = next_state
-            c = self._running_cost(state, u, t)
-            cost_samples = cost_samples + c
-            if self.M > 1:
-                cost_var += c.var(dim=0) * (self.rollout_var_discount ** t)
+        # VECTORIZED COST COMPUTATION
+        cost_start = time.perf_counter()
+        
+        # Use vectorized cost computation if available
+        if hasattr(self.running_cost, 'rollout_batch'):
+            scaled_actions = self.u_scale * perturbed_actions
+            rollout_cost = self.running_cost.rollout_batch(states, scaled_actions)
+            print(f"[ROLLOUT VECTORIZED] Using batch cost computation")
+        else:
+            # Fallback: compute costs step by step
+            print(f"[ROLLOUT VECTORIZED] Fallback to sequential costs")
+            rollout_cost = torch.zeros(K, device=self.d, dtype=self.dtype)
+            for t in range(T):
+                u = self.u_scale * perturbed_actions[:, t]
+                step_cost = self.running_cost(states[:, t], u)
+                rollout_cost += step_cost
+        
+        cost_end = time.perf_counter()
+        cost_time = (cost_end - cost_start) * 1000
+        print(f"[ROLLOUT VECTORIZED] Cost computation: {cost_time:.3f}ms")
 
-            # Save total states/actions
-            states.append(state)
-            actions.append(u)
-
-        # Actions is K x T x nu
-        # States is K x T x nx
-        actions = torch.stack(actions, dim=-2)
-        states = torch.stack(states, dim=-2)
-
-        # action perturbation cost
+        # Terminal cost if specified
         if self.terminal_state_cost:
-            c = self.terminal_state_cost(states, actions)
-            cost_samples = cost_samples + c
-        cost_total = cost_total + cost_samples.mean(dim=0)
-        cost_total = cost_total + cost_var * self.rollout_var_cost
-        return cost_total, states, actions
+            terminal_start = time.perf_counter()
+            scaled_actions = self.u_scale * perturbed_actions
+            terminal_cost = self.terminal_state_cost(states, scaled_actions)
+            rollout_cost += terminal_cost
+            terminal_end = time.perf_counter()
+            terminal_time = (terminal_end - terminal_start) * 1000
+            print(f"[ROLLOUT VECTORIZED] Terminal cost: {terminal_time:.3f}ms")
+
+        # Prepare output format for compatibility (expand for M rollouts)
+        actions_output = (self.u_scale * perturbed_actions).repeat(self.M, 1, 1)
+        states_output = states.repeat(self.M, 1, 1)
+        
+        rollout_end = time.perf_counter()
+        rollout_total = (rollout_end - rollout_start) * 1000
+        print(f"[ROLLOUT VECTORIZED] TOTAL: {rollout_total:.3f}ms")
+        print("-" * 50)
+        
+        return rollout_cost, states_output, actions_output
 
     def _compute_perturbed_action_and_noise(self):
         # parallelize sampling across trajectories
@@ -435,6 +474,7 @@ class SMPPI(MPPI):
         return action
 
     def _command(self, state):
+        start_time_c = time.perf_counter()
         if not torch.is_tensor(state):
             state = torch.tensor(state)
         self.state = state.to(dtype=self.dtype, device=self.d)
@@ -451,6 +491,10 @@ class SMPPI(MPPI):
         # reduce dimensionality if we only need the first command
         if self.u_per_command == 1:
             action = action[0]
+        
+        end_time_c = time.perf_counter()
+        commandcomputation_time_ms_c = (end_time_c - start_time_c) * 1000
+        print(f"command : {commandcomputation_time_ms_c:.3f} ms")
         return action
 
     def _compute_perturbed_action_and_noise(self):
@@ -484,7 +528,7 @@ class SMPPI(MPPI):
         # handle non-homogeneous action sequence cost
         action_smoothness_cost *= self.w_action_seq_cost
 
-        rollout_cost, self.states, actions = self._compute_rollout_costs(self.perturbed_action)
+        rollout_cost, self.states, actions = self._compute_rollout_costs(self.perturbed_action) # 여기서 ms 많이씀
         self.actions = actions / self.u_scale
 
         # action perturbation cost

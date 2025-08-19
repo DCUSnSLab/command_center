@@ -3,6 +3,7 @@ Cost functions for MPPI controller
 """
 import torch
 import numpy as np
+import time
 from typing import List, Tuple
 
 
@@ -294,6 +295,34 @@ class ObstacleAvoidanceCost:
         costs[collision_mask] = 1000.0
         
         return costs
+    
+    def compute_trajectory_batch(self, states, actions):
+        """
+        Vectorized obstacle cost for entire trajectories
+        
+        Args:
+            states (torch.Tensor): State trajectories (K x T x 3)
+            actions (torch.Tensor): Action trajectories (K x T x 2)
+            
+        Returns:
+            torch.Tensor: Total trajectory costs (K,)
+        """
+        K, T, _ = states.shape
+        
+        if not hasattr(self, 'obstacle_points') or self.obstacle_points is None or len(self.obstacle_points) == 0:
+            return torch.zeros(K, device=self.device)
+        
+        # Reshape for batch processing: (K*T, 3) and (K*T, 2)
+        states_flat = states.reshape(-1, 3)  # [K*T, 3]
+        actions_flat = actions.reshape(-1, 2)  # [K*T, 2]
+        
+        # Vectorized obstacle cost computation
+        costs_flat = self(states_flat, actions_flat)  # [K*T]
+        
+        # Reshape back and sum over time: (K, T) -> (K,)
+        costs = costs_flat.reshape(K, T).sum(dim=1)
+        
+        return costs
 
 
 class GoalTrackingCost:
@@ -351,6 +380,17 @@ class GoalTrackingCost:
         costs = self.goal_weight * pos_error + self.angle_weight * angle_error
         
         return costs
+    
+    def compute_trajectory_batch(self, states, actions):
+        """Vectorized goal cost for entire trajectories"""
+        K, T, _ = states.shape
+        if self.goal_pose is None:
+            return torch.zeros(K, device=self.device)
+        
+        states_flat = states.reshape(-1, 3)
+        costs_flat = self(states_flat, None)  # Goal cost doesn't depend on actions
+        costs = costs_flat.reshape(K, T).sum(dim=1)
+        return costs
 
 
 class ControlEffortCost:
@@ -386,6 +426,14 @@ class ControlEffortCost:
         # Remove stopping penalty - let obstacle avoidance handle it
         total_cost = linear_cost + angular_cost
         return total_cost
+    
+    def compute_trajectory_batch(self, states, actions):
+        """Vectorized control cost for entire trajectories"""
+        K, T, _ = actions.shape
+        actions_flat = actions.reshape(-1, 2)
+        costs_flat = self(None, actions_flat)  # Control cost doesn't depend on states
+        costs = costs_flat.reshape(K, T).sum(dim=1)
+        return costs
 
 
 class SmoothnessCost:
@@ -440,6 +488,34 @@ class SmoothnessCost:
         self.last_action = action.clone().detach()
         
         return costs
+    
+    def compute_trajectory_batch(self, states, actions):
+        """Vectorized smoothness cost for entire trajectories"""
+        K, T, _ = actions.shape
+        
+        # For trajectory batch, we can compute smoothness across time dimension
+        total_costs = torch.zeros(K, device=self.device)
+        
+        # Curvature cost (applies to each timestep)
+        if actions.shape[2] > 1:
+            steering_angles = torch.abs(actions[:, :, 1])  # [K, T]
+            curvature_cost = self.curvature_weight * (steering_angles ** 2)
+            total_costs += curvature_cost.sum(dim=1)  # Sum over time
+        
+        # Acceleration smoothness (differences between consecutive timesteps)
+        if T > 1:
+            # Velocity differences between consecutive timesteps
+            velocity_diffs = torch.abs(actions[:, 1:, 0] - actions[:, :-1, 0])  # [K, T-1]
+            acceleration_cost = self.acceleration_weight * (velocity_diffs ** 2)
+            total_costs += acceleration_cost.sum(dim=1)
+            
+            # Steering smoothness
+            if actions.shape[2] > 1:
+                steering_diffs = torch.abs(actions[:, 1:, 1] - actions[:, :-1, 1])  # [K, T-1]
+                steering_smooth_cost = self.acceleration_weight * (steering_diffs ** 2)
+                total_costs += steering_smooth_cost.sum(dim=1)
+        
+        return total_costs
 
 
 class MotionDirectionCost:
@@ -511,6 +587,14 @@ class MotionDirectionCost:
                 
                 self.last_forward_slow_count = int(torch.sum(slow_forward_mask))
         
+        return costs
+    
+    def compute_trajectory_batch(self, states, actions):
+        """Vectorized motion direction cost for entire trajectories"""
+        K, T, _ = actions.shape
+        actions_flat = actions.reshape(-1, 2)
+        costs_flat = self(None, actions_flat)  # Motion cost doesn't depend on states
+        costs = costs_flat.reshape(K, T).sum(dim=1)
         return costs
     
     def get_debug_info(self):
@@ -607,3 +691,31 @@ class CombinedCostFunction:
         total_cost = obstacle_cost + goal_cost + control_cost + motion_cost + smoothness_cost
         
         return total_cost
+    
+    def rollout_batch(self, states, actions):
+        """
+        Fully vectorized cost computation for entire trajectories (Phase 2A optimization)
+        
+        Args:
+            states (torch.Tensor): State trajectory (K x T x 3)
+            actions (torch.Tensor): Action trajectory (K x T x 2)
+            
+        Returns:
+            torch.Tensor: Total trajectory costs (K,)
+        """
+        # Use individual vectorized batch methods for maximum performance
+        batch_start = time.perf_counter()
+        
+        obstacle_costs = self.obstacle_cost.compute_trajectory_batch(states, actions)
+        goal_costs = self.goal_cost.compute_trajectory_batch(states, actions)
+        control_costs = self.control_cost.compute_trajectory_batch(states, actions)
+        motion_costs = self.motion_cost.compute_trajectory_batch(states, actions)
+        smoothness_costs = self.smoothness_cost.compute_trajectory_batch(states, actions)
+        
+        total_costs = obstacle_costs + goal_costs + control_costs + motion_costs + smoothness_costs
+        
+        batch_end = time.perf_counter()
+        batch_time = (batch_end - batch_start) * 1000
+        print(f"[COST VECTORIZED] Full batch computation: {batch_time:.3f}ms")
+        
+        return total_costs

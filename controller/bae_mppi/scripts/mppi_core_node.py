@@ -20,7 +20,7 @@ from bae_mppi.msg import ProcessedObstacles, MPPIState, OptimalPath, HighCostPat
 from command_center_interfaces.msg import ControllerGoalStatus
 
 # Local modules
-from bae_mppi_core.pytorch_mppi import MPPI
+from bae_mppi_core.pytorch_mppi import MPPI, SMPPI
 from bae_mppi_core.dynamics import AckermannDynamics, TwistDynamics
 from bae_mppi_core.cost_functions import CombinedCostFunction
 
@@ -75,6 +75,12 @@ class MPPICoreNode(Node):
         self.declare_parameter('smoothness_cost.acceleration_weight', 10.0)
         self.declare_parameter('goal_reached_threshold', 0.5)
         
+        # SMPPI specific parameters
+        self.declare_parameter('use_smppi', True)
+        self.declare_parameter('smppi.w_action_seq_cost', 10.0)
+        self.declare_parameter('smppi.delta_t', 0.05)
+        self.declare_parameter('smppi.use_action_bounds', True)
+        
         # Get parameters
         use_gpu = self.get_parameter('use_gpu').get_parameter_value().bool_value
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
@@ -94,17 +100,36 @@ class MPPICoreNode(Node):
         dt = self.get_parameter('dt').get_parameter_value().double_value
         self.motion_model = self.get_parameter('motion_model').get_parameter_value().string_value
         
+        # SMPPI parameters
+        self.use_smppi = self.get_parameter('use_smppi').get_parameter_value().bool_value
+        w_action_seq_cost = self.get_parameter('smppi.w_action_seq_cost').get_parameter_value().double_value
+        smppi_delta_t = self.get_parameter('smppi.delta_t').get_parameter_value().double_value
+        use_action_bounds = self.get_parameter('smppi.use_action_bounds').get_parameter_value().bool_value
+        
         # Setup device
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         self.get_logger().info(f'Using device: {self.device}')
         
+        # Time synchronization check for SMPPI
+        control_period = 1.0 / self.control_frequency
+        if self.use_smppi:
+            # For SMPPI, use smppi.delta_t parameter
+            model_dt = smppi_delta_t
+            if abs(control_period - model_dt) > 0.001:  # 1ms tolerance
+                self.get_logger().warn(
+                    f'Control period ({control_period:.3f}s) != SMPPI delta_t ({model_dt:.3f}s). '
+                    f'This may cause temporal desynchronization. Consider setting them equal.'
+                )
+        else:
+            model_dt = dt
+        
         # Initialize MPPI dynamics based on motion model
         if self.motion_model == 'twist':
-            self.dynamics = TwistDynamics(dt=dt, device=self.device)
-            self.get_logger().info('Using Twist dynamics model')
+            self.dynamics = TwistDynamics(dt=model_dt, device=self.device)
+            self.get_logger().info(f'Using Twist dynamics model with dt={model_dt:.3f}s')
         else:  # 'ackermann'
-            self.dynamics = AckermannDynamics(wheelbase=wheelbase, dt=dt, device=self.device)
-            self.get_logger().info('Using Ackermann dynamics model')
+            self.dynamics = AckermannDynamics(wheelbase=wheelbase, dt=model_dt, device=self.device)
+            self.get_logger().info(f'Using Ackermann dynamics model with dt={model_dt:.3f}s')
         
         self.wheelbase = wheelbase
         
@@ -162,18 +187,44 @@ class MPPICoreNode(Node):
         sigma_diag = [float(noise_sigma[0,0]), float(noise_sigma[1,1])]
         self.get_logger().info(f"[MPPI INIT] Noise sigma diagonal: [{sigma_diag[0]:.1f}, {sigma_diag[1]:.1f}]")
         
-        self.mppi = MPPI(
-            dynamics=self.dynamics,
-            running_cost=self.cost_function,
-            nx=nx,
-            noise_sigma=noise_sigma,
-            num_samples=num_samples,
-            horizon=horizon_steps,
-            lambda_=lambda_,
-            device=self.device,
-            u_min=u_min,
-            u_max=u_max
-        )
+        # Initialize MPPI or SMPPI based on parameter
+        if self.use_smppi:
+            self.get_logger().info(f"[SMPPI INIT] Using Smooth MPPI with w_action_seq_cost={w_action_seq_cost:.1f}, delta_t={smppi_delta_t:.3f}s")
+            
+            # Set action bounds for SMPPI if enabled
+            action_min = u_min if use_action_bounds else None
+            action_max = u_max if use_action_bounds else None
+            
+            self.mppi = SMPPI(
+                dynamics=self.dynamics,
+                running_cost=self.cost_function,
+                nx=nx,
+                noise_sigma=noise_sigma,
+                num_samples=num_samples,
+                horizon=horizon_steps,
+                lambda_=lambda_,
+                device=self.device,
+                u_min=u_min,
+                u_max=u_max,
+                # SMPPI specific parameters
+                w_action_seq_cost=w_action_seq_cost,
+                delta_t=smppi_delta_t,
+                action_min=action_min,
+                action_max=action_max
+            )
+        else:
+            self.get_logger().info("[MPPI INIT] Using standard MPPI")
+            self.mppi = MPPI(
+                dynamics=self.dynamics,
+                running_cost=self.cost_function,
+                noise_sigma=noise_sigma,
+                num_samples=num_samples,
+                horizon=horizon_steps,
+                lambda_=lambda_,
+                device=self.device,
+                u_min=u_min,
+                u_max=u_max
+            )
         
         # Get topic names
         state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
@@ -267,16 +318,17 @@ class MPPICoreNode(Node):
         self.get_logger().info(f'New goal received: {self.goal_pose}, ID: {self.current_goal_id}')
     
     def control_callback(self):
+        # self.get_logger().info(f'control callback called')
         """Main control computation"""
         if self.current_state is None or self.goal_pose is None:
             return
-        
         start_time = time.time()
         
         try:
             # Compute MPPI control command
-            action = self.mppi.command(self.current_state)
             
+            action = self.mppi.command(self.current_state)
+
             # Debug sampling diversity every 20 calls
             if not hasattr(self, '_control_debug_counter'):
                 self._control_debug_counter = 0
@@ -312,10 +364,10 @@ class MPPICoreNode(Node):
                             self.get_logger().info(f"[MPPI OUTPUT] Selected action: [{action_0:.3f}, {action_1:.3f}]")
                     except Exception as e:
                         self.get_logger().warn(f"[DEBUG] Actions debug failed: {e}")
-            
+
             # Create cmd_vel based on motion model
             cmd_msg = Twist()
-            
+
             if self.motion_model == 'twist':
                 # Direct mapping for twist model - NO conversion needed!
                 cmd_msg.linear.x = float(action[0])   # vx
@@ -344,8 +396,9 @@ class MPPICoreNode(Node):
                 cmd_msg.angular.z = float(angular_velocity)
             
             self.cmd_vel_pub.publish(cmd_msg)
-            
+
             # Publish optimal path for visualization (if enabled)
+            
             if self.enable_visualization and self.enable_path_viz:
                 self.publish_optimal_path(action)
             
@@ -360,7 +413,7 @@ class MPPICoreNode(Node):
                 self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m')
                 stop_msg = Twist()
                 self.cmd_vel_pub.publish(stop_msg)
-            
+
         except Exception as e:
             self.get_logger().error(f'Control computation failed: {str(e)}')
             stop_msg = Twist()
@@ -368,8 +421,8 @@ class MPPICoreNode(Node):
         
         end_time = time.time()
         computation_time = (end_time - start_time) * 1000
-        if computation_time > 150:  # Log if too slow
-            self.get_logger().warn(f'MPPI computation: {computation_time:.1f}ms')
+        # if computation_time > 150:  # Log if too slow
+        #     self.get_logger().warn(f'MPPI computation: {computation_time:.1f}ms')
     
     def publish_goal_status(self, distance_to_goal: float):
         """Publish goal status information"""

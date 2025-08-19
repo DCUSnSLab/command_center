@@ -7,10 +7,14 @@ Reads JSON map file and publishes sequential path to behavior_planner
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+import rcl_interfaces.srv
 
-import json
 import os
 from typing import List, Dict, Any, Optional
+
+# Import utilities
+from utils.map_loader import MapLoader
+from utils.visualization import PathVisualizer
 
 # ROS2 messages
 from geometry_msgs.msg import PoseStamped, Point
@@ -81,6 +85,9 @@ class SequentialPlannerNode(Node):
         self.is_loaded = False
         self.path_published = False  # Track if path has been published
         
+        # Initialize map loader
+        self.map_loader = MapLoader(logger=self.get_logger())
+        
         # Timer for publishing
         self.publish_timer = self.create_timer(
             1.0 / self.publish_freq, self.publish_callback)
@@ -103,43 +110,20 @@ class SequentialPlannerNode(Node):
     
     def load_map_file(self) -> bool:
         """Load JSON map file and extract nodes/links"""
-        try:
-            # Get package share directory path
-            try:
-                from ament_index_python.packages import get_package_share_directory
-                package_share = get_package_share_directory('sequential_global_planner')
-            except:
-                # Fallback to source directory for development
-                package_share = '/home/d2-521-30/repo/command_center_ws/src/command_center/Global_path_planner/sequential_global_planner'
-            
-            map_path = os.path.join(package_share, 'maps', self.map_file)
-            
-            with open(map_path, 'r', encoding='utf-8') as file:
-                map_data = json.load(file)
-            
-            # Store nodes as dictionary for fast lookup
-            nodes = map_data.get('Node', [])
-            for node in nodes:
-                self.nodes_data[node['ID']] = node
-            
-            # Map origin will be set from localization parameters
-            self.get_logger().info('Waiting for map origin parameters from localization...')
-            self.get_logger().info(f'Will check parameters from /{self.localization_node_name}')
-            
-            # Store links
-            self.links_data = map_data.get('Link', [])
-            
+        # Get full path to map file
+        map_path = self.map_loader.get_map_path('sequential_global_planner', self.map_file)
+        
+        # Load map data using map loader
+        self.nodes_data, self.links_data, success = self.map_loader.load_map_file(map_path)
+        
+        if success:
             # Create ordered node sequence from links
             self.create_sequential_order()
-            
             self.is_loaded = True
-            self.get_logger().info(f'Successfully loaded map: {len(self.nodes_data)} nodes, {len(self.links_data)} links')
-            return True
-            
-        except Exception as e:
-            self.get_logger().error(f'Failed to load map file {self.map_file}: {str(e)}')
+        else:
             self.is_loaded = False
-            return False
+            
+        return success
     
     def create_sequential_order(self) -> None:
         """Create ordered sequence of nodes following the links"""
@@ -291,132 +275,22 @@ class SequentialPlannerNode(Node):
     
     def create_visualization_markers(self) -> MarkerArray:
         """Create visualization markers for nodes and links"""
-        marker_array = MarkerArray()
-        
-        # Node markers (spheres)
-        for i, node_id in enumerate(self.ordered_nodes):
-            node_data = self.nodes_data[node_id]
-            
-            marker = Marker()
-            marker.header.frame_id = 'odom'
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'sequential_nodes'
-            marker.id = i
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            
-            # Position
-            marker.pose.position.x = node_data['UtmInfo']['Easting'] - self.map_origin_utm_easting
-            marker.pose.position.y = node_data['UtmInfo']['Northing'] - self.map_origin_utm_northing
-            marker.pose.position.z = 0.0
-            
-            # Orientation
-            marker.pose.orientation.w = 1.0
-            
-            # Scale
-            marker.scale.x = 0.2
-            marker.scale.y = 0.2  
-            marker.scale.z = 0.2
-            
-            # Color - gradient from green to red
-            ratio = float(i) / max(len(self.ordered_nodes) - 1, 1)
-            marker.color.r = ratio
-            marker.color.g = 1.0 - ratio
-            marker.color.b = 0.2
-            marker.color.a = 0.8
-            
-            marker.lifetime.sec = 0  # Persistent
-            marker_array.markers.append(marker)
-        
-        # Link markers (lines)
-        for i in range(len(self.ordered_nodes) - 1):
-            from_node_id = self.ordered_nodes[i]
-            to_node_id = self.ordered_nodes[i + 1]
-            
-            from_node = self.nodes_data[from_node_id]
-            to_node = self.nodes_data[to_node_id]
-            
-            marker = Marker()
-            marker.header.frame_id = 'odom'
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'sequential_links'
-            marker.id = i + 1000  # Offset to avoid ID collision
-            marker.type = Marker.ARROW
-            marker.action = Marker.ADD
-            
-            # Start point
-            start_point = Point()
-            start_point.x = from_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
-            start_point.y = from_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
-            start_point.z = 0.0
-            
-            # End point  
-            end_point = Point()
-            end_point.x = to_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
-            end_point.y = to_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
-            end_point.z = 0.0
-            
-            marker.points = [start_point, end_point]
-            
-            # Scale
-            marker.scale.x = 0.05  # Arrow shaft diameter
-            marker.scale.y = 0.1   # Arrow head diameter
-            marker.scale.z = 0.0   # Not used for arrows
-            
-            # Color - blue arrows
-            marker.color.r = 0.0
-            marker.color.g = 0.4
-            marker.color.b = 1.0
-            marker.color.a = 0.7
-            
-            marker.lifetime.sec = 0  # Persistent
-            marker_array.markers.append(marker)
-        
-        # Loop closure if enabled
-        if self.loop_path and len(self.ordered_nodes) > 1:
-            from_node = self.nodes_data[self.ordered_nodes[-1]]
-            to_node = self.nodes_data[self.ordered_nodes[0]]
-            
-            marker = Marker()
-            marker.header.frame_id = 'odom'
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'sequential_links'
-            marker.id = 2000  # Loop marker
-            marker.type = Marker.ARROW
-            marker.action = Marker.ADD
-            
-            start_point = Point()
-            start_point.x = from_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
-            start_point.y = from_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
-            start_point.z = 0.0
-            
-            end_point = Point()
-            end_point.x = to_node['UtmInfo']['Easting'] - self.map_origin_utm_easting
-            end_point.y = to_node['UtmInfo']['Northing'] - self.map_origin_utm_northing
-            end_point.z = 0.0
-            
-            marker.points = [start_point, end_point]
-            
-            marker.scale.x = 0.08  # Thicker for loop
-            marker.scale.y = 0.15
-            marker.scale.z = 0.0
-            
-            # Color - red for loop
-            marker.color.r = 1.0
-            marker.color.g = 0.0
-            marker.color.b = 0.0
-            marker.color.a = 0.8
-            
-            marker.lifetime.sec = 0
-            marker_array.markers.append(marker)
-        
-        return marker_array
+        # Use PathVisualizer to create all markers
+        return PathVisualizer.create_marker_array(
+            ordered_nodes=self.ordered_nodes,
+            nodes_data=self.nodes_data,
+            map_origin_utm_easting=self.map_origin_utm_easting,
+            map_origin_utm_northing=self.map_origin_utm_northing,
+            timestamp=self.get_clock().now().to_msg(),
+            loop_path=self.loop_path,
+            include_text=True,
+            frame_id='odom'
+        )
     
     def publish_callback(self) -> None:
         """Timer callback to publish path and visualization"""
         if not self.is_loaded or not self.auto_start or not self.map_origin_set:
             return
-        
         # Publish PlannedPath only once
         if not self.path_published:
             planned_path = self.create_planned_path_message()
@@ -431,53 +305,70 @@ class SequentialPlannerNode(Node):
         # Publish visualization markers
         markers = self.create_visualization_markers()
         self.marker_pub.publish(markers)
-    
+
     def check_map_origin_params(self) -> None:
         """Check if map origin parameters are available from localization node"""
         if not self.map_origin_set:
             try:
-                import subprocess
-                import json
+                # Create a parameter client for the localization node
+                from rclpy.parameter import Parameter
+                from rclpy.node import Node
                 
-                # Use ros2 param get command directly - more reliable
-                cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_easting']
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+                # Get parameters from the localization node using parameter client
+                param_client = self.create_client(
+                    rcl_interfaces.srv.GetParameters,
+                    '/localization/tiny_localization_node/get_parameters'
+                )
                 
-                if result.returncode == 0:
-                    # Extract the value from output like "Double value is: 482253.6011915017"
-                    easting_line = result.stdout.strip()
-                    if "Double value is:" in easting_line:
-                        easting = float(easting_line.split(":")[-1].strip())
+                if not param_client.wait_for_service(timeout_sec=0.1):
+                    self.get_logger().debug('Localization node parameter service not available yet')
+                    return
+                
+                # Request parameters
+                request = rcl_interfaces.srv.GetParameters.Request()
+                request.names = [
+                    'map_origin.utm_easting',
+                    'map_origin.utm_northing', 
+                    'map_origin.utm_zone'
+                ]
+                
+                future = param_client.call_async(request)
+                
+                # Use executor to wait for response with timeout
+                import time
+                start_time = time.time()
+                while not future.done() and (time.time() - start_time) < 0.5:
+                    rclpy.spin_once(self, timeout_sec=0.01)
+                
+                if future.done():
+                    response = future.result()
+                    if response and len(response.values) == 3:
+                        # Extract parameter values
+                        easting = response.values[0].double_value
+                        northing = response.values[1].double_value
+                        zone = response.values[2].integer_value
                         
-                        # Get northing
-                        cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_northing']
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
-                        if result.returncode == 0 and "Double value is:" in result.stdout:
-                            northing = float(result.stdout.split(":")[-1].strip())
+                        # Validate values (check they're not default/zero)
+                        if easting != 0.0 and northing != 0.0:
+                            # Successfully got all parameters
+                            self.map_origin_utm_easting = easting
+                            self.map_origin_utm_northing = northing
+                            self.map_origin_set = True
                             
-                            # Get zone
-                            cmd = ['ros2', 'param', 'get', '/localization/tiny_localization_node', 'map_origin.utm_zone']
-                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
-                            if result.returncode == 0 and "Integer value is:" in result.stdout:
-                                zone = int(result.stdout.split(":")[-1].strip())
-                                
-                                # Successfully got all parameters
-                                self.map_origin_utm_easting = easting
-                                self.map_origin_utm_northing = northing
-                                self.map_origin_set = True
-                                
-                                # Cancel parameter check timer
-                                self.param_check_timer.cancel()
-                                
-                                self.get_logger().info('Map origin received from localization parameters:')
-                                self.get_logger().info(f'  UTM: ({self.map_origin_utm_easting:.4f}, {self.map_origin_utm_northing:.4f}) Zone {zone}')
-                                
-                                # Now that we have map origin, start publishing if auto_start is enabled
-                                if self.auto_start and self.is_loaded and not self.path_published:
-                                    self.publish_status("Map origin set - starting path publication")
-                                return
-                
-                self.get_logger().debug('Map origin parameters not ready yet')
+                            # Cancel parameter check timer
+                            self.param_check_timer.cancel()
+                            
+                            self.get_logger().info('Map origin received from localization parameters:')
+                            self.get_logger().info(f'  UTM: ({self.map_origin_utm_easting:.4f}, {self.map_origin_utm_northing:.4f}) Zone {zone}')
+                            
+                            # Now that we have map origin, start publishing if auto_start is enabled
+                            if self.auto_start and self.is_loaded and not self.path_published:
+                                self.publish_status("Map origin set - starting path publication")
+                            return
+                        else:
+                            self.get_logger().debug('Map origin parameters are still at default values')
+                else:
+                    self.get_logger().debug('Timeout waiting for parameter response')
                         
             except Exception as e:
                 self.get_logger().debug(f'Map origin parameters not ready: {e}')
