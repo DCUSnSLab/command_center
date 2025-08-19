@@ -9,6 +9,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -72,17 +73,6 @@ public:
         // Declare parameters
         this->declare_parameter<std::string>("map_file_path", 
             "/home/ros2/ros2_ws/src/gmserver/maps/3x3_map.json");
-        this->declare_parameter<double>("gps_reference_latitude", 37.5665);
-        this->declare_parameter<double>("gps_reference_longitude", 126.9780);
-        this->declare_parameter<double>("gps_reference_altitude", 50.0);
-        
-        // Get GPS reference coordinates
-        this->get_parameter("gps_reference_latitude", gps_ref_lat_);
-        this->get_parameter("gps_reference_longitude", gps_ref_lon_);
-        this->get_parameter("gps_reference_altitude", gps_ref_alt_);
-        
-        // Calculate GPS reference UTM coordinates for goal transformation
-        gpsToUTM(gps_ref_lat_, gps_ref_lon_, gps_ref_utm_easting_, gps_ref_utm_northing_);
         
         // Initialize state variables
         current_gps_received_ = false;
@@ -93,6 +83,9 @@ public:
         has_temp_start_node_ = false;
         temp_goal_node_id_ = -2;
         temp_start_node_id_ = -3;
+        gps_ref_initialized_ = false;
+        map_tf_initialized_ = false;
+        first_node_initialized_ = false;
         
         // Create service client for map loading
         map_client_ = this->create_client<gmserver::srv::LoadMap>("load_map");
@@ -118,7 +111,7 @@ public:
         map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
         
         // Create TF broadcaster for map->odom transform
-        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
         
         // Create TF listener for coordinate transformations
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -174,6 +167,18 @@ private:
             if (response->success) {
                 // Store GraphMap data
                 graph_map_ = response->graph_map;
+
+                // Node 데이터 기반 아래 변수 초기화 진행
+                map_utm_easting_ = graph_map_.map_data.nodes[0].utm_info.easting;
+                map_utm_northing_ = graph_map_.map_data.nodes[0].utm_info.northing;
+                map_gps_lat_ = graph_map_.map_data.nodes[0].gps_info.lat;
+                map_gps_long_ = graph_map_.map_data.nodes[0].gps_info.longitude;
+                RCLCPP_INFO(this->get_logger(), "east %f", map_utm_easting_);
+                RCLCPP_INFO(this->get_logger(), "north %f", map_utm_northing_);
+                RCLCPP_INFO(this->get_logger(), "lat %f", map_gps_lat_);
+                RCLCPP_INFO(this->get_logger(), "long %f", map_gps_long_);
+
+                first_node_initialized_ = true;
                 
                 // Convert GraphMap to PoseArray for compatibility with existing visualization
                 convertGraphMapToPoseArrays();
@@ -189,8 +194,10 @@ private:
                            "Map loaded successfully: %zu nodes, %zu links", 
                            graph_map_.map_data.nodes.size(), graph_map_.map_data.links.size());
                 
-                // Publish visualization data
-                publishVisualizationData();
+                // Publish visualization data only after GPS reference is initialized
+                if (gps_ref_initialized_) {
+                    publishVisualizationData();
+                }
             } else {
                 RCLCPP_ERROR(this->get_logger(), "Failed to load map: %s", 
                             response->message.c_str());
@@ -264,7 +271,7 @@ private:
                 
                 // Add bidirectional links (roads can be traversed in both directions)
                 adjacency_list_[from_node_idx].emplace_back(to_node_idx, from_node_idx, distance);
-                adjacency_list_[to_node_idx].emplace_back(from_node_idx, to_node_idx, distance);
+                // adjacency_list_[to_node_idx].emplace_back(from_node_idx, to_node_idx, distance);
                 
                 RCLCPP_DEBUG(this->get_logger(), "Connected nodes %d (%s) <-> %d (%s) (distance: %.2f)", 
                            from_node_idx, link.from_node_id.c_str(), to_node_idx, link.to_node_id.c_str(), distance);
@@ -301,14 +308,28 @@ private:
         visualization_msgs::msg::MarkerArray viz_graph;
         visualization_msgs::msg::Marker viz_marker;
 
+        // geometry_msgs::msg::TransformStamped transform = 
+        //     tf_buffer_->lookupTransform(
+        //         "odom",      // target frame
+        //         "map",    // source frame
+        //         tf2::TimePointZero);
+
         int i = 0;
+
+        RCLCPP_INFO(this->get_logger(), "gps east %f", gps_ref_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "gps north %f", gps_ref_utm_northing_);
+        RCLCPP_INFO(this->get_logger(), "map east\t%f", map_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "map north\t%f", map_utm_northing_);
 
         // Adjust map nodes for RViz visualization
         if (!map_nodes_.poses.empty()) {
+            RCLCPP_INFO(this->get_logger(), "nodes viz init");
             geometry_msgs::msg::PoseArray viz_nodes = map_nodes_;
             for (auto& pose : viz_nodes.poses) {
-                pose.position.x -= gps_ref_utm_easting_;
-                pose.position.y -= gps_ref_utm_northing_;
+                //pose.position.x -= gps_ref_utm_easting_;
+                //pose.position.y -= gps_ref_utm_northing_;
+                pose.position.x -= map_utm_easting_;
+                pose.position.y -= map_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
                 viz_marker.header.stamp = this->get_clock()->now();
@@ -330,21 +351,28 @@ private:
                 i++;
             }
             viz_nodes.header.stamp = this->get_clock()->now();
+
+            //geometry_msgs::msg::PoseArray transformed_viz_nodes;
+            //transformPoseArray(viz_nodes, transformed_viz_nodes, transform);
+
             nodes_publisher_->publish(viz_nodes);
         }
         
         // Adjust map links for RViz visualization
         if (!map_links_.poses.empty()) {
+            RCLCPP_INFO(this->get_logger(), "links viz init");
             geometry_msgs::msg::PoseArray viz_links = map_links_;
             for (auto& pose : viz_links.poses) {
-                pose.position.x -= gps_ref_utm_easting_;
-                pose.position.y -= gps_ref_utm_northing_;
+                //pose.position.x -= gps_ref_utm_easting_;
+                //pose.position.y -= gps_ref_utm_northing_;
+                pose.position.x -= map_utm_easting_;
+                pose.position.y -= map_utm_northing_;
 
                 viz_marker.header.frame_id = "map";
                 viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::SPHERE;
+                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
                 viz_marker.scale.x = 3.0;
                 viz_marker.scale.y = 3.0;
                 viz_marker.scale.z = 3.0;
@@ -360,13 +388,20 @@ private:
                 i++;
             }
             viz_links.header.stamp = this->get_clock()->now();
+
+            //geometry_msgs::msg::PoseArray transformed_viz_links;
+            //transformPoseArray(viz_links, transformed_viz_links, transform);
+
             links_publisher_->publish(viz_links);
             
         }
 
+        //visualization_msgs::msg::MarkerArray transformed_viz_graph;
+        //transformMarkerArray(viz_graph, transformed_viz_graph, transform);
+
         map_viz_publisher_->publish(viz_graph);
         
-        RCLCPP_DEBUG(this->get_logger(), "Published visualization data");
+        RCLCPP_INFO(this->get_logger(), "Published visualization data");
     }
     
     void gpsCallback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
@@ -375,11 +410,36 @@ private:
             return; // Invalid GPS fix
         }
         
+        // Initialize GPS reference coordinates from first valid GPS reading
+        if (!gps_ref_initialized_) {
+            gps_ref_lat_ = msg->latitude;
+            gps_ref_lon_ = msg->longitude;
+            gps_ref_alt_ = msg->altitude;
+            
+            // Calculate GPS reference UTM coordinates for goal transformation
+            gpsToUTM(gps_ref_lat_, gps_ref_lon_, gps_ref_utm_easting_, gps_ref_utm_northing_);
+            
+            gps_ref_initialized_ = true;
+            
+            RCLCPP_INFO(this->get_logger(), 
+                       "GPS reference initialized from first GPS reading: lat=%.6f, lon=%.6f, alt=%.2f -> UTM(%.2f, %.2f)", 
+                       gps_ref_lat_, gps_ref_lon_, gps_ref_alt_,
+                       gps_ref_utm_easting_, gps_ref_utm_northing_);
+            
+            // Publish visualization data now that GPS reference is initialized
+            if (first_node_initialized_) {
+                publishVisualizationData();
+            }
+        }
+        
         current_gps_ = *msg;
         current_gps_received_ = true;
         
         // Publish GPS-based map->odom transform
-        publishMapToOdomTransform(*msg);
+        if (!map_tf_initialized_ && first_node_initialized_) {
+            publishMapToOdomTransform(*msg);
+            map_tf_initialized_ = true;
+        }
         
         RCLCPP_DEBUG(this->get_logger(), "GPS received: lat=%.6f, lon=%.6f", 
                     msg->latitude, msg->longitude);
@@ -390,26 +450,27 @@ private:
         current_imu_ = *msg;
         current_imu_received_ = true;
         
-        // Update map->odom transform with new orientation if GPS is also available
-        if (current_gps_received_) {
-            publishMapToOdomTransform(current_gps_);
-        }
-        
         RCLCPP_DEBUG(this->get_logger(), "IMU received: orientation(%.3f, %.3f, %.3f, %.3f)", 
                     msg->orientation.x, msg->orientation.y, msg->orientation.z, msg->orientation.w);
     }
     
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
-        if (!current_gps_received_) {
-            RCLCPP_WARN(this->get_logger(), "Goal received, but no GPS data yet. Waiting for GPS.");
+        if (!gps_ref_initialized_) {
+            RCLCPP_WARN(this->get_logger(), "Goal received, but GPS reference not initialized yet. Waiting for first GPS reading.");
             return;
         }
 
         // Transform goal to map frame based on frame_id
         geometry_msgs::msg::PoseStamped goal_in_map_frame = *msg;
+
+        RCLCPP_INFO(this->get_logger(), "gps_ref_utm east %f", gps_ref_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "gps_ref_utm north %f", gps_ref_utm_northing_);
+        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lat %f", current_gps_.latitude);
+        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lon %f", current_gps_.longitude);
         
         if (msg->header.frame_id == "map") {
+            RCLCPP_INFO(this->get_logger(), "frame_id : map");
             // Goal is already in map frame, convert to absolute UTM coordinates
             goal_pose_ = *msg;
             goal_pose_.pose.position.x += gps_ref_utm_easting_;
@@ -421,14 +482,19 @@ private:
                        goal_pose_.pose.position.x, goal_pose_.pose.position.y);
         } 
         else if (msg->header.frame_id == "odom") {
+            RCLCPP_INFO(this->get_logger(), "frame_id : odom");
             // Goal is in odom frame, transform to map frame first
             try {
                 // Transform from odom to map frame
                 geometry_msgs::msg::PoseStamped goal_in_map;
-                tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                // tf_buffer_->transform(*msg, goal_in_map, "map", tf2::durationFromSec(1.0));
+                
+                RCLCPP_INFO(this->get_logger(), "transform output x %f", goal_pose_.pose.position.x);
+                RCLCPP_INFO(this->get_logger(), "transform output y %f", goal_pose_.pose.position.y);
                 
                 // Convert to absolute UTM coordinates
-                goal_pose_ = goal_in_map;
+                // goal_pose_ = goal_in_map;
+                goal_pose_ = *msg;
                 goal_pose_.pose.position.x += gps_ref_utm_easting_;
                 goal_pose_.pose.position.y += gps_ref_utm_northing_;
                 
@@ -445,6 +511,7 @@ private:
             }
         }
         else {
+            RCLCPP_INFO(this->get_logger(), "frame_id : none");
             // Unsupported frame_id, try to transform to map frame
             try {
                 geometry_msgs::msg::PoseStamped goal_in_map;
@@ -472,6 +539,8 @@ private:
                 goal_pose_.pose.position.y += gps_ref_utm_northing_;
             }
         }
+        RCLCPP_INFO(this->get_logger(), "goalCallback goal pose x %f", goal_pose_.pose.position.x);
+        RCLCPP_INFO(this->get_logger(), "goalCallback goal pose y %f", goal_pose_.pose.position.y);
         
         goal_received_ = true;
         path_planned_for_current_goal_ = false; // Reset flag for new goal
@@ -482,8 +551,8 @@ private:
     
     void checkAndPlanPath()
     {
-        // Only plan path when we have both current GPS and goal, and haven't planned for current goal yet
-        if (current_gps_received_ && goal_received_ && !path_planned_for_current_goal_) {
+        // Only plan path when we have GPS reference initialized, current GPS and goal, and haven't planned for current goal yet
+        if (gps_ref_initialized_ && current_gps_received_ && goal_received_ && !path_planned_for_current_goal_) {
             planPathFromGpsToGoal();
         }
     }
@@ -495,8 +564,8 @@ private:
             return;
         }
         
-        if (!current_gps_received_ || !goal_received_) {
-            RCLCPP_WARN(this->get_logger(), "GPS or Goal not available for path planning");
+        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
             return;
         }
         
@@ -506,10 +575,18 @@ private:
         // Convert GPS to UTM coordinates
         double start_utm_easting, start_utm_northing;
         gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
+
+        RCLCPP_INFO(this->get_logger(), "current gps lat %f", current_gps_.latitude);
+        RCLCPP_INFO(this->get_logger(), "current gps lon %f", current_gps_.longitude);
+        RCLCPP_INFO(this->get_logger(), "start utm east %f", start_utm_easting);
+        RCLCPP_INFO(this->get_logger(), "start utm north %f", start_utm_northing);
         
         // Goal has been converted to UTM coordinates in goalCallback
         double goal_x = goal_pose_.pose.position.x;
         double goal_y = goal_pose_.pose.position.y;
+
+        RCLCPP_INFO(this->get_logger(), "planPathFromGpsToGoal goal pose x %f", goal_pose_.pose.position.x);
+        RCLCPP_INFO(this->get_logger(), "planPathFromGpsToGoal goal pose y %f", goal_pose_.pose.position.y);
         
         // Create temporary start node at GPS position
         int start_node_id = createTemporaryStartNode(start_utm_easting, start_utm_northing);
@@ -542,8 +619,11 @@ private:
                 pose_stamped.header.frame_id = "map";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
-                pose_stamped.pose.position.x -= gps_ref_utm_easting_;
-                pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                //pose_stamped.pose.position.x -= gps_ref_utm_easting_;
+                //pose_stamped.pose.position.y -= gps_ref_utm_northing_;
+                pose_stamped.pose.position.x -= map_utm_easting_;
+                pose_stamped.pose.position.y -= map_utm_northing_;
+                pose_stamped.pose.position.z = 0;
                 
                 planned_path.poses.push_back(pose_stamped);
             }
@@ -837,9 +917,7 @@ private:
     }
     
     int createTemporaryStartNode(double start_x, double start_y)
-    {
-        temp_start_node_id_ = -3;
-        
+    {   
         // Create temporary start node pose
         geometry_msgs::msg::Pose start_pose;
         start_pose.position.x = start_x;
@@ -987,16 +1065,21 @@ private:
                 map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
                 // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
-                map_node.utm_info.easting -= gps_ref_utm_easting_;
-                map_node.utm_info.northing -= gps_ref_utm_northing_;
+                //map_node.utm_info.easting -= gps_ref_utm_easting_;
+                //map_node.utm_info.northing -= gps_ref_utm_northing_;
+                map_node.utm_info.easting -= map_utm_easting_;
+                map_node.utm_info.northing -= map_utm_northing_;
+                
             } else {
                 // Temporary 노드의 경우 pose에서 역산
                 map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
                 map_node.gps_info.longitude = 0.0;
                 map_node.gps_info.alt = path_nodes[i]->pose.position.z;
                 // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
-                map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
-                map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
+                //map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
+                //map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
+                map_node.utm_info.easting = path_nodes[i]->pose.position.x - map_utm_easting_;
+                map_node.utm_info.northing = path_nodes[i]->pose.position.y - map_utm_northing_;
                 map_node.utm_info.zone = "52N"; // K-City 기본 zone
             }
             
@@ -1080,32 +1163,83 @@ private:
         transform_stamped.child_frame_id = "odom";
         
         // Set translation to GPS UTM position relative to reference point
-        transform_stamped.transform.translation.x = utm_easting - gps_ref_utm_easting_;
-        transform_stamped.transform.translation.y = utm_northing - gps_ref_utm_northing_;
+        // transform_stamped.transform.translation.x = utm_easting - gps_ref_utm_easting_;
+        // transform_stamped.transform.translation.y = utm_northing - gps_ref_utm_northing_;
+        transform_stamped.transform.translation.x = utm_easting - map_utm_easting_;
+        transform_stamped.transform.translation.y = utm_northing - map_utm_northing_;
         transform_stamped.transform.translation.z = gps.altitude - gps_ref_alt_;
+
+        RCLCPP_INFO(this->get_logger(), "TF utm east\t%f", utm_easting);
+        RCLCPP_INFO(this->get_logger(), "TF map utm east\t%f", map_utm_easting_);
+        RCLCPP_INFO(this->get_logger(), "TF utm north\t%f", utm_northing);
+        RCLCPP_INFO(this->get_logger(), "TF map utm north\t%f", map_utm_northing_);
         
-        // Set rotation from IMU if available, otherwise no rotation
-        if (current_imu_received_) {
-            // Use IMU orientation directly
-            transform_stamped.transform.rotation = current_imu_.orientation;
-        } else {
-            // No rotation if IMU not available
-            tf2::Quaternion q;
-            q.setRPY(0, 0, 0);
-            transform_stamped.transform.rotation.x = q.x();
-            transform_stamped.transform.rotation.y = q.y();
-            transform_stamped.transform.rotation.z = q.z();
-            transform_stamped.transform.rotation.w = q.w();
-        }
+        tf2::Quaternion q;
+        q.setRPY(0, 0, 0);
+        transform_stamped.transform.rotation.x = q.x();
+        transform_stamped.transform.rotation.y = q.y();
+        transform_stamped.transform.rotation.z = q.z();
+        transform_stamped.transform.rotation.w = q.w();
         
         // Broadcast the transform
-        // tf_broadcaster_->sendTransform(transform_stamped);
+        tf_broadcaster_->sendTransform(transform_stamped);
         
         RCLCPP_DEBUG(this->get_logger(), 
                     "Published map->odom transform: GPS(%.6f, %.6f) -> UTM(%.2f, %.2f) -> offset(%.2f, %.2f), IMU: %s",
                     gps.latitude, gps.longitude, utm_easting, utm_northing,
                     transform_stamped.transform.translation.x, transform_stamped.transform.translation.y,
                     current_imu_received_ ? "available" : "not available");
+    }
+
+    // 현재 ROS 버전에서 특정 메시지형의 doTransform 미지원으로 인한 변환 함수 구현.
+    // 다른 코드에서도 쓸 수 있게 향후 tools 같은 디렉토리에 별도 클래스로 작성하는게 좋긴함
+    void transformPoseArray(
+        const geometry_msgs::msg::PoseArray& input,
+        geometry_msgs::msg::PoseArray& output,
+        const geometry_msgs::msg::TransformStamped& transform)
+    {
+        output.header = input.header;
+        output.poses.clear();
+        output.poses.reserve(input.poses.size());
+        
+        for (const auto& pose : input.poses) {
+            geometry_msgs::msg::Pose transformed_pose;
+            tf2::doTransform(pose, transformed_pose, transform);
+            output.poses.push_back(transformed_pose);
+        }
+    }
+
+    void transformMarkerArray(
+        const visualization_msgs::msg::MarkerArray& input,
+        visualization_msgs::msg::MarkerArray& output,
+        const geometry_msgs::msg::TransformStamped& transform)
+    {
+        output.markers.clear();
+        output.markers.reserve(input.markers.size());
+        
+        for (const auto& marker : input.markers) {
+            visualization_msgs::msg::Marker transformed_marker = marker;
+            
+            // Marker의 pose 변환
+            tf2::doTransform(marker.pose, transformed_marker.pose, transform);
+            
+            // Points가 있는 경우 (LINE_STRIP, LINE_LIST, POINTS 등)
+            if (!marker.points.empty()) {
+                transformed_marker.points.clear();
+                transformed_marker.points.reserve(marker.points.size());
+                
+                for (const auto& point : marker.points) {
+                    geometry_msgs::msg::Point transformed_point;
+                    tf2::doTransform(point, transformed_point, transform);
+                    transformed_marker.points.push_back(transformed_point);
+                }
+            }
+            
+            // Frame ID 업데이트 (필요한 경우)
+            transformed_marker.header.frame_id = transform.header.frame_id;
+            
+            output.markers.push_back(transformed_marker);
+        }
     }
     
     // Member variables
@@ -1119,7 +1253,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr links_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    // std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     
@@ -1143,12 +1278,21 @@ private:
     bool goal_received_;
     bool path_planned_for_current_goal_; // Flag to ensure single path planning per goal
     
-    // GPS reference coordinates for goal transformation
+    // GPS reference coordinates for goal transformation  
     double gps_ref_lat_;
     double gps_ref_lon_;
     double gps_ref_alt_;
     double gps_ref_utm_easting_;
     double gps_ref_utm_northing_;
+
+    double map_utm_easting_; // utm value of first Node in map data
+    double map_utm_northing_;
+    double map_gps_lat_; // lat lon value of first Node in map data
+    double map_gps_long_;
+
+    bool gps_ref_initialized_; // Flag to track GPS reference initialization
+    bool map_tf_initialized_;
+    bool first_node_initialized_;
     
     // A* algorithm data structures
     std::unordered_map<int, std::shared_ptr<AStarNode>> node_map_;
