@@ -98,6 +98,28 @@ class DifferentialDriveDynamics:
         # Stack and return next state
         next_state = torch.stack([next_x, next_y, next_theta], dim=1)
         return next_state.to(self.device)
+    
+    def rollout_batch(self, initial_state, actions):
+        """
+        Vectorized rollout for entire action sequence
+        
+        Args:
+            initial_state (torch.Tensor): Initial state [x, y, theta] (K x 3)
+            actions (torch.Tensor): Action sequence [v, w] (K x T x 2)
+            
+        Returns:
+            torch.Tensor: State trajectory (K x T x 3)
+        """
+        K, T, nu = actions.shape
+        states = torch.zeros(K, T, 3, device=self.device)
+        
+        current_state = initial_state
+        for t in range(T):
+            next_state = self(current_state, actions[:, t])
+            states[:, t] = next_state
+            current_state = next_state
+            
+        return states
 
 
 class AckermannDynamics:
@@ -150,3 +172,25 @@ class AckermannDynamics:
         # Stack and return next state
         next_state = torch.stack([next_x_rear, next_y_rear, next_theta], dim=1)
         return next_state.to(self.device)
+    
+    def rollout_batch(self, initial_state, actions):
+        """
+        Vectorized rollout for entire action sequence (Ackermann)
+        
+        Args:
+            initial_state (torch.Tensor): Initial state [x, y, theta] (K x 3)
+            actions (torch.Tensor): Action sequence [v_rear, delta] (K x T x 2)
+            
+        Returns:
+            torch.Tensor: State trajectory (K x T x 3)
+        """
+        K, T, nu = actions.shape
+        states = torch.zeros(K, T, 3, device=self.device)
+        
+        current_state = initial_state
+        for t in range(T):
+            next_state = self(current_state, actions[:, t])
+            states[:, t] = next_state
+            current_state = next_state
+            
+        return states

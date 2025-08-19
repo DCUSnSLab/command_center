@@ -253,13 +253,13 @@ class SteeringValidationNode(Node):
             
             # Only recommend change if error is significant and measurements are consistent
             if wheelbase_error > 0.08 and measurement_std < 0.15:  # 8cm error, 15cm std
-                self.get_logger().warn(
-                    f'WHEELBASE DISCREPANCY: Config={self.wheelbase:.3f}m, '
-                    f'Estimated={estimated_wheelbase:.3f}m, Error={wheelbase_error:.3f}m'
-                )
-                self.get_logger().info(
-                    f'RECOMMENDATION: Update wheelbase parameter to {estimated_wheelbase:.3f}m'
-                )
+                # self.get_logger().warn(
+                #     f'WHEELBASE DISCREPANCY: Config={self.wheelbase:.3f}m, '
+                #     f'Estimated={estimated_wheelbase:.3f}m, Error={wheelbase_error:.3f}m'
+                # )
+                # self.get_logger().info(
+                #     f'RECOMMENDATION: Update wheelbase parameter to {estimated_wheelbase:.3f}m'
+                # )
 
 
 def main(args=None):
