@@ -3,34 +3,34 @@
     # 디바이스 설정
     use_gpu: true                # GPU 사용 여부 (성능 향상)
     
-    # 제어 설정 (log-MPPI 스타일 고빈도 제어)
-    control_frequency: 20.0       # Hz - 제어 주파수 (log-MPPI 수준)
+    # 제어 설정 (최적화된 실시간 제어)
+    control_frequency: 20.0       # Hz - 제어 주파수 (실시간 성능과 정확도의 균형)
     viz_frequency: 10.0           # Hz - 시각화 주파수 (성능 최적화)
-    dt: 0.05                     # seconds - 시간 간격 (더 정밀한 제어)
+    dt: 0.05                     # seconds - 시간 간격 (control_frequency와 일치: 1/20 = 0.05)
     
-    # 시각화 설정 (성능 최적화를 위해 끄기 가능)
+    # 시각화 설정 (성능 최적화를 위해 조정 가능)
     enable_visualization: true    # 전체 시각화 활성화 여부
     enable_path_viz: true        # 최적 경로 시각화 여부
     enable_obstacle_viz: true    # 장애물 시각화 여부  
     enable_goal_viz: true        # 목표 마커 시각화 여부
     enable_best_paths: true      # cost 낮은 경로들 시각화 여부 (최적 경로 포함)
-    num_best_paths: 10           # 시각화할 최적 경로 개수
+    num_best_paths: 5            # 시각화할 최적 경로 개수 (성능 향상을 위해 감소)
     
     # 동역학 모델 선택
-    motion_model: 'ackermann'    # 'twist' 또는 'ackermann' - 물리적 정확성을 위해 ackermann 사용
+    motion_model: 'ackermann'    # 'twist' 또는 'ackermann' - HUNTER 2.0의 물리적 정확성을 위해 ackermann 사용
     
     # SMPPI (Smooth MPPI) 설정
     use_smppi: true              # SMPPI 사용 여부 (부드러운 경로를 위해 권장)
     smppi:
-      w_action_seq_cost: 30.0    # 액션 시퀀스 부드러움 가중치 (높을수록 더 부드러움)
-      delta_t: 0.05              # SMPPI 시간 간격 (control_frequency와 일치 권장: 1/20 = 0.05)
+      w_action_seq_cost: 15.0    # 액션 시퀀스 부드러움 가중치 (과도한 부드러움 방지)
+      delta_t: 0.05              # SMPPI 시간 간격 (control_frequency와 정확히 일치: 1/20 = 0.05)
       use_action_bounds: true    # 액션 제한 사용 여부 (안전성 향상)
     
-    # MPPI 알고리즘 파라미터 (SMPPI 최적화된 설정)
-    horizon_steps: 100           # 예측 시간 스텝 수 (SMPPI에서는 약간 줄여서 성능 향상)
-    num_samples: 5000           # 샘플 궤적 개수 (SMPPI의 부드러움으로 더 많은 샘플 활용 가능)
-    lambda_: 2.0                # 온도 파라미터 (SMPPI에서는 덜 보수적으로 설정 가능)
-    sigma: [0.6, 0.3]           # [속도_노이즈, 조향각_노이즈] - SMPPI의 부드러움으로 약간 증가
+    # MPPI 알고리즘 파라미터 (성능과 정확도 균형 최적화)
+    horizon_steps: 150           # 예측 시간 스텝 수 (7.5초 예측: 150*0.05, 성능-정확도 균형)
+    num_samples: 1500           # 샘플 궤적 개수 (GPU 메모리 효율성과 품질의 균형)
+    lambda_: 10.0               # 온도 파라미터 (안정적 수렴과 적절한 탐험의 균형)
+    sigma: [0.3, 0.15]          # [속도_노이즈, 조향각_노이즈] - 수렴성 향상을 위해 최적화
     
     # 차량 제약 조건 (Ackermann 모델)
     max_linear_vel: 1.5         # m/s - 최대 후륜 속도
@@ -39,30 +39,30 @@
     wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
     track_width: 0.0            # m - 좌우 바퀴 간격 (0이면 단순 Ackermann)
     
-    # 비용 함수 가중치 설정 (균형잡힌 실용적 설정)
+    # 비용 함수 가중치 설정 (안전성과 성능의 균형 최적화)
     obstacle_cost:
       safety_radius: 0.8         # m - 안전 반경 (HUNTER 2.0 크기 고려한 장애물과의 최소 거리)
       max_range: 100.0           # m - 레이저 센서 최대 감지 거리
-      penalty_weight: 50.0       # 장애물 페널티 가중치 (안전하지만 유연한 회피)
-      exponential_factor: 2.5    # 지수 페널티 계수 (부드러운 회피)
+      penalty_weight: 100.0      # 장애물 페널티 가중치 (강력한 충돌 회피를 위해 증가)
+      exponential_factor: 3.0    # 지수 페널티 계수 (더 급격한 회피 반응)
     
     goal_cost:
-      goal_weight: 5000.0          # 목표점 추적 가중치 (매우 강한 목표 지향성)
-      angle_weight: 1.0          # 방향 추적 가중치 (강력한 방향 정렬)
+      goal_weight: 100.0          # 목표점 추적 가중치 (적절한 목표 지향성)
+      angle_weight: 5.0          # 방향 추적 가중치 (방향 정렬 중요도 증가)
     
     control_cost:
-      linear_weight: 20.0        # 직진 제어 노력 가중치 (극도로 부드러운 가속/감속)
-      angular_weight: 50.0       # 회전 제어 노력 가중치 (극도로 부드러운 회전)
+      linear_weight: 5.0         # 직진 제어 노력 가중치 (적절한 부드러움)
+      angular_weight: 15.0       # 회전 제어 노력 가중치 (부드러운 회전, 하지만 과도하지 않게)
     
     motion_cost:
       allow_reverse: true        # 후진 허용 여부
-      reverse_penalty_weight: 0.0  # 후진 페널티 가중치 (후진을 선호하지 않음)
-      min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s)
-      reverse_max_speed: -2.0    # 최대 후진 속도 제한 (m/s, 음수 값)
+      reverse_penalty_weight: 5.0 # 후진 페널티 가중치 (적절한 전진 선호도)
+      min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s, 저속 전진 권장)
+      reverse_max_speed: -1.5    # 최대 후진 속도 제한 (m/s, 안전한 후진 속도)
     
     smoothness_cost:
-      curvature_weight: 800.0      # 급한 회전 억제 가중치 (SMPPI가 부드러움을 보장하므로 약간 낮춤)
-      acceleration_weight: 15.0    # 급한 가속/감속 억제 가중치 (SMPPI와 함께 작용)
+      curvature_weight: 25.0      # 급한 회전 억제 가중치 (SMPPI와 함께 적절한 부드러움)
+      acceleration_weight: 10.0    # 급한 가속/감속 억제 가중치 (적절한 가속도 제한)
     
     # Goal 도달 임계값
     goal_reached_threshold: 0.5  # m - goal 도달 판정 거리 (기본: 50cm)
