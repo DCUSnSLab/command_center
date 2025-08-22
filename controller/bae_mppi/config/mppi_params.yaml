@@ -58,7 +58,7 @@
     # 이 설정은 MPPI 샘플링 시 물리적으로 불가능한 동작을 원천 차단합니다
     sampling_control:
       allow_forward_sampling: true   # 전진 방향 샘플링 허용 여부 (일반적으로 true)
-      allow_reverse_sampling: true  # 후진 방향 샘플링 허용 여부 (급격한 속도 변화 방지를 위해 false 권장)
+      allow_reverse_sampling: false  # 후진 방향 샘플링 허용 여부 (급격한 속도 변화 방지를 위해 false 권장)
     
     motion_cost:
       allow_reverse: true        # 후진 허용 여부 (비용 계산 시)

@@ -10,6 +10,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import torch
 import numpy as np
 import time
+import math
 
 # ROS2 messages
 from geometry_msgs.msg import Twist, PoseStamped, Point
@@ -510,31 +511,22 @@ class MPPICoreNode(Node):
             cmd_msg = Twist()
 
             if self.motion_model == 'twist':
-                # Direct mapping for twist model - NO conversion needed!
+                # 이미 Twist 형태면 그대로 사용
                 cmd_msg.linear.x = float(action[0])   # vx
                 cmd_msg.angular.z = float(action[1])  # wz
             else:
-                # Ackermann model conversion (Hunter-compatible formula)
-                rear_wheel_velocity = float(action[0])
-                front_steering_angle = float(action[1])
-                
-                if abs(rear_wheel_velocity) > 0.01 and abs(front_steering_angle) > 0.005:
-                    # Hunter 공식과 동일: R = L/tan(δ) + track/2
-                    turning_radius = self.wheelbase / torch.tan(torch.abs(action[1])) + self.track_width / 2
-                    angular_velocity = rear_wheel_velocity / turning_radius
-                    
-                    # 조향 방향 고려
-                    if front_steering_angle < 0:
-                        angular_velocity = -angular_velocity
-                    
-                    # 후진시 각속도 방향 반전
-                    if rear_wheel_velocity < 0:
-                        angular_velocity = -angular_velocity
+                # Ackermann → Twist (표준 공식)
+                v     = float(action[0])   # 차체 전진속도 [m/s]
+                delta = float(action[1])   # 전륜 조향각 [rad]
+
+                # 필요 시 데드밴드(선택)
+                if abs(v) < 1e-3:
+                    omega = 0.0
                 else:
-                    angular_velocity = 0.0
-                    
-                cmd_msg.linear.x = rear_wheel_velocity
-                cmd_msg.angular.z = float(angular_velocity)
+                    omega = (v / self.wheelbase) * math.tan(delta)
+
+                cmd_msg.linear.x  = v
+                cmd_msg.angular.z = omega
             
             self.cmd_vel_pub.publish(cmd_msg)
 
