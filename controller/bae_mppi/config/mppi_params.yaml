@@ -22,18 +22,18 @@
     # SMPPI (Smooth MPPI) 설정
     use_smppi: true              # SMPPI 사용 여부 (부드러운 경로를 위해 권장)
     smppi:
-      w_action_seq_cost: 15.0    # 액션 시퀀스 부드러움 가중치 (과도한 부드러움 방지)
+      w_action_seq_cost: 50.0    # 액션 시퀀스 부드러움 가중치 (대폭 증가로 더 부드러운 궤적)
       delta_t: 0.05              # SMPPI 시간 간격 (control_frequency와 정확히 일치: 1/20 = 0.05)
       use_action_bounds: true    # 액션 제한 사용 여부 (안전성 향상)
     
     # MPPI 알고리즘 파라미터 (성능과 정확도 균형 최적화)
     horizon_steps: 150           # 예측 시간 스텝 수 (7.5초 예측: 150*0.05, 성능-정확도 균형)
     num_samples: 1500           # 샘플 궤적 개수 (GPU 메모리 효율성과 품질의 균형)
-    lambda_: 10.0               # 온도 파라미터 (안정적 수렴과 적절한 탐험의 균형)
+    lambda_: 0.5               # 온도 파라미터 (Nav2 수준으로 낮춰 안정성 향상)
     sigma: [0.3, 0.15]          # [속도_노이즈, 조향각_노이즈] - 수렴성 향상을 위해 최적화
     
     # 차량 제약 조건 (Ackermann 모델)
-    max_linear_vel: 1.5         # m/s - 최대 후륜 속도
+    max_linear_vel: 2.0         # m/s - 최대 후륜 속도
     max_angular_vel: 1.0        # rad/s - (Twist 호환성용, Ackermann에서는 미사용)
     max_steering_angle: 0.349   # rad - 최대 전륜 조향각
     wheelbase: 0.65             # m - 전후륜 축간 거리 (HUNTER 2.0)
@@ -54,18 +54,24 @@
       linear_weight: 5.0         # 직진 제어 노력 가중치 (적절한 부드러움)
       angular_weight: 15.0       # 회전 제어 노력 가중치 (부드러운 회전, 하지만 과도하지 않게)
     
+    # 샘플링 제어 설정 (샘플링 단계에서부터 제어)
+    # 이 설정은 MPPI 샘플링 시 물리적으로 불가능한 동작을 원천 차단합니다
+    sampling_control:
+      allow_forward_sampling: true   # 전진 방향 샘플링 허용 여부 (일반적으로 true)
+      allow_reverse_sampling: true  # 후진 방향 샘플링 허용 여부 (급격한 속도 변화 방지를 위해 false 권장)
+    
     motion_cost:
-      allow_reverse: true        # 후진 허용 여부
+      allow_reverse: true        # 후진 허용 여부 (비용 계산 시)
       reverse_penalty_weight: 5.0 # 후진 페널티 가중치 (적절한 전진 선호도)
       min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s, 저속 전진 권장)
       reverse_max_speed: -1.5    # 최대 후진 속도 제한 (m/s, 안전한 후진 속도)
     
     smoothness_cost:
       curvature_weight: 25.0      # 급한 회전 억제 가중치 (SMPPI와 함께 적절한 부드러움)
-      acceleration_weight: 10.0    # 급한 가속/감속 억제 가중치 (적절한 가속도 제한)
+      acceleration_weight: 200.0    # 급한 가속/감속 억제 가중치 (더 큰 제한으로 안정성 향상)
     
     # Goal 도달 임계값
-    goal_reached_threshold: 0.5  # m - goal 도달 판정 거리 (기본: 50cm)
+    goal_reached_threshold: 1.0  # m - goal 도달 판정 거리 (기본: 50cm)
     
     # 레이저 스캔 처리 설정
     laser:

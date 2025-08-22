@@ -439,10 +439,16 @@ class SMPPI(MPPI):
         return f"{super().get_params()} w={self.w_action_seq_cost} t={self.delta_t}"
 
     def shift_nominal_trajectory(self):
+        # Phase 4: Improved trajectory shifting for better continuity
         self.U = torch.roll(self.U, -1, dims=0)
-        self.U[-1] = self.u_init
+        # Instead of abrupt reset to u_init, use gradual decay
+        if len(self.U) > 1:
+            self.U[-1] = self.U[-2] * 0.8  # Gradual decay instead of sudden reset
+        else:
+            self.U[-1] = self.u_init
+            
         self.action_sequence = torch.roll(self.action_sequence, -1, dims=0)
-        self.action_sequence[-1] = self.action_sequence[-2]  # add T-1 action to T
+        self.action_sequence[-1] = self.action_sequence[-2]  # Maintain continuity
 
     def get_action_sequence(self):
         return self.action_sequence
@@ -483,7 +489,10 @@ class SMPPI(MPPI):
         self._compute_weighting(cost_total)
         perturbations = torch.sum(self.omega.view(-1, 1, 1) * self.noise, dim=0)
 
-        self.U = self.U + perturbations
+        # Phase 4: Apply smoothing to perturbations before integration
+        smoothed_perturbations = self._smooth_perturbations(perturbations)
+        self.U = self.U + smoothed_perturbations
+        
         # U is now the lifted control space, so we integrate it
         self.action_sequence += self.U * self.delta_t
 
@@ -496,6 +505,20 @@ class SMPPI(MPPI):
         commandcomputation_time_ms_c = (end_time_c - start_time_c) * 1000
         print(f"command : {commandcomputation_time_ms_c:.3f} ms")
         return action
+    
+    def _smooth_perturbations(self, perturbations):
+        """Phase 4: Apply temporal smoothing to perturbations"""
+        # Simple exponential smoothing to reduce sudden changes
+        smoothing_factor = 0.7  # How much to smooth (0 = no change, 1 = no smoothing)
+        
+        if not hasattr(self, '_last_perturbations'):
+            self._last_perturbations = torch.zeros_like(perturbations)
+        
+        # Exponential moving average
+        smoothed = smoothing_factor * perturbations + (1 - smoothing_factor) * self._last_perturbations
+        self._last_perturbations = smoothed.clone()
+        
+        return smoothed
 
     def _compute_perturbed_action_and_noise(self):
         # parallelize sampling across trajectories

@@ -75,6 +75,10 @@ class MPPICoreNode(Node):
         self.declare_parameter('smoothness_cost.acceleration_weight', 10.0)
         self.declare_parameter('goal_reached_threshold', 0.5)
         
+        # Sampling control parameters
+        self.declare_parameter('sampling_control.allow_forward_sampling', True)
+        self.declare_parameter('sampling_control.allow_reverse_sampling', False)
+        
         # SMPPI specific parameters
         self.declare_parameter('use_smppi', True)
         self.declare_parameter('smppi.w_action_seq_cost', 10.0)
@@ -156,17 +160,34 @@ class MPPICoreNode(Node):
         self.cost_function.goal_cost.goal_weight = self.get_parameter('goal_cost.goal_weight').get_parameter_value().double_value
         self.cost_function.goal_cost.angle_weight = self.get_parameter('goal_cost.angle_weight').get_parameter_value().double_value
         
-        # Control bounds based on motion model
+        # Get sampling control parameters
+        allow_forward_sampling = self.get_parameter('sampling_control.allow_forward_sampling').get_parameter_value().bool_value
+        allow_reverse_sampling = self.get_parameter('sampling_control.allow_reverse_sampling').get_parameter_value().bool_value
+        
+        # Control bounds based on motion model and sampling preferences
         nx = 3  # [x, y, theta]
         nu = 2  # [v, w] or [v, delta]
         
+        # Determine velocity bounds based on sampling preferences
+        if allow_forward_sampling and allow_reverse_sampling:
+            min_linear_vel = -max_linear_vel
+        elif allow_forward_sampling and not allow_reverse_sampling:
+            min_linear_vel = 0.0  # Only forward motion
+        elif not allow_forward_sampling and allow_reverse_sampling:
+            min_linear_vel = -max_linear_vel
+            max_linear_vel = 0.0  # Only reverse motion
+        else:
+            # Neither allowed - default to stationary
+            min_linear_vel = 0.0
+            max_linear_vel = 0.0
+        
         if self.motion_model == 'twist':
             # Twist model: [vx, wz]
-            u_min = torch.tensor([-max_linear_vel, -max_angular_vel], device=self.device)
+            u_min = torch.tensor([min_linear_vel, -max_angular_vel], device=self.device)
             u_max = torch.tensor([max_linear_vel, max_angular_vel], device=self.device)
         else:
             # Ackermann model: [v_rear, delta]
-            u_min = torch.tensor([-max_linear_vel, -max_steering_angle], device=self.device)
+            u_min = torch.tensor([min_linear_vel, -max_steering_angle], device=self.device)
             u_max = torch.tensor([max_linear_vel, max_steering_angle], device=self.device)
         
         # Initialize MPPI
@@ -175,6 +196,8 @@ class MPPICoreNode(Node):
         # Debug MPPI parameters
         self.get_logger().info(f"[MPPI INIT] Samples: {num_samples}, Horizon: {horizon_steps}")
         self.get_logger().info(f"[MPPI INIT] Sigma: {sigma}, Lambda: {lambda_}")
+        self.get_logger().info(f"[SAMPLING CONTROL] Forward: {allow_forward_sampling}, Reverse: {allow_reverse_sampling}")
+        
         u_min_vals = [float(u_min[0]), float(u_min[1])]
         u_max_vals = [float(u_max[0]), float(u_max[1])]
         
@@ -241,6 +264,17 @@ class MPPICoreNode(Node):
         self.current_goal_id = ""
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
         
+        # Control smoothing variables
+        self.control_history = []
+        self.filter_window = 5
+        self.last_published_action = None
+        self.max_change_rate = 0.8  # Maximum allowed change rate per step
+        
+        # Savitzky-Golay filter (Phase 3)
+        self.sg_history = []  # For Savitzky-Golay filter
+        self.sg_window = 9
+        self.use_savitzky_golay = True
+        
         # QoS profiles
         reliable_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -269,6 +303,95 @@ class MPPICoreNode(Node):
             1.0 / self.control_frequency, self.control_callback)
         
         self.get_logger().info('MPPI Core Node initialized')
+    
+    def apply_control_smoothing(self, raw_action):
+        """Apply moving average filter to control commands"""
+        # Convert to tensor if needed
+        if not isinstance(raw_action, torch.Tensor):
+            raw_action = torch.tensor(raw_action, device=self.device)
+        
+        # Add to history
+        self.control_history.append(raw_action.clone())
+        if len(self.control_history) > self.filter_window:
+            self.control_history.pop(0)
+        
+        # Apply weighted moving average (more weight to recent values)
+        if len(self.control_history) >= 3:  # Need at least 3 samples
+            weights = torch.linspace(0.1, 0.4, len(self.control_history), device=self.device)
+            weights = weights / weights.sum()  # Normalize
+            
+            smoothed = torch.zeros_like(raw_action)
+            for i, (weight, control) in enumerate(zip(weights, self.control_history)):
+                smoothed += weight * control
+            
+            return smoothed
+        else:
+            # Not enough history, return original
+            return raw_action
+    
+    def apply_rate_limiter(self, action, last_action, max_change_rate=None):
+        """Limit the rate of change in control commands"""
+        if max_change_rate is None:
+            max_change_rate = self.max_change_rate
+            
+        if last_action is not None:
+            change = action - last_action
+            change_magnitude = torch.norm(change)
+            
+            if change_magnitude > max_change_rate:
+                # Limit the change rate
+                limited_change = change * (max_change_rate / change_magnitude)
+                action = last_action + limited_change
+                
+                # Log high change rates
+                self.get_logger().debug(f"Rate limited: {change_magnitude:.3f} -> {max_change_rate:.3f}")
+        
+        return action
+    
+    def monitor_control_stability(self, current_action, last_action):
+        """Monitor control stability and apply emergency smoothing if needed"""
+        stability_threshold = 1.5  # Emergency threshold
+        
+        if last_action is not None:
+            change_rate = torch.norm(current_action - last_action)
+            if change_rate > stability_threshold:
+                self.get_logger().warn(f"High control change rate detected: {change_rate:.3f}")
+                # Apply emergency smoothing (stronger rate limiting)
+                return self.apply_rate_limiter(current_action, last_action, max_change_rate=0.3)
+        
+        return current_action
+    
+    def apply_savitzky_golay_filter(self, raw_action):
+        """Apply Savitzky-Golay filter (Nav2 style)"""
+        # Convert to tensor if needed
+        if not isinstance(raw_action, torch.Tensor):
+            raw_action = torch.tensor(raw_action, device=self.device)
+        
+        # Add to Savitzky-Golay history
+        self.sg_history.append(raw_action.clone())
+        if len(self.sg_history) > self.sg_window:
+            self.sg_history.pop(0)
+        
+        # Need at least 9 points for the filter
+        if len(self.sg_history) < self.sg_window:
+            return raw_action
+        
+        # Savitzky-Golay coefficients for 9-point quadratic filter (Nav2 style)
+        coeffs = torch.tensor([-21.0, 14.0, 39.0, 54.0, 59.0, 54.0, 39.0, 14.0, -21.0], 
+                             device=self.device) / 231.0
+        
+        # Apply filter to each dimension
+        filtered_action = torch.zeros_like(raw_action)
+        
+        for dim in range(raw_action.shape[0]):  # For each control dimension
+            # Extract values for this dimension
+            values = torch.stack([hist[dim] for hist in self.sg_history])
+            
+            # Apply convolution
+            filtered_value = torch.sum(values * coeffs)
+            filtered_action[dim] = filtered_value
+        
+        return filtered_action
     
     def state_callback(self, msg: MPPIState):
         """Receive processed robot state"""
@@ -326,8 +449,26 @@ class MPPICoreNode(Node):
         
         try:
             # Compute MPPI control command
+            raw_action = self.mppi.command(self.current_state)
             
-            action = self.mppi.command(self.current_state)
+            # Apply control smoothing filters
+            # Phase 3: Savitzky-Golay filter (highest priority)
+            if self.use_savitzky_golay:
+                sg_filtered_action = self.apply_savitzky_golay_filter(raw_action)
+            else:
+                sg_filtered_action = raw_action
+            
+            # Phase 2: Moving average filter (backup/secondary)
+            smoothed_action = self.apply_control_smoothing(sg_filtered_action)
+            
+            # Phase 2: Rate limiter
+            limited_action = self.apply_rate_limiter(smoothed_action, self.last_published_action)
+            
+            # Phase 2: Stability monitoring
+            action = self.monitor_control_stability(limited_action, self.last_published_action)
+            
+            # Store for next iteration
+            self.last_published_action = action.clone() if isinstance(action, torch.Tensor) else torch.tensor(action, device=self.device)
 
             # Debug sampling diversity every 20 calls
             if not hasattr(self, '_control_debug_counter'):
