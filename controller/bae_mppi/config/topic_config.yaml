@@ -9,7 +9,7 @@
         # 센서 데이터
         laser_scan: '/ptl/scan'
         odometry: '/odom'
-        goal_pose: '/goal_pose'
+        goal_pose: '/subgoal'
         # 제어 명령 모니터링 (steering validation용)
         cmd_vel_monitor: '/ackermann_like_controller/cmd_vel'
       

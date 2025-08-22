@@ -186,12 +186,12 @@ class MPPIVisualizer:
         marker.pose.orientation.w = np.cos(yaw / 2.0)
         
         # Set scale
-        marker.scale.x = 0.3  # Arrow length
-        marker.scale.y = 0.05  # Arrow width
+        marker.scale.x = 0.4  # Arrow length
+        marker.scale.y = 0.1  # Arrow width
         marker.scale.z = 0.05  # Arrow height
         
         # Set color (green)
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=0.5, g=0.0, b=0.5, a=1.0)
         
         # Set lifetime
         marker.lifetime = Duration(sec=0, nanosec=500000000)  # 0.5 seconds

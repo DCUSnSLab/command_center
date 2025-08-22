@@ -1,0 +1,4 @@
+# 앞으로 시뮬레이션 - 현실 간 자주 사용하는 패러미터는 해당 파일에 정의해서 switch 할 수 있도록 합시다..
+/**:
+  ros__parameters:
+    use_sim_time: false
