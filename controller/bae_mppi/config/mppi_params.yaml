@@ -1,36 +1,35 @@
 /bae_mppi/mppi_core:
   ros__parameters:
-    # 디바이스 설정
-    use_gpu: true                # GPU 사용 여부 (성능 향상)
+    use_gpu: true                # GPU 사용 여부
     
     # 제어 설정 (최적화된 실시간 제어)
-    control_frequency: 20.0       # Hz - 제어 주파수 (실시간 성능과 정확도의 균형)
-    viz_frequency: 10.0           # Hz - 시각화 주파수 (성능 최적화)
-    dt: 0.05                     # seconds - 시간 간격 (control_frequency와 일치: 1/20 = 0.05)
+    control_frequency: 20.0       # Hz - 제어 주파수
+    viz_frequency: 10.0           # Hz - 시각화 주파수
+    dt: 0.05                     # seconds - 시간 간격
     
-    # 시각화 설정 (성능 최적화를 위해 조정 가능)
+    # 시각화 설정
     enable_visualization: true    # 전체 시각화 활성화 여부
     enable_path_viz: true        # 최적 경로 시각화 여부
     enable_obstacle_viz: true    # 장애물 시각화 여부  
     enable_goal_viz: true        # 목표 마커 시각화 여부
-    enable_best_paths: true      # cost 낮은 경로들 시각화 여부 (최적 경로 포함)
-    num_best_paths: 5            # 시각화할 최적 경로 개수 (성능 향상을 위해 감소)
+    enable_best_paths: true      # cost 낮은 경로들 시각화 여부 
+    num_best_paths: 5            # 시각화할 최적 경로 개수
     
     # 동역학 모델 선택
-    motion_model: 'ackermann'    # 'twist' 또는 'ackermann' - HUNTER 2.0의 물리적 정확성을 위해 ackermann 사용
+    motion_model: 'ackermann'    # 'twist' 또는 'ackermann'
     
     # SMPPI (Smooth MPPI) 설정
-    use_smppi: true              # SMPPI 사용 여부 (부드러운 경로를 위해 권장)
+    use_smppi: true              # SMPPI 사용 여부
     smppi:
-      w_action_seq_cost: 50.0    # 액션 시퀀스 부드러움 가중치 (대폭 증가로 더 부드러운 궤적)
-      delta_t: 0.05              # SMPPI 시간 간격 (control_frequency와 정확히 일치: 1/20 = 0.05)
-      use_action_bounds: true    # 액션 제한 사용 여부 (안전성 향상)
+      w_action_seq_cost: 60.0    # 액션 시퀀스 부드러움 가중치
+      delta_t: 0.05              # SMPPI 시간 간격 (control_frequency와 정확히 일치)
+      use_action_bounds: true    # 액션 제한 사용 여부
     
-    # MPPI 알고리즘 파라미터 (성능과 정확도 균형 최적화)
-    horizon_steps: 150           # 예측 시간 스텝 수 (7.5초 예측: 150*0.05, 성능-정확도 균형)
-    num_samples: 1500           # 샘플 궤적 개수 (GPU 메모리 효율성과 품질의 균형)
-    lambda_: 0.5               # 온도 파라미터 (Nav2 수준으로 낮춰 안정성 향상)
-    sigma: [0.3, 0.15]          # [속도_노이즈, 조향각_노이즈] - 수렴성 향상을 위해 최적화
+    # MPPI 알고리즘 파라미터
+    horizon_steps: 120           # 예측 시간 스텝 수 (7.5초 예측: 150*0.05, 성능-정확도 균형)
+    num_samples: 1500           # 샘플 궤적 개수
+    lambda_: 0.4               # 온도 파라미터 
+    sigma: [0.3, 0.08]          # [속도_노이즈, 조향각_노이즈]
     
     # 차량 제약 조건 (Ackermann 모델)
     max_linear_vel: 2.0         # m/s - 최대 후륜 속도
@@ -41,37 +40,74 @@
     
     # 비용 함수 가중치 설정 (안전성과 성능의 균형 최적화)
     obstacle_cost:
-      safety_radius: 0.8         # m - 안전 반경 (HUNTER 2.0 크기 고려한 장애물과의 최소 거리)
+      safety_radius: 0.8         # m - 안전 반경
       max_range: 100.0           # m - 레이저 센서 최대 감지 거리
-      penalty_weight: 100.0      # 장애물 페널티 가중치 (강력한 충돌 회피를 위해 증가)
-      exponential_factor: 3.0    # 지수 페널티 계수 (더 급격한 회피 반응)
+      penalty_weight: 100.0      # 장애물 페널티 가중치
+      exponential_factor: 3.0    # 지수 페널티 계수
     
     goal_cost:
-      goal_weight: 100.0          # 목표점 추적 가중치 (적절한 목표 지향성)
-      angle_weight: 5.0          # 방향 추적 가중치 (방향 정렬 중요도 증가)
+      goal_weight: 120.0          # 목표점 추적 가중치
+      angle_weight: 12.0          # 방향 추적 가중치
     
     control_cost:
-      linear_weight: 5.0         # 직진 제어 노력 가중치 (적절한 부드러움)
-      angular_weight: 15.0       # 회전 제어 노력 가중치 (부드러운 회전, 하지만 과도하지 않게)
+      linear_weight: 5.0         # 직진 제어 노력 가중치
+      angular_weight: 15.0       # 회전 제어 노력 가중치
     
-    # 샘플링 제어 설정 (샘플링 단계에서부터 제어)
-    # 이 설정은 MPPI 샘플링 시 물리적으로 불가능한 동작을 원천 차단합니다
+    # 샘플링 제어 설정
     sampling_control:
-      allow_forward_sampling: true   # 전진 방향 샘플링 허용 여부 (일반적으로 true)
-      allow_reverse_sampling: false  # 후진 방향 샘플링 허용 여부 (급격한 속도 변화 방지를 위해 false 권장)
+      allow_forward_sampling: true   # 전진 방향 샘플링 허용 여부
+      allow_reverse_sampling: false  # 후진 방향 샘플링 허용 여부
     
     motion_cost:
-      allow_reverse: true        # 후진 허용 여부 (비용 계산 시)
-      reverse_penalty_weight: 5.0 # 후진 페널티 가중치 (적절한 전진 선호도)
-      min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s, 저속 전진 권장)
-      reverse_max_speed: -1.5    # 최대 후진 속도 제한 (m/s, 안전한 후진 속도)
+      allow_reverse: true        # 후진 허용 여부
+      reverse_penalty_weight: 5.0 # 후진 페널티 가중치
+      min_forward_speed_preference: 0.0  # 전진 속도 선호 임계값 (m/s)
+      reverse_max_speed: -1.5    # 최대 후진 속도 제한 (m/s)
     
     smoothness_cost:
-      curvature_weight: 25.0      # 급한 회전 억제 가중치 (SMPPI와 함께 적절한 부드러움)
-      acceleration_weight: 200.0    # 급한 가속/감속 억제 가중치 (더 큰 제한으로 안정성 향상)
+      curvature_weight: 80.0      # 급한 회전 억제 가중치
+      acceleration_weight: 200.0    # 급한 가속/감속 억제 가중치
     
     # Goal 도달 임계값
-    goal_reached_threshold: 1.0  # m - goal 도달 판정 거리 (기본: 50cm)
+    goal_reached_threshold: 1.0  # m - goal 도달 판정 거리
+    
+    # 제어 스무딩 설정 (제어 명령 부드러움을 위한 필터링)
+    control_smoothing:
+      filter_window: 6             # 이동평균 필터 윈도우 크기 (5→8 증가)
+      max_change_rate: 0.6         # 최대 변화율 제한 (0.8→0.4 강화)
+      sg_window: 9                # Savitzky-Golay 필터 윈도우 크기
+      stability_threshold: 1.2     # 안정성 모니터링 임계값 (1.5→0.8 민감도 증가)
+      emergency_change_rate: 0.25  # 비상 시 변화율 제한 (0.3→0.15 강화)
+      min_samples_for_filter: 3    # 필터 적용을 위한 최소 샘플 수
+      moving_average_weight_start: 0.05  # 이동평균 가중치 시작값 (더 부드럽게)
+      moving_average_weight_end: 0.3     # 이동평균 가중치 끝값 (더 보수적)
+    
+    # 장애물 회피 고급 설정
+    obstacle_cost_advanced:
+      default_vehicle_radius: 0.5  # m - 기본 차량 반경 (footprint 정보 없을 때)
+      danger_zone_factor: 1.5      # 위험 구역 배수 (safety_radius * 이 값)
+      laser_min_range_absolute: 0.1  # m - 레이저 스캔 절대 최소 범위
+      debug_counter_interval: 50   # 디버그 정보 출력 간격 (호출 횟수)
+    
+    # 동작 제어 고급 설정 (하드코딩된 페널티 값들)
+    motion_cost_advanced:
+      backward_penalty: 1000.0     # 후진 완전 금지 시 페널티
+      fast_reverse_penalty: 500.0  # 과속 후진 추가 페널티
+      forward_bonus_multiplier: 2.0  # 저속 전진 권장 보너스 배수
+    
+    # SMPPI 고급 스무딩 설정
+    smppi_advanced:
+      trajectory_decay_factor: 0.8        # 궤적 이동 시 감쇠율
+      perturbation_smoothing_factor: 0.6  # 섭동 스무딩 인수 (0=변화없음, 1=스무딩없음)
+      action_continuity_weight: 0.8       # 액션 연속성 가중치 (trajectory shifting)
+      
+    # 디버그 및 모니터링 설정
+    debug:
+      control_debug_interval: 20   # 제어 디버그 정보 출력 간격
+      cost_debug_interval: 50      # 비용 함수 디버그 정보 출력 간격
+      velocity_threshold_debug: 1e-3  # 속도 임계값 (디버그용)
+      steering_threshold_debug: 1e-3  # 조향각 임계값 (디버그용)
+      action_shape_debug: true     # 액션 형태 디버그 활성화
     
     # 레이저 스캔 처리 설정
     laser:
@@ -84,7 +120,75 @@
     # 로봇 외형 정의 (HUNTER 2.0: 980x745mm, 평면화된 좌표: [x1,y1,x2,y2,x3,y3,x4,y4])
     footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
     footprint_padding: 0.15      # m - 외형 패딩 (안전 여유)
+    
+    # QoS 설정
+    qos:
+      sensor_depth: 1              # 센서 데이터 QoS 큐 깊이
+      reliable_depth: 5            # 신뢰할 수 있는 데이터 QoS 큐 깊이
+      visualization_depth: 10      # 시각화 데이터 QoS 큐 깊이
+    
+    # 센서 처리 고급 설정
+    sensor_processing:
+      default_angle_increment: 0.1  # rad - 기본 각도 증분 (LaserScan 정보 없을 때)
+      pose_z_default: 0.0          # m - 기본 Z 좌표 (2D 환경)
+      quaternion_yaw_divisor: 2.0  # 쿼터니언 변환 시 yaw 나누기 값
+    
+    # 시각화 설정 (마커 스타일 등)
+    visualization:
+      line_width: 0.05             # m - 경로 라인 두께
+      obstacle_point_size: 0.1     # m - 장애물 포인트 크기  
+      optimal_path_line_width: 0.05  # m - 최적 경로 라인 두께
+      best_path_line_width: 0.03   # m - 베스트 경로들 라인 두께
+      marker_lifetime_sec: 1       # 초 - 마커 생존 시간
+      obstacle_alpha: 0.8          # 장애물 마커 투명도
+      best_path_alpha_base: 0.8    # 베스트 경로 기본 투명도
+      best_path_alpha_factor: 0.4  # 베스트 경로 투명도 감소 팩터
+      trajectory_alpha_base: 0.3   # 궤적 기본 투명도
+      trajectory_alpha_range: 0.7  # 궤적 투명도 범위
+      arrow_length: 0.4            # m - 화살표 길이
+      arrow_width: 0.1             # m - 화살표 너비
+      arrow_height: 0.05           # m - 화살표 높이
+      point_z_offset: 0.05         # m - 포인트 Z 오프셋
+      optimal_path_z_offset: 0.1   # m - 최적 경로 Z 오프셋
+      goal_arrow_z_offset: 0.2     # m - 목표 화살표 Z 오프셋
 
 /bae_mppi/sensor_processor:
   ros__parameters:
     processing_frequency: 20.0
+
+/bae_mppi/steering_validation:
+  ros__parameters:
+    # 조향 검증 설정
+    wheelbase: 0.65              # m - 휠베이스 (검증용)
+    validation_window: 5.0       # 초 - 검증 윈도우 크기
+    log_interval: 2.0            # 초 - 로그 간격
+    
+    # 검증 임계값들
+    validation_thresholds:
+      velocity_threshold: 0.01   # m/s - 속도 임계값
+      steering_threshold: 0.01   # rad - 조향각 임계값
+      response_delay_min: 0.1    # 초 - 응답 지연 최소값
+      response_delay_max: 0.5    # 초 - 응답 지연 최대값
+      significant_steering_error: 0.2  # rad - 중요한 조향 오차 임계값 (≈11.5°)
+      significant_velocity_error: 0.2  # m/s - 중요한 속도 오차 임계값
+      min_samples_validation: 5   # 검증을 위한 최소 샘플 수
+      min_samples_analysis: 3     # 분석을 위한 최소 샘플 수
+      recent_samples_count: 3     # 최근 샘플 개수
+      param_analysis_samples: 20  # 매개변수 분석을 위한 샘플 수
+      param_analysis_interval: 10.0  # 초 - 매개변수 분석 간격
+    
+    # 물리적 한계값
+    physical_limits:
+      steering_ratio_min: 0.5    # 조향 비율 최소값
+      steering_ratio_max: 2.0    # 조향 비율 최대값
+      wheelbase_min: 0.3         # m - 휠베이스 최소값
+      wheelbase_max: 1.2         # m - 휠베이스 최대값
+      wheelbase_error_threshold: 0.08  # m - 휠베이스 오차 임계값
+      measurement_std_threshold: 0.15  # 측정 표준편차 임계값
+      
+    # 데이터 수집 설정  
+    data_collection:
+      cmd_history_frequency_assumption: 20  # Hz - 명령 히스토리 주파수 가정
+      odom_history_frequency_assumption: 50 # Hz - 오도메트리 히스토리 주파수 가정
+      velocity_filter_threshold: 0.05      # m/s - 속도 필터링 임계값
+      steering_filter_threshold: 0.02      # rad - 조향각 필터링 임계값 (≈1.15°)

@@ -45,12 +45,26 @@ class SensorProcessorNode(Node):
         self.declare_parameter('laser.max_range', 100.0)
         self.declare_parameter('processing_frequency', 20.0)
         
+        # QoS parameters
+        self.declare_parameter('qos.sensor_depth', 1)
+        self.declare_parameter('qos.reliable_depth', 5)
+        
+        # Sensor processing parameters
+        self.declare_parameter('sensor_processing.pose_z_default', 0.0)
+        self.declare_parameter('sensor_processing.quaternion_yaw_divisor', 2.0)
+        
         min_range = self.get_parameter('laser.min_range').get_parameter_value().double_value
         max_range = self.get_parameter('laser.max_range').get_parameter_value().double_value
         processing_freq = self.get_parameter('processing_frequency').get_parameter_value().double_value
         
         self.min_range = min_range
         self.max_range = max_range
+        
+        # Get QoS and sensor processing parameters
+        sensor_qos_depth = self.get_parameter('qos.sensor_depth').get_parameter_value().integer_value
+        reliable_qos_depth = self.get_parameter('qos.reliable_depth').get_parameter_value().integer_value
+        self.pose_z_default = self.get_parameter('sensor_processing.pose_z_default').get_parameter_value().double_value
+        self.quaternion_yaw_divisor = self.get_parameter('sensor_processing.quaternion_yaw_divisor').get_parameter_value().double_value
         
         # Get topic names
         laser_topic = self.get_parameter('topics.input.laser_scan').get_parameter_value().string_value
@@ -63,17 +77,17 @@ class SensorProcessorNode(Node):
         self.current_velocity = None
         self.latest_laser = None
         
-        # QoS profiles
+        # QoS profiles with configurable depths
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
-            depth=1
+            depth=sensor_qos_depth
         )
         
         reliable_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
-            depth=5
+            depth=reliable_qos_depth
         )
         
         # Subscribers
@@ -109,7 +123,7 @@ class SensorProcessorNode(Node):
         
         # Convert quaternion to yaw
         qx, qy, qz, qw = pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w
-        yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        yaw = np.arctan2(self.quaternion_yaw_divisor * (qw * qz + qx * qy), 1.0 - self.quaternion_yaw_divisor * (qy * qy + qz * qz))
         
         self.current_pose = [x, y, yaw]
         self.current_velocity = [twist.linear.x, twist.angular.z]
@@ -169,7 +183,7 @@ class SensorProcessorNode(Node):
                 point = Point()
                 point.x = float(world_x)
                 point.y = float(world_y)
-                point.z = 0.0
+                point.z = self.pose_z_default
                 obstacle_points.append(point)
         
         # Create message
@@ -197,12 +211,12 @@ class SensorProcessorNode(Node):
         # Set pose
         msg.pose.position.x = self.current_pose[0]
         msg.pose.position.y = self.current_pose[1]
-        msg.pose.position.z = 0.0
+        msg.pose.position.z = self.pose_z_default
         
         # Convert yaw to quaternion
         yaw = self.current_pose[2]
-        msg.pose.orientation.z = np.sin(yaw / 2.0)
-        msg.pose.orientation.w = np.cos(yaw / 2.0)
+        msg.pose.orientation.z = np.sin(yaw / self.quaternion_yaw_divisor)
+        msg.pose.orientation.w = np.cos(yaw / self.quaternion_yaw_divisor)
         
         # Set velocity
         if self.current_velocity is not None:

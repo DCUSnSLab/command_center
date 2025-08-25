@@ -9,7 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # Declare use_sim_time parameter
-    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
 
     return LaunchDescription([
         # Launch 1: Map service (immediate)
@@ -41,22 +41,22 @@ def generate_launch_description():
             ]
         ),
         
-        # Launch 3: MPPI controller (after 6 seconds)
-        TimerAction(
-            period=4.0,
-            actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource([
-                        os.path.join(
-                            FindPackageShare('bae_mppi').find('bae_mppi'),
-                            'launch',
-                            'mppi_distributed.launch.py'
-                        )
-                    ]),
-                    launch_arguments={'use_sim_time': use_sim_time}.items()
-                )
-            ]
-        ),
+        # # Launch 3: MPPI controller (after 6 seconds)
+        # TimerAction(
+        #     period=4.0,
+        #     actions=[
+        #         IncludeLaunchDescription(
+        #             PythonLaunchDescriptionSource([
+        #                 os.path.join(
+        #                     FindPackageShare('bae_mppi').find('bae_mppi'),
+        #                     'launch',
+        #                     'mppi_distributed.launch.py'
+        #                 )
+        #             ]),
+        #             launch_arguments={'use_sim_time': use_sim_time}.items()
+        #         )
+        #     ]
+        # ),
         
         # Launch 4: Gazebo simulation (after 9 seconds)
         # TimerAction(

@@ -86,6 +86,43 @@ class MPPICoreNode(Node):
         self.declare_parameter('smppi.delta_t', 0.05)
         self.declare_parameter('smppi.use_action_bounds', True)
         
+        # Control smoothing parameters
+        self.declare_parameter('control_smoothing.filter_window', 5)
+        self.declare_parameter('control_smoothing.max_change_rate', 0.8)
+        self.declare_parameter('control_smoothing.sg_window', 9)
+        self.declare_parameter('control_smoothing.stability_threshold', 1.5)
+        self.declare_parameter('control_smoothing.emergency_change_rate', 0.3)
+        self.declare_parameter('control_smoothing.min_samples_for_filter', 3)
+        self.declare_parameter('control_smoothing.moving_average_weight_start', 0.1)
+        self.declare_parameter('control_smoothing.moving_average_weight_end', 0.4)
+        
+        # Debug parameters
+        self.declare_parameter('debug.control_debug_interval', 20)
+        self.declare_parameter('debug.velocity_threshold_debug', 1e-3)
+        self.declare_parameter('debug.steering_threshold_debug', 1e-3)
+        
+        # Sensor processing parameters
+        self.declare_parameter('sensor_processing.default_angle_increment', 0.1)
+        
+        # QoS parameters
+        self.declare_parameter('qos.sensor_depth', 1)
+        self.declare_parameter('qos.reliable_depth', 5)
+        
+        # Advanced cost function parameters
+        self.declare_parameter('obstacle_cost_advanced.default_vehicle_radius', 0.5)
+        self.declare_parameter('obstacle_cost_advanced.danger_zone_factor', 1.5)
+        self.declare_parameter('obstacle_cost_advanced.laser_min_range_absolute', 0.1)
+        self.declare_parameter('obstacle_cost_advanced.debug_counter_interval', 50)
+        
+        self.declare_parameter('motion_cost_advanced.backward_penalty', 1000.0)
+        self.declare_parameter('motion_cost_advanced.fast_reverse_penalty', 500.0)
+        self.declare_parameter('motion_cost_advanced.forward_bonus_multiplier', 2.0)
+        
+        # SMPPI advanced parameters
+        self.declare_parameter('smppi_advanced.trajectory_decay_factor', 0.8)
+        self.declare_parameter('smppi_advanced.perturbation_smoothing_factor', 0.7)
+        self.declare_parameter('smppi_advanced.action_continuity_weight', 0.8)
+        
         # Get parameters
         use_gpu = self.get_parameter('use_gpu').get_parameter_value().bool_value
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
@@ -155,7 +192,28 @@ class MPPICoreNode(Node):
             'curvature_weight': self.get_parameter('smoothness_cost.curvature_weight').get_parameter_value().double_value,
             'acceleration_weight': self.get_parameter('smoothness_cost.acceleration_weight').get_parameter_value().double_value,
         }
-        self.cost_function = CombinedCostFunction(device=self.device, obstacle_params=obstacle_params, motion_params=motion_params, smoothness_params=smoothness_params)
+        
+        # Advanced parameters for cost functions
+        obstacle_advanced_params = {
+            'default_vehicle_radius': self.get_parameter('obstacle_cost_advanced.default_vehicle_radius').get_parameter_value().double_value,
+            'danger_zone_factor': self.get_parameter('obstacle_cost_advanced.danger_zone_factor').get_parameter_value().double_value,
+            'laser_min_range_absolute': self.get_parameter('obstacle_cost_advanced.laser_min_range_absolute').get_parameter_value().double_value,
+            'debug_counter_interval': self.get_parameter('obstacle_cost_advanced.debug_counter_interval').get_parameter_value().integer_value,
+        }
+        motion_advanced_params = {
+            'backward_penalty': self.get_parameter('motion_cost_advanced.backward_penalty').get_parameter_value().double_value,
+            'fast_reverse_penalty': self.get_parameter('motion_cost_advanced.fast_reverse_penalty').get_parameter_value().double_value,
+            'forward_bonus_multiplier': self.get_parameter('motion_cost_advanced.forward_bonus_multiplier').get_parameter_value().double_value,
+        }
+        
+        self.cost_function = CombinedCostFunction(
+            device=self.device, 
+            obstacle_params=obstacle_params, 
+            motion_params=motion_params, 
+            smoothness_params=smoothness_params,
+            obstacle_advanced_params=obstacle_advanced_params,
+            motion_advanced_params=motion_advanced_params
+        )
         
         # Set goal cost parameters
         self.cost_function.goal_cost.goal_weight = self.get_parameter('goal_cost.goal_weight').get_parameter_value().double_value
@@ -219,6 +277,11 @@ class MPPICoreNode(Node):
             action_min = u_min if use_action_bounds else None
             action_max = u_max if use_action_bounds else None
             
+            # Get SMPPI advanced parameters
+            trajectory_decay_factor = self.get_parameter('smppi_advanced.trajectory_decay_factor').get_parameter_value().double_value
+            perturbation_smoothing_factor = self.get_parameter('smppi_advanced.perturbation_smoothing_factor').get_parameter_value().double_value
+            action_continuity_weight = self.get_parameter('smppi_advanced.action_continuity_weight').get_parameter_value().double_value
+            
             self.mppi = SMPPI(
                 dynamics=self.dynamics,
                 running_cost=self.cost_function,
@@ -234,7 +297,11 @@ class MPPICoreNode(Node):
                 w_action_seq_cost=w_action_seq_cost,
                 delta_t=smppi_delta_t,
                 action_min=action_min,
-                action_max=action_max
+                action_max=action_max,
+                # SMPPI advanced parameters
+                trajectory_decay_factor=trajectory_decay_factor,
+                perturbation_smoothing_factor=perturbation_smoothing_factor,
+                action_continuity_weight=action_continuity_weight
             )
         else:
             self.get_logger().info("[MPPI INIT] Using standard MPPI")
@@ -265,22 +332,40 @@ class MPPICoreNode(Node):
         self.current_goal_id = ""
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
         
-        # Control smoothing variables
+        # Control smoothing variables - get from parameters
         self.control_history = []
-        self.filter_window = 5
+        self.filter_window = self.get_parameter('control_smoothing.filter_window').get_parameter_value().integer_value
         self.last_published_action = None
-        self.max_change_rate = 0.8  # Maximum allowed change rate per step
+        self.max_change_rate = self.get_parameter('control_smoothing.max_change_rate').get_parameter_value().double_value
         
         # Savitzky-Golay filter (Phase 3)
         self.sg_history = []  # For Savitzky-Golay filter
-        self.sg_window = 9
+        self.sg_window = self.get_parameter('control_smoothing.sg_window').get_parameter_value().integer_value
         self.use_savitzky_golay = True
+        
+        # Additional control smoothing parameters
+        self.stability_threshold = self.get_parameter('control_smoothing.stability_threshold').get_parameter_value().double_value
+        self.emergency_change_rate = self.get_parameter('control_smoothing.emergency_change_rate').get_parameter_value().double_value
+        self.min_samples_for_filter = self.get_parameter('control_smoothing.min_samples_for_filter').get_parameter_value().integer_value
+        self.moving_average_weight_start = self.get_parameter('control_smoothing.moving_average_weight_start').get_parameter_value().double_value
+        self.moving_average_weight_end = self.get_parameter('control_smoothing.moving_average_weight_end').get_parameter_value().double_value
+        
+        # Debug parameters
+        self.control_debug_interval = self.get_parameter('debug.control_debug_interval').get_parameter_value().integer_value
+        self.velocity_threshold_debug = self.get_parameter('debug.velocity_threshold_debug').get_parameter_value().double_value
+        
+        # Sensor processing parameters
+        self.default_angle_increment = self.get_parameter('sensor_processing.default_angle_increment').get_parameter_value().double_value
+        
+        # QoS parameters for later use
+        self.sensor_qos_depth = self.get_parameter('qos.sensor_depth').get_parameter_value().integer_value
+        self.reliable_qos_depth = self.get_parameter('qos.reliable_depth').get_parameter_value().integer_value
         
         # QoS profiles
         reliable_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
-            depth=5
+            depth=self.reliable_qos_depth
         )
         
         # Subscribers
@@ -317,8 +402,8 @@ class MPPICoreNode(Node):
             self.control_history.pop(0)
         
         # Apply weighted moving average (more weight to recent values)
-        if len(self.control_history) >= 3:  # Need at least 3 samples
-            weights = torch.linspace(0.1, 0.4, len(self.control_history), device=self.device)
+        if len(self.control_history) >= self.min_samples_for_filter:  # Need at least min samples
+            weights = torch.linspace(self.moving_average_weight_start, self.moving_average_weight_end, len(self.control_history), device=self.device)
             weights = weights / weights.sum()  # Normalize
             
             smoothed = torch.zeros_like(raw_action)
@@ -351,14 +436,12 @@ class MPPICoreNode(Node):
     
     def monitor_control_stability(self, current_action, last_action):
         """Monitor control stability and apply emergency smoothing if needed"""
-        stability_threshold = 1.5  # Emergency threshold
-        
         if last_action is not None:
             change_rate = torch.norm(current_action - last_action)
-            if change_rate > stability_threshold:
+            if change_rate > self.stability_threshold:
                 self.get_logger().warn(f"High control change rate detected: {change_rate:.3f}")
                 # Apply emergency smoothing (stronger rate limiting)
-                return self.apply_rate_limiter(current_action, last_action, max_change_rate=0.3)
+                return self.apply_rate_limiter(current_action, last_action, max_change_rate=self.emergency_change_rate)
         
         return current_action
     
@@ -412,7 +495,7 @@ class MPPICoreNode(Node):
                     if len(angles) > 1:
                         self.angle_increment = angles[1] - angles[0]
                     else:
-                        self.angle_increment = 0.1  # Default increment
+                        self.angle_increment = self.default_angle_increment  # Default increment
             
             mock_laser = MockLaserMsg(msg.ranges, msg.angles)
             robot_pose = self.current_state.cpu().numpy()
@@ -476,7 +559,7 @@ class MPPICoreNode(Node):
                 self._control_debug_counter = 0
             self._control_debug_counter += 1
             
-            if self._control_debug_counter % 20 == 0:
+            if self._control_debug_counter % self.control_debug_interval == 0:
                 if hasattr(self.mppi, 'actions') and self.mppi.actions is not None:
                     try:
                         # Handle 4D tensor: [rollout, samples, horizon, action_dim]
@@ -520,7 +603,7 @@ class MPPICoreNode(Node):
                 delta = float(action[1])   # 전륜 조향각 [rad]
 
                 # 필요 시 데드밴드(선택)
-                if abs(v) < 1e-3:
+                if abs(v) < self.velocity_threshold_debug:
                     omega = 0.0
                 else:
                     omega = (v / self.wheelbase) * math.tan(delta)

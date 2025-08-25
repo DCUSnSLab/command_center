@@ -92,11 +92,11 @@ public:
         
         // Create subscribers
         gps_subscriber_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
-            "gps/fix", 10,
+            "/ublox_gps_node/fix", 10,
             std::bind(&PathPlannerNode::gpsCallback, this, std::placeholders::_1));
             
         imu_subscriber_ = this->create_subscription<sensor_msgs::msg::Imu>(
-            "imu/data", 10,
+            "/zed/zed_node/imu/data", 10,
             std::bind(&PathPlannerNode::imuCallback, this, std::placeholders::_1));
             
         goal_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(

@@ -236,9 +236,7 @@ class MPPI():
         
         K, T, nu = perturbed_actions.shape
         assert nu == self.nu
-        print(f"[ROLLOUT VECTORIZED] Samples K={K}, Time steps T={T}, Controls nu={nu}")
 
-        # Setup phase
         setup_start = time.perf_counter()
         
         # Get initial state for all samples
@@ -249,7 +247,6 @@ class MPPI():
         
         setup_end = time.perf_counter()
         setup_time = (setup_end - setup_start) * 1000
-        print(f"[ROLLOUT VECTORIZED] Setup: {setup_time:.3f}ms")
 
         # VECTORIZED ROLLOUT - Major optimization!
         vectorized_start = time.perf_counter()
@@ -258,10 +255,7 @@ class MPPI():
         if hasattr(self.F, 'rollout_batch'):
             scaled_actions = self.u_scale * perturbed_actions
             states = self.F.rollout_batch(initial_state, scaled_actions)  # [K, T, nx]
-            print(f"[ROLLOUT VECTORIZED] Using batch dynamics rollout")
         else:
-            # Fallback to sequential method
-            print(f"[ROLLOUT VECTORIZED] Fallback to sequential dynamics")
             states = torch.zeros(K, T, self.nx, device=self.d, dtype=self.dtype)
             current_state = initial_state
             for t in range(T):
@@ -273,8 +267,6 @@ class MPPI():
         
         vectorized_end = time.perf_counter()
         vectorized_time = (vectorized_end - vectorized_start) * 1000
-        print(f"[ROLLOUT VECTORIZED] Dynamics computation: {vectorized_time:.3f}ms")
-
         # VECTORIZED COST COMPUTATION
         cost_start = time.perf_counter()
         
@@ -282,10 +274,7 @@ class MPPI():
         if hasattr(self.running_cost, 'rollout_batch'):
             scaled_actions = self.u_scale * perturbed_actions
             rollout_cost = self.running_cost.rollout_batch(states, scaled_actions)
-            print(f"[ROLLOUT VECTORIZED] Using batch cost computation")
         else:
-            # Fallback: compute costs step by step
-            print(f"[ROLLOUT VECTORIZED] Fallback to sequential costs")
             rollout_cost = torch.zeros(K, device=self.d, dtype=self.dtype)
             for t in range(T):
                 u = self.u_scale * perturbed_actions[:, t]
@@ -294,7 +283,6 @@ class MPPI():
         
         cost_end = time.perf_counter()
         cost_time = (cost_end - cost_start) * 1000
-        print(f"[ROLLOUT VECTORIZED] Cost computation: {cost_time:.3f}ms")
 
         # Terminal cost if specified
         if self.terminal_state_cost:
@@ -304,7 +292,6 @@ class MPPI():
             rollout_cost += terminal_cost
             terminal_end = time.perf_counter()
             terminal_time = (terminal_end - terminal_start) * 1000
-            print(f"[ROLLOUT VECTORIZED] Terminal cost: {terminal_time:.3f}ms")
 
         # Prepare output format for compatibility (expand for M rollouts)
         actions_output = (self.u_scale * perturbed_actions).repeat(self.M, 1, 1)
@@ -312,8 +299,6 @@ class MPPI():
         
         rollout_end = time.perf_counter()
         rollout_total = (rollout_end - rollout_start) * 1000
-        print(f"[ROLLOUT VECTORIZED] TOTAL: {rollout_total:.3f}ms")
-        print("-" * 50)
         
         return rollout_cost, states_output, actions_output
 
@@ -407,9 +392,15 @@ class SMPPI(MPPI):
     """
 
     def __init__(self, *args, w_action_seq_cost=1., delta_t=1., U_init=None, action_min=None, action_max=None,
+                 trajectory_decay_factor=0.8, perturbation_smoothing_factor=0.7, action_continuity_weight=0.8,
                  **kwargs):
         self.w_action_seq_cost = w_action_seq_cost
         self.delta_t = delta_t
+        
+        # Advanced smoothing parameters
+        self.trajectory_decay_factor = trajectory_decay_factor
+        self.perturbation_smoothing_factor = perturbation_smoothing_factor
+        self.action_continuity_weight = action_continuity_weight
 
         super().__init__(*args, U_init=U_init, **kwargs)
 
@@ -441,14 +432,14 @@ class SMPPI(MPPI):
     def shift_nominal_trajectory(self):
         # Phase 4: Improved trajectory shifting for better continuity
         self.U = torch.roll(self.U, -1, dims=0)
-        # Instead of abrupt reset to u_init, use gradual decay
+        # Instead of abrupt reset to u_init, use configurable gradual decay
         if len(self.U) > 1:
-            self.U[-1] = self.U[-2] * 0.8  # Gradual decay instead of sudden reset
+            self.U[-1] = self.U[-2] * self.trajectory_decay_factor  # Configurable decay instead of sudden reset
         else:
             self.U[-1] = self.u_init
             
         self.action_sequence = torch.roll(self.action_sequence, -1, dims=0)
-        self.action_sequence[-1] = self.action_sequence[-2]  # Maintain continuity
+        self.action_sequence[-1] = self.action_sequence[-2] * self.action_continuity_weight  # Configurable continuity
 
     def get_action_sequence(self):
         return self.action_sequence
@@ -508,14 +499,14 @@ class SMPPI(MPPI):
     
     def _smooth_perturbations(self, perturbations):
         """Phase 4: Apply temporal smoothing to perturbations"""
-        # Simple exponential smoothing to reduce sudden changes
-        smoothing_factor = 0.7  # How much to smooth (0 = no change, 1 = no smoothing)
+        # Configurable exponential smoothing to reduce sudden changes
+        # smoothing_factor: How much to smooth (0 = no change, 1 = no smoothing)
         
         if not hasattr(self, '_last_perturbations'):
             self._last_perturbations = torch.zeros_like(perturbations)
         
-        # Exponential moving average
-        smoothed = smoothing_factor * perturbations + (1 - smoothing_factor) * self._last_perturbations
+        # Exponential moving average with configurable factor
+        smoothed = self.perturbation_smoothing_factor * perturbations + (1 - self.perturbation_smoothing_factor) * self._last_perturbations
         self._last_perturbations = smoothed.clone()
         
         return smoothed

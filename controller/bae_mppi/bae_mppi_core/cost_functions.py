@@ -10,7 +10,9 @@ from typing import List, Tuple
 class ObstacleAvoidanceCost:
     """Cost function for obstacle avoidance using laser scan data with vehicle footprint consideration"""
     
-    def __init__(self, safety_radius=0.3, max_range=5.0, penalty_weight=1000.0, exponential_factor=2.0, device='cpu'):
+    def __init__(self, safety_radius=0.3, max_range=5.0, penalty_weight=1000.0, exponential_factor=2.0, device='cpu',
+                 default_vehicle_radius=0.5, danger_zone_factor=1.5, laser_min_range_absolute=0.1, 
+                 debug_counter_interval=50):
         """
         Initialize obstacle avoidance cost
         
@@ -20,12 +22,22 @@ class ObstacleAvoidanceCost:
             penalty_weight (float): Penalty multiplier for close obstacles
             exponential_factor (float): Steepness of exponential penalty
             device (str): PyTorch device
+            default_vehicle_radius (float): Default vehicle radius when footprint not available
+            danger_zone_factor (float): Multiplier for danger zone calculation
+            laser_min_range_absolute (float): Absolute minimum laser range
+            debug_counter_interval (int): Interval for debug output
         """
         self.safety_radius = safety_radius
         self.max_range = max_range
         self.penalty_weight = penalty_weight
         self.exponential_factor = exponential_factor
         self.device = device
+        
+        # Advanced parameters
+        self.default_vehicle_radius = default_vehicle_radius
+        self.danger_zone_factor = danger_zone_factor
+        self.laser_min_range_absolute = laser_min_range_absolute
+        self.debug_counter_interval = debug_counter_interval
         
         # Store raw laser scan data (more efficient)
         self.laser_ranges = None
@@ -64,7 +76,7 @@ class ObstacleAvoidanceCost:
         current_time = time.time()
         
         ranges = np.array(laser_msg.ranges)
-        valid_mask = (ranges >= 0.1) & (ranges <= self.max_range) & np.isfinite(ranges)
+        valid_mask = (ranges >= self.laser_min_range_absolute) & (ranges <= self.max_range) & np.isfinite(ranges)
         
         if np.any(valid_mask):
             valid_ranges = ranges[valid_mask]
@@ -100,10 +112,10 @@ class ObstacleAvoidanceCost:
         
         # Fast approximation: Use enlarged point-robot model
         # Add half of vehicle diagonal as safety margin
-        if self.footprint is not None:
+        if hasattr(self, 'footprint') and self.footprint is not None:
             vehicle_radius = max(self.vehicle_length, self.vehicle_width) * 0.5
         else:
-            vehicle_radius = 0.5  # Default 50cm radius
+            vehicle_radius = self.default_vehicle_radius  # Configurable default radius
         
         # Calculate distances from robot center to all obstacles (vectorized)
         robot_pos = state[:, :2].unsqueeze(1)  # (K x 1 x 2)
@@ -216,7 +228,7 @@ class ObstacleAvoidanceCost:
         
         # Apply simpler, more focused obstacle penalty
         # Only penalize obstacles within safety zone (much smaller range)
-        danger_zone = self.safety_radius * 1.5  # 1.2m instead of 2.4m
+        danger_zone = self.safety_radius * self.danger_zone_factor  # Configurable danger zone
         
         # Smooth exponential penalty only for close obstacles
         close_mask = min_distances < danger_zone
@@ -226,12 +238,12 @@ class ObstacleAvoidanceCost:
             smooth_penalty = penalty_factor ** self.exponential_factor
             costs[close_mask] = smooth_penalty * self.penalty_weight
         
-        # Debug information (every 50 calls)
+        # Debug information (configurable interval)
         if not hasattr(self, '_debug_counter'):
             self._debug_counter = 0
         self._debug_counter += 1
         
-        if self._debug_counter % 50 == 0:
+        if self._debug_counter % self.debug_counter_interval == 0:
             if len(min_distances) > 0:
                 max_cost = torch.max(costs)
                 min_dist = torch.min(min_distances)
@@ -522,7 +534,8 @@ class MotionDirectionCost:
     """Cost function for controlling motion direction (forward/reverse preference)"""
     
     def __init__(self, allow_reverse=True, reverse_penalty_weight=10.0, 
-                 min_forward_speed_preference=0.2, reverse_max_speed=-1.0, device='cpu'):
+                 min_forward_speed_preference=0.2, reverse_max_speed=-1.0, device='cpu',
+                 backward_penalty=1000.0, fast_reverse_penalty=500.0, forward_bonus_multiplier=2.0):
         """
         Initialize motion direction cost
         
@@ -532,12 +545,20 @@ class MotionDirectionCost:
             min_forward_speed_preference (float): Speed below which forward motion is preferred
             reverse_max_speed (float): Maximum allowed reverse speed (negative value)
             device (str): PyTorch device
+            backward_penalty (float): High penalty for complete prohibition of reverse
+            fast_reverse_penalty (float): Additional penalty for excessive reverse speed
+            forward_bonus_multiplier (float): Multiplier for forward motion bonus
         """
         self.allow_reverse = allow_reverse
         self.reverse_penalty_weight = reverse_penalty_weight
         self.min_forward_speed_preference = min_forward_speed_preference
         self.reverse_max_speed = reverse_max_speed
         self.device = device
+        
+        # Advanced parameters
+        self.backward_penalty = backward_penalty
+        self.fast_reverse_penalty = fast_reverse_penalty
+        self.forward_bonus_multiplier = forward_bonus_multiplier
         
         # Status tracking for debugging
         self.last_reverse_count = 0
@@ -560,7 +581,7 @@ class MotionDirectionCost:
         if not self.allow_reverse:
             # Complete prohibition of reverse motion
             backward_mask = velocity < 0.0
-            costs[backward_mask] = 1000.0  # High penalty for reverse
+            costs[backward_mask] = self.backward_penalty  # Configurable high penalty for reverse
             self.last_reverse_count = int(torch.sum(backward_mask))
         else:
             # Penalize reverse motion with configurable weight
@@ -575,14 +596,14 @@ class MotionDirectionCost:
             # Limit excessive reverse speed
             too_fast_reverse = velocity < self.reverse_max_speed
             if torch.any(too_fast_reverse):
-                costs[too_fast_reverse] += 500.0  # High penalty for too fast reverse
+                costs[too_fast_reverse] += self.fast_reverse_penalty  # Configurable penalty for too fast reverse
             
             # Encourage forward motion at low speeds
             if self.min_forward_speed_preference > 0.0:
                 slow_forward_mask = (velocity >= 0.0) & (velocity < self.min_forward_speed_preference)
                 if torch.any(slow_forward_mask):
                     # Gentle encouragement for faster forward motion
-                    forward_bonus = (self.min_forward_speed_preference - velocity[slow_forward_mask]) * 2.0
+                    forward_bonus = (self.min_forward_speed_preference - velocity[slow_forward_mask]) * self.forward_bonus_multiplier
                     costs[slow_forward_mask] += forward_bonus
                 
                 self.last_forward_slow_count = int(torch.sum(slow_forward_mask))
@@ -610,7 +631,8 @@ class MotionDirectionCost:
 class CombinedCostFunction:
     """Combined cost function that includes all individual costs"""
     
-    def __init__(self, device='cpu', obstacle_params=None, motion_params=None, smoothness_params=None):
+    def __init__(self, device='cpu', obstacle_params=None, motion_params=None, smoothness_params=None,
+                 obstacle_advanced_params=None, motion_advanced_params=None):
         """
         Initialize combined cost function
         
@@ -619,35 +641,52 @@ class CombinedCostFunction:
             obstacle_params (dict): Parameters for obstacle avoidance cost
             motion_params (dict): Parameters for motion direction cost
             smoothness_params (dict): Parameters for smoothness cost
+            obstacle_advanced_params (dict): Advanced parameters for obstacle cost
+            motion_advanced_params (dict): Advanced parameters for motion cost
         """
         self.device = device
         
         # Initialize obstacle cost with custom parameters
-        if obstacle_params:
-            self.obstacle_cost = ObstacleAvoidanceCost(
-                safety_radius=obstacle_params.get('safety_radius', 0.3),
-                max_range=obstacle_params.get('max_range', 5.0),
-                penalty_weight=obstacle_params.get('penalty_weight', 1000.0),
-                exponential_factor=obstacle_params.get('exponential_factor', 2.0),
-                device=device
-            )
-        else:
-            self.obstacle_cost = ObstacleAvoidanceCost(device=device)
+        obstacle_kwargs = {
+            'safety_radius': obstacle_params.get('safety_radius', 0.3) if obstacle_params else 0.3,
+            'max_range': obstacle_params.get('max_range', 5.0) if obstacle_params else 5.0,
+            'penalty_weight': obstacle_params.get('penalty_weight', 1000.0) if obstacle_params else 1000.0,
+            'exponential_factor': obstacle_params.get('exponential_factor', 2.0) if obstacle_params else 2.0,
+            'device': device
+        }
+        
+        # Add advanced parameters if provided
+        if obstacle_advanced_params:
+            obstacle_kwargs.update({
+                'default_vehicle_radius': obstacle_advanced_params.get('default_vehicle_radius', 0.5),
+                'danger_zone_factor': obstacle_advanced_params.get('danger_zone_factor', 1.5),
+                'laser_min_range_absolute': obstacle_advanced_params.get('laser_min_range_absolute', 0.1),
+                'debug_counter_interval': obstacle_advanced_params.get('debug_counter_interval', 50)
+            })
+        
+        self.obstacle_cost = ObstacleAvoidanceCost(**obstacle_kwargs)
             
         self.goal_cost = GoalTrackingCost(device=device)
         self.control_cost = ControlEffortCost(device=device)
         
         # Initialize motion direction cost with custom parameters
-        if motion_params:
-            self.motion_cost = MotionDirectionCost(
-                allow_reverse=motion_params.get('allow_reverse', True),
-                reverse_penalty_weight=motion_params.get('reverse_penalty_weight', 10.0),
-                min_forward_speed_preference=motion_params.get('min_forward_speed_preference', 0.2),
-                reverse_max_speed=motion_params.get('reverse_max_speed', -1.0),
-                device=device
-            )
-        else:
-            self.motion_cost = MotionDirectionCost(device=device)
+        motion_kwargs = {
+            'allow_reverse': motion_params.get('allow_reverse', True) if motion_params else True,
+            'reverse_penalty_weight': motion_params.get('reverse_penalty_weight', 10.0) if motion_params else 10.0,
+            'min_forward_speed_preference': motion_params.get('min_forward_speed_preference', 0.2) if motion_params else 0.2,
+            'reverse_max_speed': motion_params.get('reverse_max_speed', -1.0) if motion_params else -1.0,
+            'device': device
+        }
+        
+        # Add advanced parameters if provided
+        if motion_advanced_params:
+            motion_kwargs.update({
+                'backward_penalty': motion_advanced_params.get('backward_penalty', 1000.0),
+                'fast_reverse_penalty': motion_advanced_params.get('fast_reverse_penalty', 500.0),
+                'forward_bonus_multiplier': motion_advanced_params.get('forward_bonus_multiplier', 2.0)
+            })
+        
+        self.motion_cost = MotionDirectionCost(**motion_kwargs)
         
         # Initialize smoothness cost with custom parameters
         if smoothness_params:
