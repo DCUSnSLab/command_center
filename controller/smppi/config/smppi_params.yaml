@@ -1,0 +1,56 @@
+/**:
+  ros__parameters:
+    # Control parameters
+    control_rate: 20.0
+    goal_reached_threshold: 0.5
+    max_control_linear_velocity: 2.0
+    max_control_angular_velocity: 1.0
+    
+    # MPPI Optimization parameters
+    optimizer:
+      batch_size: 2000
+      time_steps: 50
+      time_horizon: 1.5
+      iteration_count: 1
+      temperature: 1.0
+      lambda_action: 0.1
+      smoothing_factor: 0.8
+      shift_control_sequence: true
+      
+    # Vehicle Configuration
+    vehicle:
+      wheelbase: 0.65
+      max_linear_velocity: 2.0
+      max_angular_velocity: 1.0
+      min_turning_radius: 0.5
+      
+    # Cost Function Weights
+    costs:
+      obstacle_weight: 100.0
+      goal_weight: 10.0
+      control_weight: 1.0
+      action_smoothing_weight: 0.1
+      
+    # Sensor Processing
+    sensor:
+      scan_downsample_ratio: 3
+      obstacle_cost_threshold: 0.5
+      max_obstacle_distance: 3.0
+      obstacle_margin: 0.3
+      
+    # Topics Configuration
+    topics:
+      input:
+        laser_scan: '/ptl/scan'
+        odometry: '/odom'
+        goal_pose: '/goal_pose'
+      output:
+        cmd_vel: '/ackermann_like_controller/cmd_vel'
+        goal_status: '/goal_status'
+        optimal_path: '/mppi_optimal_path'
+        
+    # Visualization
+    visualization:
+      publish_trajectories: true
+      trajectory_count_limit: 10
+      marker_scale: 0.1
