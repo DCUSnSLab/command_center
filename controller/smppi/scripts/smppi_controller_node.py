@@ -30,7 +30,6 @@ from command_center_interfaces.msg import ControllerGoalStatus
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
 from smppi_controller.critics.obstacle_critic import ObstacleCritic
 from smppi_controller.critics.goal_critic import GoalCritic
-from smppi_controller.critics.control_critic import ControlCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.sensor_processor import SensorProcessor
 from smppi_controller.utils.transforms import Transforms
@@ -107,11 +106,13 @@ class SMPPIControllerNode(Node):
         self.declare_parameter('optimizer.smoothing_factor', 0.8)
         
         # Vehicle parameters
-        self.declare_parameter('vehicle.wheelbase', 1.0)
+        self.declare_parameter('vehicle.wheelbase', 0.65)
+        self.declare_parameter('vehicle.max_steering_angle', 0.4)
+        self.declare_parameter('vehicle.min_turning_radius', 1.54)
         self.declare_parameter('vehicle.max_linear_velocity', 2.0)
-        self.declare_parameter('vehicle.max_angular_velocity', 1.0)
         self.declare_parameter('vehicle.min_linear_velocity', 0.0)
-        self.declare_parameter('vehicle.min_angular_velocity', -1.0)
+        self.declare_parameter('vehicle.max_angular_velocity', 2.5)
+        self.declare_parameter('vehicle.min_angular_velocity', -2.5)
         
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
@@ -162,8 +163,8 @@ class SMPPIControllerNode(Node):
         # Vehicle parameters
         self.vehicle_params = {
             'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value,
-            'max_steering_angle': np.pi / 4,  # 45 degrees
-            'min_turning_radius': 0.5
+            'max_steering_angle': self.get_parameter('vehicle.max_steering_angle').get_parameter_value().double_value,
+            'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value
         }
         
         # Sensor parameters
@@ -229,16 +230,7 @@ class SMPPIControllerNode(Node):
         goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(goal_critic)
         
-        # Control critic
-        control_params = {
-            'weight': self.critic_weights['control_weight'],
-            'linear_cost_weight': 1.0,
-            'angular_cost_weight': 1.0,
-            'linear_change_weight': 1.0,
-            'angular_change_weight': 1.0
-        }
-        control_critic = ControlCritic(control_params)
-        self.optimizer.add_critic(control_critic)
+        # Control smoothing is now handled internally by SMPPI optimizer via lambda_action
         
         self.get_logger().info("Critics initialized")
     
@@ -346,11 +338,10 @@ class SMPPIControllerNode(Node):
                 
                 # Check if goal reached
                 if goal_distance_float < self.goal_reached_threshold:
-                    self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m')
-            
+                    self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
-            
+            debug = self.optimizer.get_debug()
             # Visualization
             if self.enable_visualization:
                 self.publish_visualization()
@@ -361,6 +352,19 @@ class SMPPIControllerNode(Node):
             compute_time = (end_time - start_time) * 1000  # ms
             
             self.control_count += 1
+            if self.control_count % 10 == 0:
+                self.get_logger().info(
+                    f"[DBG] it={debug.get('iter')} | "
+                    f"a0=({debug.get('a0_v'):.2f},{debug.get('a0_w'):.2f}) "
+                    f"a_first=({debug.get('a_first_v'):.2f},{debug.get('a_first_w'):.2f}) | "
+                    f"wH={debug.get('weights_entropy'):.2f} | "
+                    f"traj(mean/min)=({debug.get('traj_cost_mean'):.2f}/{debug.get('traj_cost_min'):.2f}) "
+                    f"omega(mean)={debug.get('omega_cost_mean'):.2f} | "
+                    f"total_min={debug.get('total_cost_min'):.2f} | "
+                    f"dU_norm={debug.get('dU_norm'):.3f} | "
+                    f"prog(mean/max)=({debug.get('progress_mean'):.3f}/{debug.get('progress_max'):.3f}) | "
+                    f"clamp(v/w)=({debug.get('clamp_ratio_v'):.2f}/{debug.get('clamp_ratio_w'):.2f})"
+                )
             if self.control_count % 100 == 0:
                 self.get_logger().info(f"Control loop: {compute_time:.2f}ms, commands published: {self.control_count}")
         
@@ -416,7 +420,6 @@ class SMPPIControllerNode(Node):
                 path_msg.path_points = pose_points
                 path_msg.total_cost = 0.0  # Set total cost from optimizer if available
                 path_msg.costs = []  # Individual costs for each point (optional)
-                
                 self.path_pub.publish(path_msg)
         
         except Exception as e:
@@ -480,12 +483,81 @@ class SMPPIControllerNode(Node):
                 
                 marker_array.markers.append(traj_marker)
             
+            # Obstacle markers
+            if self.obstacles is not None:
+                obstacle_markers = self.create_obstacle_markers()
+                marker_array.markers.extend(obstacle_markers)
+            
             # Publish markers
             if len(marker_array.markers) > 0:
                 self.marker_pub.publish(marker_array)
                 
         except Exception as e:
             self.get_logger().warn(f"Marker visualization error: {str(e)}")
+    
+    def create_obstacle_markers(self) -> list:
+        """Create obstacle visualization markers"""
+        markers = []
+        
+        if not hasattr(self.obstacles, 'obstacle_points') or not self.obstacles.obstacle_points:
+            return markers
+        
+        # Create points marker for all obstacles
+        obstacle_marker = Marker()
+        obstacle_marker.header.frame_id = "odom"
+        obstacle_marker.header.stamp = self.get_clock().now().to_msg()
+        obstacle_marker.ns = "smppi_obstacles"
+        obstacle_marker.id = 10
+        obstacle_marker.type = Marker.POINTS
+        obstacle_marker.action = Marker.ADD
+        
+        # Add obstacle points
+        for point in self.obstacles.obstacle_points:
+            p = Point()
+            p.x = float(point.x)
+            p.y = float(point.y)
+            p.z = 0.1
+            obstacle_marker.points.append(p)
+        
+        # Obstacle appearance
+        obstacle_marker.scale.x = 0.1  # Point width
+        obstacle_marker.scale.y = 0.1  # Point height
+        obstacle_marker.color.r = 1.0  # Red color
+        obstacle_marker.color.g = 0.0
+        obstacle_marker.color.b = 0.0
+        obstacle_marker.color.a = 0.8
+        
+        markers.append(obstacle_marker)
+        
+        # Create safety zone circles for nearby obstacles (optional)
+        if len(self.obstacles.obstacle_points) > 0:
+            safety_marker = Marker()
+            safety_marker.header.frame_id = "odom"
+            safety_marker.header.stamp = self.get_clock().now().to_msg()
+            safety_marker.ns = "smppi_safety_zones"
+            safety_marker.id = 11
+            safety_marker.type = Marker.CYLINDER
+            safety_marker.action = Marker.ADD
+            
+            # Use first obstacle as example (can be extended for multiple)
+            first_obstacle = self.obstacles.obstacle_points[0]
+            safety_marker.pose.position.x = float(first_obstacle.x)
+            safety_marker.pose.position.y = float(first_obstacle.y)
+            safety_marker.pose.position.z = 0.05
+            safety_marker.pose.orientation.w = 1.0
+            
+            # Safety zone appearance
+            safety_marker.scale.x = 1.0  # Safety radius * 2
+            safety_marker.scale.y = 1.0
+            safety_marker.scale.z = 0.1  # Height
+            safety_marker.color.r = 1.0
+            safety_marker.color.g = 1.0
+            safety_marker.color.b = 0.0  # Yellow
+            safety_marker.color.a = 0.3  # Semi-transparent
+            
+            markers.append(safety_marker)
+        
+        return markers
     
     def publish_goal_status(self, distance_to_goal: float):
         """Publish goal status information (from BAE MPPI)"""
@@ -508,7 +580,6 @@ class SMPPIControllerNode(Node):
         else:
             status_msg.goal_reached = False
             status_msg.status_code = 0  # PENDING
-        
         self.goal_status_pub.publish(status_msg)
     
     def shutdown(self):
