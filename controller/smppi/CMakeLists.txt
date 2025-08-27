@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
-project(bae_mppi)
+project(smppi)  # ← smppi_controller → smppi 로 변경
 
 # --- dependencies ---
 find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)     # <-- 추가
+find_package(ament_cmake_python REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -20,13 +20,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs geometry_msgs
 )
 
-ament_python_install_package(bae_mppi_core) 
+# --- Python packages ---
+ament_python_install_package(smppi_controller)
 
 # --- executables ---
 install(PROGRAMS
-  scripts/sensor_processor_node.py
-  scripts/mppi_core_node.py
-  scripts/visualization_node.py
+  scripts/smppi_controller_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

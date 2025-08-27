@@ -1,0 +1,54 @@
+/**:
+  ros__parameters:
+    # 제어 파라미터
+    control_rate: 20.0                    # 제어 주기 [Hz]
+    goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
+
+    # SMPPI 최적화 파라미터
+    optimizer:
+      batch_size: 3000                    # 샘플 궤적 수 [개]
+      time_steps: 30                      # 예측 시간 스텝 수 [개]
+      model_dt: 0.1                       # 시뮬레이션 시간 간격 [s]
+      iteration_count: 1                  # MPPI 반복 횟수 [회]
+      temperature: 1.8                    # 소프트맥스 온도 (작을수록 탐욕적) [무단위]
+      lambda_action: 0.08                 # 액션 스무딩 비용 가중치 [무단위]
+      shift_control_sequence: true        # MPC 시퀀스 시프트 활성화 [bool]
+      noise_std_u: [0.40, 0.18]          # U 노이즈 표준편차 [m/s², rad/s²]
+      omega_diag: [0.6, 1.2]              # 액션 스무딩 대각 가중치 [v가중치, w가중치]
+  
+    # 차량 파라미터
+    vehicle:
+      wheelbase: 0.65                     # 휠베이스 길이 [m]
+      max_linear_velocity: 2.0            # 최대 선속도 [m/s]
+      min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
+      max_angular_velocity: 1.0           # 최대 각속도 [rad/s]
+      min_angular_velocity: -1.0          # 최소 각속도 [rad/s]
+      max_steering_angle: 0.4             # 최대 조향각 [rad] (23도)
+      min_turning_radius: 1.54            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
+
+    # 비용 함수 가중치
+    costs:
+      obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
+      goal_weight: 6.0                   # 목표 추적 비용 가중치 [무단위]
+
+    # 센서 처리 파라미터
+    sensor:
+      scan_downsample_ratio: 2            # 레이저 스캔 다운샘플링 비율 [정수]
+      obstacle_cost_threshold: 0.5        # 장애물 비용 임계값 [무단위]
+      max_obstacle_distance: 3.5          # 최대 장애물 감지 거리 [m]
+      obstacle_margin: 0.3                # 장애물 안전 여유 거리 [m]
+
+    # ROS 토픽 설정
+    topics:
+      input:
+        laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
+        odometry: '/odom'                 # 오도메트리 입력 토픽
+        goal_pose: '/goal_pose'           # 목표 위치 입력 토픽
+      output:
+        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
+        goal_status: '/goal_status'                    # 목표 상태 출력 토픽
+        optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
+
+    # 시각화 설정
+    visualization:
+      publish_trajectories: true          # 궤적 시각화 활성화 [bool]
