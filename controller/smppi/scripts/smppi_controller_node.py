@@ -15,6 +15,11 @@ import numpy as np
 import time
 from typing import Optional
 
+# TF2 imports
+import tf2_ros
+import tf2_geometry_msgs
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+
 # ROS2 messages
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, Path
@@ -48,6 +53,9 @@ class SMPPIControllerNode(Node):
         self._declare_parameters()
         self._load_parameters()
         
+        # Initialize TF
+        self._init_tf()
+        
         # Initialize components
         self._init_sensor_processor()
         self._init_motion_model()
@@ -76,6 +84,13 @@ class SMPPIControllerNode(Node):
             self.control_callback
         )
         
+        # Visualization loop (separate timer)
+        if self.enable_visualization:
+            self.visualization_timer = self.create_timer(
+                1.0 / self.visualization_frequency,
+                self.visualization_callback
+            )
+        
         # Statistics
         self.last_control_time = time.time()
         self.control_count = 0
@@ -95,6 +110,7 @@ class SMPPIControllerNode(Node):
         # Control parameters
         self.declare_parameter('control_frequency', 20.0)
         self.declare_parameter('enable_visualization', True)
+        self.declare_parameter('visualization_frequency', 5.0)  # 5Hz for visualization
         
         # SMPPI optimizer parameters
         self.declare_parameter('optimizer.batch_size', 1000)
@@ -130,12 +146,17 @@ class SMPPIControllerNode(Node):
         # QoS
         self.declare_parameter('qos.sensor_depth', 1)
         self.declare_parameter('qos.reliable_depth', 5)
+        
+        # TF frames
+        self.declare_parameter('frames.target_frame', 'odom')
+        self.declare_parameter('frames.laser_frame', 'base_link')
     
     def _load_parameters(self):
         """Load parameters from ROS2 parameter server"""
         # Control frequency
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
         self.enable_visualization = self.get_parameter('enable_visualization').get_parameter_value().bool_value
+        self.visualization_frequency = self.get_parameter('visualization_frequency').get_parameter_value().double_value
         
         # Topic names
         self.scan_topic = self.get_parameter('topics.input.laser_scan').get_parameter_value().string_value
@@ -158,6 +179,7 @@ class SMPPIControllerNode(Node):
             'v_max': self.get_parameter('vehicle.max_linear_velocity').get_parameter_value().double_value,
             'w_min': self.get_parameter('vehicle.min_angular_velocity').get_parameter_value().double_value,
             'w_max': self.get_parameter('vehicle.max_angular_velocity').get_parameter_value().double_value,
+            'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value
         }
         
         # Vehicle parameters
@@ -188,10 +210,22 @@ class SMPPIControllerNode(Node):
         
         # Goal tracking parameters
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
+        
+        # TF frame parameters
+        self.target_frame = self.get_parameter('frames.target_frame').get_parameter_value().string_value
+        self.laser_frame = self.get_parameter('frames.laser_frame').get_parameter_value().string_value
+    
+    def _init_tf(self):
+        """Initialize TF listener"""
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.get_logger().info(f"TF listener initialized: {self.laser_frame} -> {self.target_frame}")
     
     def _init_sensor_processor(self):
         """Initialize sensor processor"""
         self.sensor_processor = SensorProcessor(self.sensor_params)
+        # Set TF buffer for coordinate transformations
+        self.sensor_processor.set_tf_buffer(self.tf_buffer)
         self.get_logger().info("Sensor processor initialized")
     
     def _init_motion_model(self):
@@ -273,6 +307,11 @@ class SMPPIControllerNode(Node):
         """Process laser scan data"""
         self.latest_scan = msg
         self.obstacles = self.sensor_processor.process_laser_scan(msg)
+        
+        # Debug log for coordinate verification
+        if self.obstacles and len(self.obstacles.obstacle_points) > 0:
+            first_obs = self.obstacles.obstacle_points[0]
+            self.get_logger().debug(f"First obstacle in odom frame: ({first_obs.x:.2f}, {first_obs.y:.2f})")
     
     def odom_callback(self, msg: Odometry):
         """Process odometry data"""
@@ -342,37 +381,48 @@ class SMPPIControllerNode(Node):
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
             debug = self.optimizer.get_debug()
-            # Visualization
-            if self.enable_visualization:
-                self.publish_visualization()
-                self.publish_markers()
             
             # Statistics
             end_time = time.perf_counter()
             compute_time = (end_time - start_time) * 1000  # ms
             
             self.control_count += 1
-            if self.control_count % 10 == 0:
-                self.get_logger().info(
-                    f"[DBG] it={debug.get('iter')} | "
-                    f"a0=({debug.get('a0_v'):.2f},{debug.get('a0_w'):.2f}) "
-                    f"a_first=({debug.get('a_first_v'):.2f},{debug.get('a_first_w'):.2f}) | "
-                    f"wH={debug.get('weights_entropy'):.2f} | "
-                    f"traj(mean/min)=({debug.get('traj_cost_mean'):.2f}/{debug.get('traj_cost_min'):.2f}) "
-                    f"omega(mean)={debug.get('omega_cost_mean'):.2f} | "
-                    f"total_min={debug.get('total_cost_min'):.2f} | "
-                    f"dU_norm={debug.get('dU_norm'):.3f} | "
-                    f"prog(mean/max)=({debug.get('progress_mean'):.3f}/{debug.get('progress_max'):.3f}) | "
-                    f"clamp(v/w)=({debug.get('clamp_ratio_v'):.2f}/{debug.get('clamp_ratio_w'):.2f})"
-                )
+            # if self.control_count % 10 == 0:
+            #     self.get_logger().info(
+            #         f"[DBG] it={debug.get('iter')} | "
+            #         f"a0=({debug.get('a0_v'):.2f},{debug.get('a0_w'):.2f}) "
+            #         f"a_first=({debug.get('a_first_v'):.2f},{debug.get('a_first_w'):.2f}) | "
+            #         f"wH={debug.get('weights_entropy'):.2f} | "
+            #         f"traj(mean/min)=({debug.get('traj_cost_mean'):.2f}/{debug.get('traj_cost_min'):.2f}) "
+            #         f"omega(mean)={debug.get('omega_cost_mean'):.2f} | "
+            #         f"total_min={debug.get('total_cost_min'):.2f} | "
+            #         f"dU_norm={debug.get('dU_norm'):.3f} | "
+            #         f"prog(mean/max)=({debug.get('progress_mean'):.3f}/{debug.get('progress_max'):.3f}) | "
+            #         f"clamp(v/w)=({debug.get('clamp_ratio_v'):.2f}/{debug.get('clamp_ratio_w'):.2f})"
+            #     )
             if self.control_count % 100 == 0:
                 self.get_logger().info(f"Control loop: {compute_time:.2f}ms, commands published: {self.control_count}")
-        
+            # debug = self.optimizer.get_debug()
+            # for name, t_ms, shape in debug.get("critic_timings", []):
+            #     self.get_logger().info(f"[CRITIC] {name}: {t_ms:.2f}ms, cost_shape={shape}")
         except Exception as e:
             self.get_logger().error(f"Control loop error: {str(e)}")
             # Publish zero command in case of error
             cmd_vel = Twist()
             self.cmd_pub.publish(cmd_vel)
+    
+    def visualization_callback(self):
+        """Separate visualization callback (runs at lower frequency)"""
+        if not self.enable_visualization:
+            return
+            
+        try:
+            # Only publish visualization if we have valid data
+            if self.is_ready():
+                self.publish_visualization()
+                self.publish_markers()
+        except Exception as e:
+            self.get_logger().warn(f"Visualization callback error: {str(e)}")
     
     def is_ready(self) -> bool:
         """Check if controller is ready to compute commands"""
@@ -511,11 +561,11 @@ class SMPPIControllerNode(Node):
         obstacle_marker.type = Marker.POINTS
         obstacle_marker.action = Marker.ADD
         
-        # Add obstacle points
+        # Add obstacle points (already in odom frame from sensor processor)
         for point in self.obstacles.obstacle_points:
             p = Point()
-            p.x = float(point.x)
-            p.y = float(point.y)
+            p.x = float(point.x)  # odom frame x
+            p.y = float(point.y)  # odom frame y
             p.z = 0.1
             obstacle_marker.points.append(p)
         
@@ -541,8 +591,8 @@ class SMPPIControllerNode(Node):
             
             # Use first obstacle as example (can be extended for multiple)
             first_obstacle = self.obstacles.obstacle_points[0]
-            safety_marker.pose.position.x = float(first_obstacle.x)
-            safety_marker.pose.position.y = float(first_obstacle.y)
+            safety_marker.pose.position.x = float(first_obstacle.x)  # odom frame x
+            safety_marker.pose.position.y = float(first_obstacle.y)  # odom frame y
             safety_marker.pose.position.z = 0.05
             safety_marker.pose.orientation.w = 1.0
             

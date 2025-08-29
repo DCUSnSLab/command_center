@@ -11,8 +11,16 @@ from transforms3d.euler import quat2euler
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Point, PoseStamped
-from bae_mppi.msg import ProcessedObstacles, MPPIState
+from geometry_msgs.msg import Point, PoseStamped, PointStamped
+from smppi.msg import ProcessedObstacles, MPPIState
+
+# TF2 imports
+import rclpy
+import tf2_ros
+import tf2_geometry_msgs
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+
+from .geometry import GeometryUtils
 
 
 class SensorProcessor:
@@ -31,11 +39,32 @@ class SensorProcessor:
         self.downsample_factor = params.get('downsample_factor', 1)  # Skip every N points
         self.max_obstacles = params.get('max_obstacles', 1000)
         
+        # Vehicle footprint parameters
+        self.footprint = params.get('footprint', [0.0, 0.0])
+        self.footprint_padding = params.get('footprint_padding', 0.0)
+        self.use_footprint_filtering = params.get('use_footprint_filtering', False)
+        
+        # Convert footprint to polygon if provided
+        if self.footprint is not None and self.use_footprint_filtering:
+            self.base_footprint_polygon = GeometryUtils.footprint_to_polygon(self.footprint)
+            print(f"[SensorProcessor] Using footprint filtering with {len(self.footprint)//2} vertices, padding={self.footprint_padding}")
+        else:
+            self.base_footprint_polygon = None
+            print(f"[SensorProcessor] Footprint filtering disabled")
+        
         # Device setup
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
         
+        # TF buffer (will be set by parent node)
+        self.tf_buffer: Optional[tf2_ros.Buffer] = None
+        self.target_frame = 'odom'  # Target frame for obstacle coordinates
+        
         print(f"[SensorProcessor] laser_range=({self.laser_min_range}, {self.laser_max_range})")
+    
+    def set_tf_buffer(self, tf_buffer: tf2_ros.Buffer):
+        """Set TF buffer for coordinate transformations"""
+        self.tf_buffer = tf_buffer
     
     def process_laser_scan(self, scan: LaserScan) -> ProcessedObstacles:
         """
@@ -65,9 +94,24 @@ class SensorProcessor:
             valid_ranges = valid_ranges[indices]
             valid_angles = valid_angles[indices]
         
-        # Convert to Cartesian coordinates
-        x_coords = valid_ranges * np.cos(valid_angles)
-        y_coords = valid_ranges * np.sin(valid_angles)
+        # Convert to Cartesian coordinates in laser frame
+        x_coords_laser = valid_ranges * np.cos(valid_angles)
+        y_coords_laser = valid_ranges * np.sin(valid_angles)
+        
+        # Transform to odom frame
+        x_coords_odom, y_coords_odom = self._transform_points_to_odom(
+            x_coords_laser, y_coords_laser, scan.header)
+        
+        # Apply footprint filtering if enabled
+        if self.use_footprint_filtering and self.base_footprint_polygon is not None:
+            x_coords_filtered, y_coords_filtered = self._filter_obstacles_by_footprint(
+                x_coords_odom, y_coords_odom, scan.header)
+            x_coords = x_coords_filtered
+            y_coords = y_coords_filtered
+        else:
+            # Use all odom coordinates
+            x_coords = x_coords_odom
+            y_coords = y_coords_odom
         
         # Limit number of obstacles
         if len(x_coords) > self.max_obstacles:
@@ -75,7 +119,7 @@ class SensorProcessor:
             x_coords = x_coords[indices]
             y_coords = y_coords[indices]
         
-        # Create obstacle points
+        # Create obstacle points (now in odom frame)
         obstacle_points = []
         for x, y in zip(x_coords, y_coords):
             point = Point()
@@ -84,13 +128,14 @@ class SensorProcessor:
             point.z = 0.0
             obstacle_points.append(point)
         
-        # Create ProcessedObstacles message
+        # Create ProcessedObstacles message with updated header
         obstacles = ProcessedObstacles()
         obstacles.header = scan.header
+        # Update frame_id to odom since coordinates are now in odom frame
+        obstacles.header.frame_id = 'odom'
         obstacles.obstacle_points = obstacle_points
-        obstacles.ranges = valid_ranges.tolist()
-        obstacles.angles = valid_angles.tolist()
-        obstacles.min_distance = float(np.min(valid_ranges)) if len(valid_ranges) > 0 else float('inf')
+        obstacles.distances = valid_ranges.tolist()
+        obstacles.costs = [0.0] * len(obstacle_points)  # Initialize with zero costs
         
         return obstacles
     
@@ -121,9 +166,8 @@ class SensorProcessor:
         """Create empty ProcessedObstacles message"""
         obstacles = ProcessedObstacles()
         obstacles.obstacle_points = []
-        obstacles.ranges = []
-        obstacles.angles = []
-        obstacles.min_distance = float('inf')
+        obstacles.distances = []
+        obstacles.costs = []
         return obstacles
     
     def process_odometry(self, odom: Odometry) -> MPPIState:
@@ -245,9 +289,122 @@ class SensorProcessor:
         filtered_obstacles = ProcessedObstacles()
         filtered_obstacles.header = obstacles.header
         filtered_obstacles.obstacle_points = filtered_points
-        filtered_obstacles.ranges = []  # Could be computed but not needed for filtering
-        filtered_obstacles.angles = []  # Could be computed but not needed for filtering
-        filtered_obstacles.min_distance = float(np.min([np.sqrt((p.x - robot_x)**2 + (p.y - robot_y)**2) 
-                                                        for p in filtered_points])) if filtered_points else float('inf')
+        filtered_obstacles.distances = []  # Could be computed but not needed for filtering
+        filtered_obstacles.costs = []  # Could be computed but not needed for filtering
         
         return filtered_obstacles
+    
+    def _transform_points_to_odom(self, x_coords_laser: np.ndarray, y_coords_laser: np.ndarray, 
+                                 scan_header) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Transform laser points to odom frame
+        
+        Args:
+            x_coords_laser: X coordinates in laser frame
+            y_coords_laser: Y coordinates in laser frame
+            scan_header: LaserScan header with frame_id and timestamp
+            
+        Returns:
+            x_coords_odom, y_coords_odom: Coordinates in odom frame
+        """
+        if self.tf_buffer is None:
+            print("[SensorProcessor] Warning: TF buffer not set, returning laser frame coordinates")
+            return x_coords_laser, y_coords_laser
+        
+        try:
+            # Get transform from laser frame to odom frame
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame,  # target frame (odom)
+                scan_header.frame_id,  # source frame (laser)
+                scan_header.stamp,  # time
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Transform each point
+            x_coords_odom = []
+            y_coords_odom = []
+            
+            for x_laser, y_laser in zip(x_coords_laser, y_coords_laser):
+                # Create PointStamped in laser frame
+                point_laser = PointStamped()
+                point_laser.header = scan_header
+                point_laser.point.x = float(x_laser)
+                point_laser.point.y = float(y_laser)
+                point_laser.point.z = 0.0
+                
+                # Transform to odom frame
+                try:
+                    point_odom = tf2_geometry_msgs.do_transform_point(point_laser, transform)
+                    x_coords_odom.append(point_odom.point.x)
+                    y_coords_odom.append(point_odom.point.y)
+                except Exception as e:
+                    print(f"[SensorProcessor] Point transform error: {e}")
+                    # Fallback to laser coordinates
+                    x_coords_odom.append(x_laser)
+                    y_coords_odom.append(y_laser)
+            
+            return np.array(x_coords_odom), np.array(y_coords_odom)
+            
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            print(f"[SensorProcessor] TF transform error: {e}")
+            # Fallback to laser frame coordinates
+            return x_coords_laser, y_coords_laser
+    
+    def _filter_obstacles_by_footprint(self, x_coords_odom: np.ndarray, y_coords_odom: np.ndarray, 
+                                     scan_header) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Filter obstacles that are too close to robot footprint
+        
+        Args:
+            x_coords_odom: X coordinates in odom frame
+            y_coords_odom: Y coordinates in odom frame
+            scan_header: LaserScan header for robot pose lookup
+            
+        Returns:
+            x_coords_filtered, y_coords_filtered: Filtered coordinates
+        """
+        if self.tf_buffer is None or self.base_footprint_polygon is None:
+            return x_coords_odom, y_coords_odom
+        
+        try:
+            # Get robot pose in odom frame
+            robot_transform = self.tf_buffer.lookup_transform(
+                self.target_frame,  # target frame (odom)
+                'base_link',        # robot base frame
+                scan_header.stamp,  # time
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Extract robot pose
+            robot_x = robot_transform.transform.translation.x
+            robot_y = robot_transform.transform.translation.y
+            robot_orientation = robot_transform.transform.rotation
+            robot_yaw = self.quaternion_to_yaw(robot_orientation)
+            robot_pose = (robot_x, robot_y, robot_yaw)
+            
+            # Create robot footprint at current pose
+            robot_footprint = GeometryUtils.create_robot_footprint_at_pose(
+                self.footprint, robot_pose, self.footprint_padding)
+            
+            # Filter obstacles
+            filtered_x = []
+            filtered_y = []
+            
+            for x, y in zip(x_coords_odom, y_coords_odom):
+                obstacle_point = np.array([x, y])
+                
+                # Calculate distance to robot footprint
+                distance = GeometryUtils.point_to_polygon_distance(obstacle_point, robot_footprint)
+                
+                # Keep obstacles that are outside the footprint (positive distance)
+                # and not too close (additional safety margin could be added here)
+                if distance > 0.05:  # Small safety margin to avoid numerical issues
+                    filtered_x.append(x)
+                    filtered_y.append(y)
+            
+            return np.array(filtered_x), np.array(filtered_y)
+            
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            print(f"[SensorProcessor] Robot pose lookup error for footprint filtering: {e}")
+            # Fallback to no filtering
+            return x_coords_odom, y_coords_odom

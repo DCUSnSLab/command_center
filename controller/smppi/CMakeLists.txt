@@ -26,6 +26,9 @@ ament_python_install_package(smppi_controller)
 # --- executables ---
 install(PROGRAMS
   scripts/smppi_controller_node.py
+  scripts/sensor_processor_node.py
+  scripts/mppi_main_node.py
+  scripts/visualization_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 SMPPI Controller Launch File
-Unified Nav2-based MPPI with SMPPI enhancements
+Modular 3-node architecture for optimal performance:
+- Sensor Processing Node: TF transforms, obstacle processing
+- MPPI Main Node: Core optimization and control
+- Visualization Node: RViz markers and visualization
 """
 
 import os
@@ -51,17 +54,51 @@ def generate_launch_description():
     smppi_dir = get_package_share_directory('smppi')
     default_config_path = os.path.join(smppi_dir, 'config', 'smppi_params.yaml')
     
-    # Main SMPPI Controller Node
-    smppi_controller_node = Node(
+    # Sensor Processing Node
+    sensor_processor_node = Node(
         package='smppi',
-        executable='smppi_controller_node.py',
-        name='smppi_controller',
+        executable='sensor_processor_node.py',
+        name='sensor_processor',
         namespace=namespace,
         parameters=[
             default_config_path,
             {
                 'use_sim_time': use_sim_time,
-                'enable_visualization': enable_visualization
+            }
+        ],
+        output='screen',
+        emulate_tty=True,
+        arguments=['--ros-args', '--log-level', 'info']
+    )
+    
+    # MPPI Main Controller Node
+    mppi_main_node = Node(
+        package='smppi',
+        executable='mppi_main_node.py',
+        name='mppi_main_controller',
+        namespace=namespace,
+        parameters=[
+            default_config_path,
+            {
+                'use_sim_time': use_sim_time,
+            }
+        ],
+        output='screen',
+        emulate_tty=True,
+        arguments=['--ros-args', '--log-level', 'info']
+    )
+    
+    # Visualization Node (conditional)
+    visualization_node = Node(
+        package='smppi',
+        executable='visualization_node.py',
+        name='visualization',
+        namespace=namespace,
+        condition=IfCondition(enable_visualization),
+        parameters=[
+            default_config_path,
+            {
+                'use_sim_time': use_sim_time,
             }
         ],
         output='screen',
@@ -78,6 +115,8 @@ def generate_launch_description():
         
         # Group all nodes
         GroupAction([
-            smppi_controller_node,
+            sensor_processor_node,
+            mppi_main_node,
+            visualization_node,
         ])
     ])

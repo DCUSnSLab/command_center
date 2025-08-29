@@ -1,0 +1,58 @@
+local_costmap:
+  ros__parameters:
+    # Basic costmap settings
+    resolution: 0.05          # 5cm per cell
+    width: 20.0              # 20m width
+    height: 20.0             # 20m height
+    publish_frequency: 10.0   # Hz - how often to publish costmap
+    update_frequency: 20.0    # Hz - how often to process sensor data
+    
+    # Frame settings
+    global_frame: "odom"       # Global coordinate frame
+    robot_frame: "base_link"  # Robot base frame
+    sensor_frame: "velodyne_base_link"  # PointCloud sensor frame
+    
+    # Topic names
+    pointcloud_topic: "/velodyne_points"  # Input PointCloud2 topic
+    
+    # PointCloud processing parameters
+    max_range: 100.0         # Maximum sensor range (m)
+    min_range: 0.1           # Minimum sensor range (m)
+    
+    # Height filtering (for obstacle detection)
+    min_obstacle_height: 0.1  # Minimum height to consider as obstacle (m)
+    max_obstacle_height: 2.0  # Maximum height to consider as obstacle (m)
+    ground_height_threshold: 0.05  # Ground plane detection tolerance (m)
+    
+    # Filtering parameters
+    voxel_size: 0.05         # Voxel grid downsample size (m) - matches resolution
+    noise_threshold: 0.02     # Noise removal threshold (m)
+    min_cluster_size: 10      # Minimum points in cluster to keep
+    
+    # Statistical filtering
+    enable_statistical_filter: true
+    statistical_mean_k: 50    # Number of neighbors for statistical analysis
+    statistical_std_dev: 1.0  # Standard deviation threshold
+    
+    # Ground plane removal using RANSAC
+    enable_ground_removal: true
+    ground_distance_threshold: 0.1  # RANSAC distance threshold (m)
+    ground_max_iterations: 1000     # RANSAC maximum iterations
+    
+    # Temporal decay for dynamic obstacles
+    enable_temporal_decay: true
+    decay_rate: 0.95         # Decay rate per frame (0.95 = 5% decay)
+    
+    # Robot footprint (HUNTER 2.0: 980x745mm)
+    # Format: [x1, y1, x2, y2, x3, y3, x4, y4] - clockwise from front-right
+    robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+    footprint_padding: 0.15  # Additional padding around robot (m)
+    
+    # Publishing options
+    always_send_full_costmap: false  # Send incremental updates when possible
+    enable_obstacle_markers: true    # Publish obstacle visualization markers
+    enable_filtered_cloud: true     # Publish filtered point cloud for debugging
+    
+    # Visualization settings
+    marker_lifetime: 1.0           # How long markers stay visible (s)
+    obstacle_marker_size: 0.1      # Size of obstacle point markers (m)
