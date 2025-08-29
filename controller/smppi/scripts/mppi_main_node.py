@@ -135,6 +135,9 @@ class MPPIMainNode(Node):
         self.path_topic = self.get_parameter('topics.output.optimal_path').get_parameter_value().string_value
         self.goal_status_topic = self.get_parameter('topics.output.goal_status').get_parameter_value().string_value
         
+        # Get max_steering_angle for proper w_min/w_max calculation
+        max_steering_angle = self.get_parameter('vehicle.max_steering_angle').get_parameter_value().double_value
+        
         # Optimizer parameters
         self.optimizer_params = {
             'batch_size': self.get_parameter('optimizer.batch_size').get_parameter_value().integer_value,
@@ -146,8 +149,8 @@ class MPPIMainNode(Node):
             'smoothing_factor': self.get_parameter('optimizer.smoothing_factor').get_parameter_value().double_value,
             'v_min': self.get_parameter('vehicle.min_linear_velocity').get_parameter_value().double_value,
             'v_max': self.get_parameter('vehicle.max_linear_velocity').get_parameter_value().double_value,
-            'w_min': self.get_parameter('vehicle.min_angular_velocity').get_parameter_value().double_value,
-            'w_max': self.get_parameter('vehicle.max_angular_velocity').get_parameter_value().double_value,
+            'w_min': -max_steering_angle,  # Use steering angle limits instead of angular velocity limits
+            'w_max': max_steering_angle,   # This represents delta (steering angle) limits, not omega limits
             'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value,
             'noise_std_u': self.get_parameter('optimizer.noise_std_u').get_parameter_value().double_array_value,
             'omega_diag': self.get_parameter('optimizer.omega_diag').get_parameter_value().double_array_value,

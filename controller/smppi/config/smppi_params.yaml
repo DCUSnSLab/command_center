@@ -23,10 +23,10 @@
       wheelbase: 0.65                     # 휠베이스 길이 [m]
       max_linear_velocity: 2.0            # 최대 선속도 [m/s]
       min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
-      max_angular_velocity: 1.0           # 최대 각속도 [rad/s]
-      min_angular_velocity: -1.0          # 최소 각속도 [rad/s]
-      max_steering_angle: 0.4             # 최대 조향각 [rad] (23도)
-      min_turning_radius: 1.54            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
+      max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
+      min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      max_steering_angle: 0.3665          # 최대 조향각 [rad] (21도)
+      min_turning_radius: 1.70            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
       
       # HUNTER 2.0 실제 footprint (980x745mm)
       footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]  # [x1,y1,x2,y2,x3,y3,x4,y4]
@@ -54,7 +54,7 @@
       input:
         laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
         odometry: '/odom'                 # 오도메트리 입력 토픽
-        goal_pose: '/subgoal'           # 목표 위치 입력 토픽
+        goal_pose: '/goal_pose'           # 목표 위치 입력 토픽
       output:
         cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
