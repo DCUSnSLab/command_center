@@ -1,12 +1,24 @@
 # === smppi_optimizer.py (DIAGNOSTIC PATCH) ===
 import torch, numpy as np
+import math, time
 from typing import Optional, Tuple, Dict, Any
 
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Path
 
+def _now_sync():
+    """CUDA 사용시 비동기 커널 동기화 후 perf_counter 반환"""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
 def _entropy(p: torch.Tensor) -> float:
     return float(-(p * (p + 1e-12).log()).sum().detach().cpu().item())
+
+def _omega_to_delta(v, omega, wheelbase, v_eps=1e-3):
+    if abs(v) < v_eps:
+        return 0.0
+    return math.atan((omega * wheelbase) / max(1e-6, v))
 
 class SMPPIOptimizer:
     def __init__(self, params: dict):
@@ -32,7 +44,7 @@ class SMPPIOptimizer:
         self.v_max = params.get('v_max', 2.0)
         self.w_min = params.get('w_min', -1.0)
         self.w_max = params.get('w_max', 1.0)
-
+        self.wheelbase = params.get('wheelbase', 0.65)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
 
@@ -139,14 +151,18 @@ class SMPPIOptimizer:
                     "clamp_ratio_v": clamp_v, "clamp_ratio_w": clamp_w,
                 })
         return self.control_sequence
-
+    
     # ---------- sample & integrate ----------
     def _sample_U_and_build_A(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.robot_state is not None:
-            a0_odom = self.robot_state[3:5]
+            v_odom = float(self.robot_state[3])
+            w_odom = float(self.robot_state[4])      # yaw rate
+            delta_odom = _omega_to_delta(v_odom, w_odom, self.wheelbase)  # <<< 변환
+            a0_odom = torch.tensor([v_odom, delta_odom],
+                                device=self.device, dtype=self.dtype)
         else:
             a0_odom = torch.zeros(2, device=self.device, dtype=self.dtype)
-        alpha = 0.7
+        alpha = 0.0
         noise = torch.randn(self.K, self.T, 2, device=self.device, dtype=self.dtype) * self.noise_std
         U_nom = self.control_sequence.unsqueeze(0).repeat(self.K, 1, 1)
         U_samples = U_nom + noise
@@ -154,6 +170,10 @@ class SMPPIOptimizer:
         # a0 = self.robot_state[3:5] if self.robot_state is not None \
         #      else torch.zeros(2, device=self.device, dtype=self.dtype)
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
+        if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
+            a0 = self.last_cmd_applied.clone()
+        a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)     # v >= 0 보장
+        a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         A_samples = self._integrate_U_to_A(a0, U_samples)
         A_samples[..., 0] = torch.clamp(A_samples[..., 0], self.v_min, self.v_max)
         A_samples[..., 1] = torch.clamp(A_samples[..., 1], self.w_min, self.w_max)
@@ -191,9 +211,20 @@ class SMPPIOptimizer:
     # ---------- critics ----------
     def _evaluate_trajectories(self, trajectories: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         total = torch.zeros(self.K, device=self.device, dtype=self.dtype)
-        for critic in self.critics:
-            total += critic.compute_cost(trajectories, actions, self.robot_state,
-                                         self.goal_state, self.obstacles)
+        timings = []  # <-- critic별 시간 저장
+        for i, critic in enumerate(self.critics):
+            t0 = time.perf_counter()
+            cost = critic.compute_cost(
+                trajectories, actions,
+                self.robot_state, self.goal_state, self.obstacles
+            )
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_cost = (time.perf_counter() - t0) * 1000.0
+            timings.append((critic.__class__.__name__, t_cost, cost.shape))
+
+            total += cost
+        # 디버깅 정보 저장
+        self.debug["critic_timings"] = timings
         return total
 
     def _compute_action_sequence_cost(self, A_samples: torch.Tensor) -> torch.Tensor:
@@ -220,27 +251,37 @@ class SMPPIOptimizer:
         self.control_sequence = torch.roll(self.control_sequence, -1, dims=0)
         self.control_sequence[-1] = 0.0  # derivative control의 일반적 꼬리값
 
-    # ---------- command ----------
     def get_control_command(self) -> Twist:
         if self.robot_state is None:
             return Twist()
-        a0 = self.robot_state[3:5]
+
+        a0 = self.last_cmd_applied  # [v, δ]로 유지하면 더 안정적
         U = self.control_sequence.unsqueeze(0)
-        A = self._integrate_U_to_A(a0, U)[0]
+        A = self._integrate_U_to_A(a0, U)[0]   # [T,2] = [v, δ]
         A[:, 0] = torch.clamp(A[:, 0], self.v_min, self.v_max)
         A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)
-        a_next = A[0]
+        v_next, delta_next = float(A[0,0]), float(A[0,1])
+
+        # δ -> ω 변환 (Twist 규약 준수)
+        if abs(v_next) < 1e-3:
+            omega_next = 0.0
+        else:
+            omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
+
+        # Twist publish
         cmd = Twist()
-        cmd.linear.x = float(a_next[0])
-        cmd.angular.z = float(a_next[1])
-        # 디버그: 실제 퍼블리시 값 저장 (노드에서 이 값을 그대로 퍼블리시하면 동일)
-        self.last_cmd_applied = a_next.detach().clone()
+        cmd.linear.x  = v_next
+        cmd.angular.z = omega_next
+
+        # 반드시 last_cmd_applied는 [v, δ]로 저장 (내부 일관성)
+        self.last_cmd_applied = torch.tensor([v_next, delta_next],
+                                            device=self.device, dtype=self.dtype)
         return cmd
 
     def getOptimizedTrajectory(self) -> Optional[torch.Tensor]:
         if self.robot_state is None:
             return None
-        a0 = self.robot_state[3:5]
+        a0 = self.last_cmd_applied
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)
         A[..., 0] = torch.clamp(A[..., 0], self.v_min, self.v_max)

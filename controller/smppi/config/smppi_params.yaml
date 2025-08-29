@@ -1,7 +1,9 @@
 /**:
   ros__parameters:
     # 제어 파라미터
-    control_rate: 20.0                    # 제어 주기 [Hz]
+    control_frequency: 20.0               # 제어 주기 [Hz]
+    visualization_frequency: 5.0          # 시각화 주기 [Hz]
+    enable_visualization: true            # 시각화 활성화
     goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
 
     # SMPPI 최적화 파라미터
@@ -25,6 +27,15 @@
       min_angular_velocity: -1.0          # 최소 각속도 [rad/s]
       max_steering_angle: 0.4             # 최대 조향각 [rad] (23도)
       min_turning_radius: 1.54            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
+      
+      # HUNTER 2.0 실제 footprint (980x745mm)
+      footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]  # [x1,y1,x2,y2,x3,y3,x4,y4]
+      footprint_padding: 0.15             # 안전 마진 [m]
+      use_polygon_collision: true         # polygon vs circle 충돌 감지
+      use_footprint_filtering: true       # sensor processor에서 footprint 기반 필터링 활성화
+      
+      # 기존 원형 근사 (fallback)
+      radius: 0.6                         # 원형 근사 반지름 [m] (대각선/2 + padding)
 
     # 비용 함수 가중치
     costs:
@@ -43,12 +54,13 @@
       input:
         laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
         odometry: '/odom'                 # 오도메트리 입력 토픽
-        goal_pose: '/goal_pose'           # 목표 위치 입력 토픽
+        goal_pose: '/subgoal'           # 목표 위치 입력 토픽
       output:
         cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
         optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
 
-    # 시각화 설정
-    visualization:
-      publish_trajectories: true          # 궤적 시각화 활성화 [bool]
+    # TF 프레임 설정  
+    frames:
+      target_frame: 'odom'                # 목표 좌표계
+      laser_frame: 'base_link'            # 레이저 좌표계
