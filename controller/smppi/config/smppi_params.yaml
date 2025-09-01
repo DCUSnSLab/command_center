@@ -5,11 +5,12 @@
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
     goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
+    waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
 
     # SMPPI 최적화 파라미터
     optimizer:
       batch_size: 3000                    # 샘플 궤적 수 [개]
-      time_steps: 30                      # 예측 시간 스텝 수 [개]
+      time_steps: 20                      # 예측 시간 스텝 수 [개]
       model_dt: 0.1                       # 시뮬레이션 시간 간격 [s]
       iteration_count: 1                  # MPPI 반복 횟수 [회]
       temperature: 1.8                    # 소프트맥스 온도 (작을수록 탐욕적) [무단위]
@@ -41,6 +42,12 @@
     costs:
       obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
       goal_weight: 6.0                   # 목표 추적 비용 가중치 [무단위]
+      
+      lookahead:
+        base_distance: 2.5                # 기본 lookahead 거리 [m]
+        velocity_factor: 1.2              # 속도 비례 팩터 [s] (거리 = 속도 × 팩터)
+        min_distance: 1.0                 # 최소 lookahead 거리 [m]
+        max_distance: 6.0                 # 최대 lookahead 거리 [m]
 
     # 센서 처리 파라미터
     sensor:
@@ -54,11 +61,15 @@
       input:
         laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
         odometry: '/odom'                 # 오도메트리 입력 토픽
-        goal_pose: '/goal_pose'           # 목표 위치 입력 토픽
+        goal_pose: '/subgoal'             # 단일 목표 위치 입력 토픽
+        multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
+        processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
+        robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
         cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
         optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
+        markers: '/smppi_visualization'                # 시각화 마커 출력 토픽
 
     # TF 프레임 설정  
     frames:

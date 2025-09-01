@@ -19,7 +19,7 @@ from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Path
 from std_msgs.msg import Header
 from smppi.msg import ProcessedObstacles, MPPIState, OptimalPath
-from command_center_interfaces.msg import ControllerGoalStatus
+from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints
 
 # SMPPI modules
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
@@ -55,6 +55,7 @@ class MPPIMainNode(Node):
         self.robot_state: Optional[MPPIState] = None
         self.latest_goal: Optional[PoseStamped] = None
         self.latest_path: Optional[Path] = None
+        self.multiple_waypoints: Optional[MultipleWaypoints] = None
         
         self.goal_state: Optional[torch.Tensor] = None
         
@@ -82,6 +83,7 @@ class MPPIMainNode(Node):
         self.declare_parameter('topics.input.processed_obstacles', '/smppi/processed_obstacles')
         self.declare_parameter('topics.input.robot_state', '/smppi/robot_state')
         self.declare_parameter('topics.input.goal_pose', '/goal_pose')
+        self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
         self.declare_parameter('topics.output.cmd_vel', '/ackermann_like_controller/cmd_vel')
         self.declare_parameter('topics.output.optimal_path', '/smppi/optimal_path')
         self.declare_parameter('topics.output.goal_status', '/goal_status')
@@ -119,8 +121,17 @@ class MPPIMainNode(Node):
         self.declare_parameter('costs.obstacle_weight', 100.0)
         self.declare_parameter('costs.goal_weight', 6.0)
         
+        # Lookahead parameters
+        self.declare_parameter('costs.lookahead.base_distance', 2.5)
+        self.declare_parameter('costs.lookahead.velocity_factor', 1.2)
+        self.declare_parameter('costs.lookahead.min_distance', 1.0)
+        self.declare_parameter('costs.lookahead.max_distance', 6.0)
+        
         # Goal tracking
         self.declare_parameter('goal_reached_threshold', 2.0)
+        
+        # Waypoint mode ('single' or 'multiple')
+        self.declare_parameter('waypoint_mode', 'multiple')
         
         # QoS
         self.declare_parameter('qos.reliable_depth', 5)
@@ -134,6 +145,7 @@ class MPPIMainNode(Node):
         self.obstacles_topic = self.get_parameter('topics.input.processed_obstacles').get_parameter_value().string_value
         self.robot_state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
+        self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
         self.cmd_topic = self.get_parameter('topics.output.cmd_vel').get_parameter_value().string_value
         self.path_topic = self.get_parameter('topics.output.optimal_path').get_parameter_value().string_value
         self.goal_status_topic = self.get_parameter('topics.output.goal_status').get_parameter_value().string_value
@@ -172,11 +184,25 @@ class MPPIMainNode(Node):
             'goal_weight': self.get_parameter('costs.goal_weight').get_parameter_value().double_value,
         }
         
+        # Lookahead parameters
+        self.lookahead_params = {
+            'base_distance': self.get_parameter('costs.lookahead.base_distance').get_parameter_value().double_value,
+            'velocity_factor': self.get_parameter('costs.lookahead.velocity_factor').get_parameter_value().double_value,
+            'min_distance': self.get_parameter('costs.lookahead.min_distance').get_parameter_value().double_value,
+            'max_distance': self.get_parameter('costs.lookahead.max_distance').get_parameter_value().double_value,
+        }
+        
         # QoS parameters
         self.reliable_qos_depth = self.get_parameter('qos.reliable_depth').get_parameter_value().integer_value
         
         # Goal tracking parameters
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
+        
+        # Waypoint mode
+        self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
+        if self.waypoint_mode not in ['single', 'multiple']:
+            self.get_logger().warn(f"Invalid waypoint_mode '{self.waypoint_mode}', defaulting to 'multiple'")
+            self.waypoint_mode = 'multiple'
     
     def _init_motion_model(self):
         """Initialize motion model"""
@@ -209,10 +235,15 @@ class MPPIMainNode(Node):
             'xy_goal_tolerance': 0.25,
             'yaw_goal_tolerance': 0.25,
             'distance_scale': 1.0,
-            'angle_scale': 1.0
+            'angle_scale': 1.0,
+            # Lookahead parameters
+            'lookahead_base_distance': self.lookahead_params['base_distance'],
+            'lookahead_velocity_factor': self.lookahead_params['velocity_factor'],
+            'lookahead_min_distance': self.lookahead_params['min_distance'],
+            'lookahead_max_distance': self.lookahead_params['max_distance'],
         }
-        goal_critic = GoalCritic(goal_params)
-        self.optimizer.add_critic(goal_critic)
+        self.goal_critic = GoalCritic(goal_params)
+        self.optimizer.add_critic(self.goal_critic)
         
         self.get_logger().info("Critics initialized")
     
@@ -229,8 +260,23 @@ class MPPIMainNode(Node):
             ProcessedObstacles, self.obstacles_topic, self.obstacles_callback, reliable_qos)
         self.robot_state_sub = self.create_subscription(
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
-        self.goal_sub = self.create_subscription(
-            PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
+        
+        # Goal subscribers based on waypoint mode
+        if self.waypoint_mode == 'single':
+            self.goal_sub = self.create_subscription(
+                PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
+            self.get_logger().info(f"Single waypoint mode: subscribed to {self.goal_topic}")
+        elif self.waypoint_mode == 'multiple':
+            self.multiple_waypoints_sub = self.create_subscription(
+                MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
+            self.get_logger().info(f"Multiple waypoints mode: subscribed to {self.multiple_waypoints_topic}")
+        else:
+            # Fallback - subscribe to both but with priority to multiple waypoints
+            self.goal_sub = self.create_subscription(
+                PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
+            self.multiple_waypoints_sub = self.create_subscription(
+                MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
+            self.get_logger().warn("Unknown waypoint mode, subscribing to both topics")
         
         # Publishers
         self.cmd_pub = self.create_publisher(
@@ -239,6 +285,11 @@ class MPPIMainNode(Node):
             ControllerGoalStatus, self.goal_status_topic, reliable_qos)
         self.path_pub = self.create_publisher(
             OptimalPath, self.path_topic, reliable_qos)
+        
+        # Visualization publishers - publish lookahead point for visualization node
+        from geometry_msgs.msg import PointStamped
+        self.lookahead_pub = self.create_publisher(
+            PointStamped, '/smppi/lookahead_point', reliable_qos)
         
         self.get_logger().info(f"Topics configured: obstacles={self.obstacles_topic}, state={self.robot_state_topic}")
     
@@ -263,6 +314,28 @@ class MPPIMainNode(Node):
             self.current_goal_id = f"goal_{int(time.time())}"
             
         self.get_logger().info(f"New goal received: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), ID: {self.current_goal_id}")
+    
+    def multiple_waypoints_callback(self, msg: MultipleWaypoints):
+        """Process multiple waypoints"""
+        self.multiple_waypoints = msg
+        
+        # Set current goal from multiple waypoints
+        self.latest_goal = msg.current_goal
+        self.goal_state = Transforms.pose_to_tensor(
+            msg.current_goal, self.optimizer.device, self.optimizer.dtype)
+        
+        # Set goal ID
+        if msg.current_goal.header.frame_id:
+            self.current_goal_id = msg.current_goal.header.frame_id
+        else:
+            self.current_goal_id = f"waypoint_{msg.current_waypoint_index}"
+        
+        # Pass multiple waypoints to goal critic
+        if hasattr(self, 'goal_critic') and self.goal_critic is not None:
+            self.goal_critic.set_multiple_waypoints(msg)
+        
+        self.get_logger().info(f"New multiple waypoints: current={self.current_goal_id}, "
+                             f"next_count={len(msg.next_waypoints)}, final={msg.is_final_waypoint}")
     
     def control_callback(self):
         """Main control loop callback"""
@@ -314,6 +387,9 @@ class MPPIMainNode(Node):
             
             # Publish optimal path for visualization node
             self.publish_optimal_path()
+            
+            # Publish lookahead point for visualization
+            self.publish_lookahead_point()
             
             # Statistics
             end_time = time.perf_counter()
@@ -375,6 +451,28 @@ class MPPIMainNode(Node):
         
         except Exception as e:
             self.get_logger().warn(f"Path publishing error: {str(e)}")
+    
+    def publish_lookahead_point(self):
+        """Publish lookahead point for visualization node"""
+        try:
+            if hasattr(self, 'goal_critic') and self.goal_critic is not None:
+                lookahead_point = self.goal_critic.get_lookahead_point()
+                
+                if lookahead_point is not None:
+                    from geometry_msgs.msg import PointStamped
+                    
+                    point_msg = PointStamped()
+                    point_msg.header.stamp = self.get_clock().now().to_msg()
+                    point_msg.header.frame_id = "odom"
+                    
+                    point_msg.point.x = float(lookahead_point[0])
+                    point_msg.point.y = float(lookahead_point[1])
+                    point_msg.point.z = 0.0
+                    
+                    self.lookahead_pub.publish(point_msg)
+                    
+        except Exception as e:
+            self.get_logger().warn(f"Lookahead point publishing error: {str(e)}")
     
     def publish_goal_status(self, distance_to_goal: float):
         """Publish goal status information"""

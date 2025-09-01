@@ -280,7 +280,7 @@ class SMPPIOptimizer:
             delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
         
         # Debug log - show steering angle in radians (not rad/s)
-        print(f"[SMPPI] Control: v={v_next:.3f} m/s, δ={delta_next:.3f} rad, ω={omega_next:.3f} rad/s, δ_recovered={delta_recovered:.3f} rad")
+        # print(f"[SMPPI] Control: v={v_next:.3f} m/s, δ={delta_next:.3f} rad, ω={omega_next:.3f} rad/s, δ_recovered={delta_recovered:.3f} rad")
 
         # 반드시 last_cmd_applied는 [v, δ]로 저장 (내부 일관성)
         self.last_cmd_applied = torch.tensor([v_next, delta_next],
