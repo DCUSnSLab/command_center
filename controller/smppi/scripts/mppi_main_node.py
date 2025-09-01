@@ -66,6 +66,9 @@ class MPPIMainNode(Node):
             1.0 / self.control_frequency, 
             self.control_callback
         )
+
+        self.obstacle_critic = None
+        self.goal_critic = None
         
         # Statistics
         self.last_control_time = time.time()
@@ -395,6 +398,11 @@ class MPPIMainNode(Node):
             status_msg.goal_reached = False
             status_msg.status_code = 0  # PENDING
         self.goal_status_pub.publish(status_msg)
+
+    def update_param(self):
+        """
+            self.obstaclecritic, self.goalcritic 의 멤버 함수 update_parameters
+        """
     
     def shutdown(self):
         """Shutdown controller"""
