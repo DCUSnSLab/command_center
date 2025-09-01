@@ -232,7 +232,7 @@ def main():
     parser.add_argument('gps_topic', help='GPS topic name (e.g., /gps/fix)')
     parser.add_argument('-o', '--output', default='generated_map.json', 
                        help='Output JSON file path (default: generated_map.json)')
-    parser.add_argument('-d', '--distance', type=float, default=1.0,
+    parser.add_argument('-d', '--distance', type=float, default=10.0,
                        help='Minimum distance between GPS points in meters (default: 1.0)')
     
     args = parser.parse_args()
