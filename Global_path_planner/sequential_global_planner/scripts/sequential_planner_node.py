@@ -237,7 +237,12 @@ class SequentialPlannerNode(Node):
             map_node.remark = node_data.get('Remark', '')
             map_node.hist_type = node_data.get('HistType', '02A')
             map_node.hist_remark = node_data.get('HistRemark', '')
-            map_node.heading = node_data.get('Heading', 0.0)
+            # Handle heading field - use value if present, default to 0.0 if missing
+            if 'Heading' in node_data:
+                map_node.heading = node_data['Heading']
+            else:
+                map_node.heading = 0.0
+                self.get_logger().debug(f"Node {node_id} has no Heading key, using default 0.0")
             
             # GPS info
             map_node.gps_info.lat = node_data['GpsInfo']['Lat']
