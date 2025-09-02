@@ -60,6 +60,18 @@ def generate_launch_description():
         description='Goal tolerance distance (meters)'
     )
     
+    multiple_waypoints_topic_arg = DeclareLaunchArgument(
+        'multiple_waypoints_topic',
+        default_value='/multiple_waypoints',
+        description='Multiple waypoints publishing topic'
+    )
+    
+    waypoint_mode_arg = DeclareLaunchArgument(
+        'waypoint_mode',
+        default_value='multiple',
+        description='Waypoint mode: single or multiple'
+    )
+    
     # Simple Behavior Planner Node
     simple_behavior_planner_node = Node(
         package='simple_behavior_planner',
@@ -72,9 +84,11 @@ def generate_launch_description():
             'perception_topic': LaunchConfiguration('perception_topic'),
             'goal_status_topic': LaunchConfiguration('goal_status_topic'),
             'subgoal_topic': LaunchConfiguration('subgoal_topic'),
+            'multiple_waypoints_topic': LaunchConfiguration('multiple_waypoints_topic'),
             'emergency_stop_topic': LaunchConfiguration('emergency_stop_topic'),
             'lookahead_distance': LaunchConfiguration('lookahead_distance'),
             'goal_tolerance': LaunchConfiguration('goal_tolerance'),
+            'waypoint_mode': LaunchConfiguration('waypoint_mode'),
             'use_sim_time': use_sim_time
         }],
         remappings=[
@@ -88,8 +102,10 @@ def generate_launch_description():
         perception_topic_arg,
         goal_status_topic_arg,
         subgoal_topic_arg,
+        multiple_waypoints_topic_arg,
         emergency_stop_topic_arg,
         lookahead_distance_arg,
         goal_tolerance_arg,
+        waypoint_mode_arg,
         simple_behavior_planner_node,
     ])

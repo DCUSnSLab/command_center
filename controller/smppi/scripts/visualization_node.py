@@ -14,10 +14,11 @@ import numpy as np
 from typing import Optional
 
 # ROS2 messages
-from geometry_msgs.msg import PoseStamped, Point, Twist
+from geometry_msgs.msg import PoseStamped, Point, Twist, PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
 from smppi.msg import ProcessedObstacles, OptimalPath, MPPIState
+from command_center_interfaces.msg import MultipleWaypoints
 
 # TF2 imports
 import tf2_ros
@@ -54,7 +55,9 @@ class VisualizationNode(Node):
         self.processed_obstacles: Optional[ProcessedObstacles] = None
         self.optimal_path: Optional[OptimalPath] = None
         self.latest_goal: Optional[PoseStamped] = None
+        self.multiple_waypoints: Optional[MultipleWaypoints] = None
         self.robot_state: Optional[MPPIState] = None
+        self.lookahead_point: Optional[PointStamped] = None
         
         # Visualization timer (runs at lower frequency)
         self.visualization_timer = self.create_timer(
@@ -69,9 +72,13 @@ class VisualizationNode(Node):
         # Topic parameters
         self.declare_parameter('topics.input.processed_obstacles', '/smppi/processed_obstacles')
         self.declare_parameter('topics.input.optimal_path', '/mppi_optimal_path')
-        self.declare_parameter('topics.input.goal_pose', '/goal_pose')
+        self.declare_parameter('topics.input.goal_pose', '/subgoal')
+        self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
         self.declare_parameter('topics.input.robot_state', '/smppi/robot_state')
         self.declare_parameter('topics.output.markers', '/smppi_visualization')
+        
+        # Waypoint mode
+        self.declare_parameter('waypoint_mode', 'multiple')
         
         # Visualization parameters
         self.declare_parameter('visualization_frequency', 20.0)
@@ -94,8 +101,15 @@ class VisualizationNode(Node):
         self.obstacles_topic = self.get_parameter('topics.input.processed_obstacles').get_parameter_value().string_value
         self.path_topic = self.get_parameter('topics.input.optimal_path').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
+        self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
         self.robot_state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
         self.markers_topic = self.get_parameter('topics.output.markers').get_parameter_value().string_value
+        
+        # Waypoint mode
+        self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
+        if self.waypoint_mode not in ['single', 'multiple']:
+            self.get_logger().warn(f"Invalid waypoint_mode '{self.waypoint_mode}', defaulting to 'multiple'")
+            self.waypoint_mode = 'multiple'
         
         # Visualization parameters
         self.visualization_frequency = self.get_parameter('visualization_frequency').get_parameter_value().double_value
@@ -130,10 +144,27 @@ class VisualizationNode(Node):
             ProcessedObstacles, self.obstacles_topic, self.obstacles_callback, reliable_qos)
         self.path_sub = self.create_subscription(
             OptimalPath, self.path_topic, self.path_callback, reliable_qos)
-        self.goal_sub = self.create_subscription(
-            PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
         self.robot_state_sub = self.create_subscription(
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
+        self.lookahead_sub = self.create_subscription(
+            PointStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
+        
+        # Goal subscribers based on waypoint mode
+        if self.waypoint_mode == 'single':
+            self.goal_sub = self.create_subscription(
+                PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
+            self.get_logger().info(f"Visualization single mode: subscribed to {self.goal_topic}")
+        elif self.waypoint_mode == 'multiple':
+            self.multiple_waypoints_sub = self.create_subscription(
+                MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
+            self.get_logger().info(f"Visualization multiple mode: subscribed to {self.multiple_waypoints_topic}")
+        else:
+            # Fallback - subscribe to both
+            self.goal_sub = self.create_subscription(
+                PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
+            self.multiple_waypoints_sub = self.create_subscription(
+                MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
+            self.get_logger().warn("Unknown waypoint mode for visualization, subscribing to both topics")
         
         # Publishers
         self.marker_pub = self.create_publisher(
@@ -153,9 +184,19 @@ class VisualizationNode(Node):
         """Receive goal pose"""
         self.latest_goal = msg
     
+    def multiple_waypoints_callback(self, msg: MultipleWaypoints):
+        """Receive multiple waypoints"""
+        self.multiple_waypoints = msg
+        # Set latest goal from current goal for visualization compatibility
+        self.latest_goal = msg.current_goal
+    
     def robot_state_callback(self, msg: MPPIState):
         """Receive robot state"""
         self.robot_state = msg
+    
+    def lookahead_callback(self, msg: PointStamped):
+        """Receive lookahead point"""
+        self.lookahead_point = msg
     
     def visualization_callback(self):
         """Main visualization callback (runs at lower frequency)"""
@@ -178,6 +219,17 @@ class VisualizationNode(Node):
             if self.enable_obstacles and self.processed_obstacles is not None:
                 obstacle_markers = self.create_obstacle_markers()
                 marker_array.markers.extend(obstacle_markers)
+            
+            # Lookahead point marker
+            if self.lookahead_point is not None:
+                lookahead_marker = self.create_lookahead_marker()
+                if lookahead_marker:
+                    marker_array.markers.append(lookahead_marker)
+            
+            # Multiple waypoints markers (next waypoints)
+            if self.waypoint_mode == 'multiple' and self.multiple_waypoints is not None:
+                next_waypoint_markers = self.create_next_waypoints_markers()
+                marker_array.markers.extend(next_waypoint_markers)
             
             # Robot footprint marker
             if self.enable_robot_footprint and self.robot_state is not None and len(self.footprint) > 0:
@@ -332,6 +384,94 @@ class VisualizationNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Footprint marker creation error: {str(e)}")
             return None
+    
+    def create_lookahead_marker(self) -> Optional[Marker]:
+        """Create lookahead point visualization marker"""
+        if not self.lookahead_point:
+            return None
+        
+        try:
+            lookahead_marker = Marker()
+            lookahead_marker.header.frame_id = "odom"
+            lookahead_marker.header.stamp = self.get_clock().now().to_msg()
+            lookahead_marker.ns = "lookahead"
+            lookahead_marker.id = 30
+            lookahead_marker.type = Marker.SPHERE
+            lookahead_marker.action = Marker.ADD
+            
+            # Position from lookahead point
+            lookahead_marker.pose.position.x = self.lookahead_point.point.x
+            lookahead_marker.pose.position.y = self.lookahead_point.point.y
+            lookahead_marker.pose.position.z = 0.15  # Slightly above ground
+            lookahead_marker.pose.orientation.w = 1.0
+            
+            # Scale - visible but not too large
+            lookahead_marker.scale.x = 0.4
+            lookahead_marker.scale.y = 0.4
+            lookahead_marker.scale.z = 0.4
+            
+            # Bright green color for lookahead point
+            lookahead_marker.color.r = 0.0
+            lookahead_marker.color.g = 1.0
+            lookahead_marker.color.b = 0.2
+            lookahead_marker.color.a = 0.9
+            
+            # Short lifetime for real-time updates
+            lookahead_marker.lifetime.sec = 0
+            lookahead_marker.lifetime.nanosec = 300000000  # 0.3 seconds
+            
+            return lookahead_marker
+            
+        except Exception as e:
+            self.get_logger().warn(f"Lookahead marker creation error: {str(e)}")
+            return None
+
+    def create_next_waypoints_markers(self) -> list:
+        """Create visualization markers for next waypoints"""
+        markers = []
+        
+        try:
+            if not self.multiple_waypoints or not self.multiple_waypoints.next_waypoints:
+                return markers
+            
+            for i, waypoint in enumerate(self.multiple_waypoints.next_waypoints):
+                marker = Marker()
+                marker.header.frame_id = "odom"
+                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.ns = "next_waypoints"
+                marker.id = 40 + i  # Start from ID 40
+                marker.type = Marker.CYLINDER
+                marker.action = Marker.ADD
+                
+                # Position from waypoint
+                marker.pose.position.x = waypoint.pose.position.x
+                marker.pose.position.y = waypoint.pose.position.y
+                marker.pose.position.z = 0.1  # Slightly above ground
+                marker.pose.orientation.w = 1.0
+                
+                # Scale - smaller than current goal
+                marker.scale.x = 0.3
+                marker.scale.y = 0.3
+                marker.scale.z = 0.2
+                
+                # Color - blue with decreasing intensity
+                alpha = 0.8 - (i * 0.2)  # Fade out for distant waypoints
+                marker.color.r = 0.2
+                marker.color.g = 0.4
+                marker.color.b = 1.0
+                marker.color.a = max(alpha, 0.3)
+                
+                # Lifetime
+                marker.lifetime.sec = 0
+                marker.lifetime.nanosec = 500000000  # 0.5 seconds
+                
+                markers.append(marker)
+                
+            return markers
+                
+        except Exception as e:
+            self.get_logger().warn(f"Next waypoints marker creation error: {str(e)}")
+            return []
 
 
 def main(args=None):

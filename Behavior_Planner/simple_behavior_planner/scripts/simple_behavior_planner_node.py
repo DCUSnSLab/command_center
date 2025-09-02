@@ -31,7 +31,7 @@ from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs.tf2_geometry_msgs as tf2_geometry_msgs
 
 # Custom messages
-from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus
+from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints
 
 
 class SimpleBehaviorPlannerNode(Node):
@@ -46,9 +46,11 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('perception_topic', '/perception')
         self.declare_parameter('goal_status_topic', '/goal_status')
         self.declare_parameter('subgoal_topic', '/subgoal')
+        self.declare_parameter('multiple_waypoints_topic', '/multiple_waypoints')
         self.declare_parameter('emergency_stop_topic', '/emergency_stop')
         self.declare_parameter('lookahead_distance', 10.0)  # meters
         self.declare_parameter('goal_tolerance', 2.0)  # meters
+        self.declare_parameter('waypoint_mode', 'multiple')  # 'single' or 'multiple'
         
         # Get parameters
         self.current_position_topic = self.get_parameter('current_position_topic').get_parameter_value().string_value
@@ -56,9 +58,15 @@ class SimpleBehaviorPlannerNode(Node):
         self.perception_topic = self.get_parameter('perception_topic').get_parameter_value().string_value
         self.goal_status_topic = self.get_parameter('goal_status_topic').get_parameter_value().string_value
         self.subgoal_topic = self.get_parameter('subgoal_topic').get_parameter_value().string_value
+        self.multiple_waypoints_topic = self.get_parameter('multiple_waypoints_topic').get_parameter_value().string_value
         self.emergency_stop_topic = self.get_parameter('emergency_stop_topic').get_parameter_value().string_value
         self.lookahead_distance = self.get_parameter('lookahead_distance').get_parameter_value().double_value
         self.goal_tolerance = self.get_parameter('goal_tolerance').get_parameter_value().double_value
+        self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
+        
+        if self.waypoint_mode not in ['single', 'multiple']:
+            self.get_logger().warn(f"Invalid waypoint_mode '{self.waypoint_mode}', defaulting to 'multiple'")
+            self.waypoint_mode = 'multiple'
         
         # State variables
         self.current_pose: Optional[PoseStamped] = None
@@ -116,18 +124,40 @@ class SimpleBehaviorPlannerNode(Node):
             reliable_qos
         )
         
-        # Publishers
-        self.subgoal_pub = self.create_publisher(
-            PoseStamped, 
-            self.subgoal_topic, 
-            reliable_qos
-        )
-        
+        # Publishers - create based on waypoint mode
         self.emergency_stop_pub = self.create_publisher(
             Bool,  # Placeholder - 실제 긴급정지 메시지 타입으로 변경 필요
             self.emergency_stop_topic, 
             reliable_qos
         )
+        
+        if self.waypoint_mode == 'single':
+            self.subgoal_pub = self.create_publisher(
+                PoseStamped, 
+                self.subgoal_topic, 
+                reliable_qos
+            )
+            self.get_logger().info(f"Single waypoint mode: publishing to {self.subgoal_topic}")
+        elif self.waypoint_mode == 'multiple':
+            self.multiple_waypoints_pub = self.create_publisher(
+                MultipleWaypoints,
+                self.multiple_waypoints_topic,
+                reliable_qos
+            )
+            self.get_logger().info(f"Multiple waypoints mode: publishing to {self.multiple_waypoints_topic}")
+        else:
+            # Fallback - create both publishers
+            self.subgoal_pub = self.create_publisher(
+                PoseStamped, 
+                self.subgoal_topic, 
+                reliable_qos
+            )
+            self.multiple_waypoints_pub = self.create_publisher(
+                MultipleWaypoints,
+                self.multiple_waypoints_topic,
+                reliable_qos
+            )
+            self.get_logger().warn("Unknown waypoint mode, creating both publishers")
         
         # Timer for main behavior planning loop
         self.planning_timer = self.create_timer(0.1, self.planning_callback)  # 10Hz
@@ -218,7 +248,16 @@ class SimpleBehaviorPlannerNode(Node):
         if not self.subgoal_published:
             next_subgoal = self.find_next_subgoal()
             if next_subgoal:
-                self.publish_subgoal(next_subgoal)
+                # Publish based on waypoint mode
+                if self.waypoint_mode == 'single':
+                    self.publish_subgoal(next_subgoal)
+                elif self.waypoint_mode == 'multiple':
+                    self.publish_multiple_waypoints()
+                else:
+                    # Fallback - publish both (multiple waypoints takes priority)
+                    self.publish_multiple_waypoints()
+                    self.publish_subgoal(next_subgoal)
+                
                 self.subgoal_published = True  # 서브골 발행 완료 표시
     
     def find_next_subgoal(self) -> Optional[dict]:
@@ -299,8 +338,11 @@ class SimpleBehaviorPlannerNode(Node):
             subgoal_msg.pose.position.z = target_node['z']
             subgoal_msg.pose.orientation.w = 1.0
             
-            self.subgoal_pub.publish(subgoal_msg)
-            self.get_logger().warn(f'Published subgoal without TF transformation: Node {target_node["id"]} at absolute coords')
+            if hasattr(self, 'subgoal_pub') and self.subgoal_pub is not None:
+                self.subgoal_pub.publish(subgoal_msg)
+                self.get_logger().warn(f'Published subgoal without TF transformation: Node {target_node["id"]} at absolute coords')
+            else:
+                self.get_logger().warn(f'Subgoal publisher not available in {self.waypoint_mode} mode')
     
     def advance_to_next_node(self):
         """다음 노드로 이동"""
@@ -329,6 +371,86 @@ class SimpleBehaviorPlannerNode(Node):
         """긴급 정지 해제"""
         self.emergency_stop_requested = False
         self.get_logger().info('Emergency stop cleared')
+    
+    def publish_multiple_waypoints(self):
+        """Multiple waypoints 발행 - 현재 목표 + 다음 목표들"""
+        try:
+            if not self.path_nodes or self.current_target_node_index >= len(self.path_nodes):
+                return
+            
+            # 현재 목표
+            current_node = self.path_nodes[self.current_target_node_index]
+            
+            # 다음 목표들 (최대 3개까지)
+            lookahead_count = 3
+            next_nodes = []
+            for i in range(1, min(lookahead_count + 1, len(self.path_nodes) - self.current_target_node_index)):
+                next_idx = self.current_target_node_index + i
+                if next_idx < len(self.path_nodes):
+                    next_nodes.append(self.path_nodes[next_idx])
+            
+            # MultipleWaypoints 메시지 생성
+            waypoints_msg = MultipleWaypoints()
+            waypoints_msg.header.stamp = self.get_clock().now().to_msg()
+            waypoints_msg.header.frame_id = 'odom'
+            
+            # 현재 목표 설정
+            waypoints_msg.current_goal = self.create_pose_stamped(current_node)
+            
+            # 다음 목표들 설정
+            waypoints_msg.next_waypoints = []
+            for node in next_nodes:
+                waypoints_msg.next_waypoints.append(self.create_pose_stamped(node))
+            
+            # 경로 정보 설정
+            waypoints_msg.path_id = self.planned_path.path_id if self.planned_path else ""
+            waypoints_msg.current_waypoint_index = self.current_target_node_index
+            waypoints_msg.total_waypoints = len(self.path_nodes)
+            waypoints_msg.is_final_waypoint = (self.current_target_node_index == len(self.path_nodes) - 1)
+            
+            # 발행
+            if hasattr(self, 'multiple_waypoints_pub') and self.multiple_waypoints_pub is not None:
+                self.multiple_waypoints_pub.publish(waypoints_msg)
+                self.get_logger().info(f'Published MultipleWaypoints: current={current_node["id"]}, '
+                                     f'next_count={len(next_nodes)}, final={waypoints_msg.is_final_waypoint}')
+            else:
+                self.get_logger().warn(f'Multiple waypoints publisher not available in {self.waypoint_mode} mode')
+                                 
+        except Exception as e:
+            self.get_logger().warn(f'Failed to publish multiple waypoints: {str(e)}')
+    
+    def create_pose_stamped(self, node: dict) -> PoseStamped:
+        """노드에서 PoseStamped 메시지 생성 (odom 좌표로 변환)"""
+        try:
+            # Create pose in map frame
+            map_pose = PoseStamped()
+            map_pose.header.stamp = self.get_clock().now().to_msg()
+            map_pose.header.frame_id = 'map'
+            map_pose.pose.position.x = node['x']
+            map_pose.pose.position.y = node['y'] 
+            map_pose.pose.position.z = node['z']
+            map_pose.pose.orientation.w = 1.0
+            
+            # Transform to odom frame
+            transform = self.tf_buffer.lookup_transform('odom', 'map', rclpy.time.Time())
+            odom_pose = tf2_geometry_msgs.do_transform_pose_stamped(map_pose, transform)
+            
+            # Set goal ID in frame_id for compatibility
+            odom_pose.header.frame_id = node['id']
+            
+            return odom_pose
+            
+        except Exception as e:
+            self.get_logger().warn(f'TF transform failed, using fallback: {str(e)}')
+            # Fallback without transformation
+            fallback_pose = PoseStamped()
+            fallback_pose.header.stamp = self.get_clock().now().to_msg()
+            fallback_pose.header.frame_id = node['id']
+            fallback_pose.pose.position.x = node['x']
+            fallback_pose.pose.position.y = node['y']
+            fallback_pose.pose.position.z = node['z']
+            fallback_pose.pose.orientation.w = 1.0
+            return fallback_pose
 
 
 def main(args=None):
