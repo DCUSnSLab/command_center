@@ -166,7 +166,14 @@ private:
                     map_node.remark = node_json.value("Remark", "");
                     map_node.hist_type = node_json.value("HistType", "");
                     map_node.hist_remark = node_json.value("HistRemark", "");
-                    map_node.heading = node_json.value("Heading", 0.0);
+                    // Handle heading field - use value if present, default to 0.0 if missing
+                    if (node_json.contains("Heading")) {
+                        map_node.heading = node_json.value("Heading", 0.0);
+                    } else {
+                        map_node.heading = 0.0;
+                        RCLCPP_DEBUG(this->get_logger(), "Node %s has no Heading key, using default 0.0", 
+                                   map_node.id.c_str());
+                    }
                     
                     // GPS Information
                     if (node_json.contains("GpsInfo")) {
