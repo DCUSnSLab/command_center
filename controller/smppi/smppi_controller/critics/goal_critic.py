@@ -1,317 +1,264 @@
 #!/usr/bin/env python3
-"""
-Goal Tracking Critic for SMPPI
-Tracks /goal_pose for navigation
-"""
-
+import math
 import torch
 from typing import Optional, Any
-
 from .base_critic import BaseCritic
 
 
 class GoalCritic(BaseCritic):
     """
-    Goal tracking critic for navigation
+    Goal tracking critic for navigation (SMPPI)
     """
-    
+
     def __init__(self, params: dict):
-        """Initialize goal critic"""
         super().__init__("GoalCritic", params)
-        
+
         # Goal tracking parameters
         self.xy_goal_tolerance = params.get('xy_goal_tolerance', 0.25)
         self.yaw_goal_tolerance = params.get('yaw_goal_tolerance', 0.25)
+
+        # Scales (actually used in total cost)
         self.distance_scale = params.get('distance_scale', 1.0)
         self.angle_scale = params.get('angle_scale', 1.0)
-        
+        self.alignment_scale = params.get('alignment_scale', 1.0)
+        self.progress_scale = params.get('progress_scale', 0.0)  # default off
+
+        # Progress reward toggle
+        self.use_progress_reward = params.get('use_progress_reward', False)
+
         # Lookahead parameters
         self.lookahead_base_distance = params.get('lookahead_base_distance', 2.5)
         self.lookahead_velocity_factor = params.get('lookahead_velocity_factor', 1.2)
         self.lookahead_min_distance = params.get('lookahead_min_distance', 1.0)
         self.lookahead_max_distance = params.get('lookahead_max_distance', 6.0)
-        
-        # Multiple waypoints support
-        self.multiple_waypoints = None
+
+        # Behavior options
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', True)
-        
-        print(f"[GoalCritic] xy_tolerance={self.xy_goal_tolerance}, yaw_tolerance={self.yaw_goal_tolerance}")
-        print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}m, vel_factor={self.lookahead_velocity_factor}s, range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]m")
-        print(f"[GoalCritic] Multiple waypoints enabled: {self.use_multiple_waypoints}")
-    
+        self.respect_reverse_heading = params.get('respect_reverse_heading', True)
+        self.yaw_blend_distance = params.get('yaw_blend_distance', 1.5)  # near-goal 헤딩 블렌딩
+
+        # Debug
+        self.debug = params.get('debug', False)
+        self.debug_level = params.get('debug_level', 1)
+
+        self.multiple_waypoints = None
+        print(f"[GoalCritic] xy_tol={self.xy_goal_tolerance}, yaw_tol={self.yaw_goal_tolerance}")
+        print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}, vel_fac={self.lookahead_velocity_factor}, "
+              f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
+        print(f"[GoalCritic] Multi-waypoints: {self.use_multiple_waypoints}, reverse_heading: {self.respect_reverse_heading}")
+
+    @staticmethod
+    def _relu(x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, min=0.)
+
+    @staticmethod
+    def _huber(x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+        # smooth L1
+        absx = torch.abs(x)
+        quad = torch.minimum(absx, torch.tensor(delta, device=x.device, dtype=x.dtype))
+        lin = absx - quad
+        return 0.5 * quad * quad + delta * lin
+
     def compute_cost(self, trajectories: torch.Tensor, controls: torch.Tensor,
-                    robot_state: torch.Tensor, goal_state: Optional[torch.Tensor],
-                    obstacles: Optional[Any]) -> torch.Tensor:
+                     robot_state: torch.Tensor, goal_state: Optional[torch.Tensor],
+                     obstacles: Optional[Any]) -> torch.Tensor:
         """
-        Args:
-            trajectories: [K, T+1, 3] trajectory states (x, y, theta)
-            controls: [K, T, 2] control sequences
-            robot_state: [5] current robot state
-            goal_state: [3] goal state (x, y, theta) or None
-            obstacles: Not used for goal critic
-            
-        Returns:
-            costs: [K] goal costs for each trajectory
+        trajectories: [K, T+1, 3] (x, y, theta)
+        controls:     [K, T, 2]   (unused here but kept for interface)
+        robot_state:  [5] e.g., (x, y, yaw, v, w)
+        goal_state:   [3] (x, y, yaw)
         """
         if not self.enabled or goal_state is None:
             return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
 
-        # Device/dtype alignment
+        # --- Device/dtype alignment
         trajectories = trajectories.to(self.device, self.dtype)
         robot_state = robot_state.to(self.device, self.dtype)
         goal_state = goal_state.to(self.device, self.dtype)
 
         K, T_plus_1, _ = trajectories.shape
-        current_pos = robot_state[:2]
-        current_vel = torch.abs(robot_state[3])
-        goal_pos = goal_state[:2]
+        current_pos = robot_state[:2]                      # [2]
+        v_scalar = robot_state[3]                          # signed speed
+        v_abs = torch.abs(v_scalar)
+        goal_pos = goal_state[:2]                          # [2]
 
-        # Multiple waypoints lookahead calculation
-        lookahead_point = self._compute_multiple_waypoints_lookahead(current_pos, current_vel, goal_pos)
-        
-        # Store lookahead for visualization
-        self.last_lookahead_point = lookahead_point.clone()
-        
-        # Direction to lookahead point
+        # --- Lookahead point (multi-waypoints aware)
+        lookahead_point = self._compute_multiple_waypoints_lookahead(current_pos, v_abs, goal_pos)
+        # store for viz without holding the graph
+        self.last_lookahead_point = lookahead_point.detach().cpu()
+
+        # --- Target direction / yaw (with reverse-aware option)
         lookahead_vec = lookahead_point - current_pos
         lookahead_dist = torch.norm(lookahead_vec) + 1e-9
         target_direction = lookahead_vec / lookahead_dist
         target_yaw = torch.atan2(target_direction[1], target_direction[0])
 
-        # Trajectory analysis
+        if self.respect_reverse_heading and (v_scalar < 0):
+            target_yaw = self.normalize_angle(target_yaw + math.pi)
+
+        # Near-goal: blend target yaw towards desired final yaw to avoid flipping
+        goal_vec = goal_pos - current_pos
+        dist_to_goal = torch.norm(goal_vec)
+        if (dist_to_goal < self.yaw_blend_distance):
+            alpha = (self.yaw_blend_distance - dist_to_goal) / self.yaw_blend_distance  # 0..1
+            blended = self.normalize_angle(goal_state[2])
+            # slerp-like in angle space
+            dyaw = self.normalize_angle(blended - target_yaw)
+            target_yaw = self.normalize_angle(target_yaw + alpha * dyaw)
+
+        # --- Trajectory slices
         traj_positions = trajectories[:, :, :2]  # [K, T+1, 2]
         traj_yaws = trajectories[:, :, 2]        # [K, T+1]
 
-        # 1. Lookahead tracking cost - weighted average distance
+        # 1) Lookahead tracking cost (weighted)
         weights = torch.linspace(0.3, 1.0, steps=T_plus_1, device=self.device, dtype=self.dtype)
         weights = weights / weights.sum()
-        
-        distances_to_lookahead = torch.norm(
-            traj_positions - lookahead_point.view(1, 1, 2), dim=2
-        )  # [K, T+1]
-        
-        lookahead_cost = (distances_to_lookahead * weights.view(1, -1)).sum(dim=1)  # [K]
+        distances_to_lookahead = torch.norm(traj_positions - lookahead_point.view(1, 1, 2), dim=2)  # [K, T+1]
 
-        # 2. Heading alignment cost
+        # hinge on tolerance -> inside tol => 0
+        hinge_d = self._relu(distances_to_lookahead - self.xy_goal_tolerance)
+        lookahead_cost = (hinge_d * weights.view(1, -1)).sum(dim=1)  # [K]
+
+        # 2) Heading alignment (final yaw vs target_yaw), hinge on yaw tolerance
         final_yaws = traj_yaws[:, -1]  # [K]
-        yaw_errors = self.normalize_angle(final_yaws - target_yaw)
-        heading_cost = yaw_errors ** 2
+        yaw_errors = torch.abs(self.normalize_angle(final_yaws - target_yaw))
+        hinge_yaw = self._relu(yaw_errors - self.yaw_goal_tolerance)
+        heading_cost = self._huber(hinge_yaw, delta=0.5)  # smoother than square
 
-        # 3. Path alignment cost
+        # 3) Path alignment cost (step-wise cosine alignment to target direction)
         if T_plus_1 > 1:
-            trajectory_steps = traj_positions[:, 1:, :] - traj_positions[:, :-1, :]  # [K, T, 2]
-            step_norms = torch.norm(trajectory_steps, dim=2, keepdim=True).clamp_min(1e-6)
-            step_directions = trajectory_steps / step_norms  # [K, T, 2]
-            
-            # Alignment with target direction
-            alignment = torch.sum(
-                step_directions * target_direction.view(1, 1, 2), dim=2
-            )  # [K, T]
-            alignment_cost = (1.0 - alignment).mean(dim=1)  # [K]
+            steps = traj_positions[:, 1:, :] - traj_positions[:, :-1, :]  # [K, T, 2]
+            step_norms = torch.norm(steps, dim=2, keepdim=True).clamp_min(1e-6)
+            step_dirs = steps / step_norms
+            alignment = torch.sum(step_dirs * target_direction.view(1, 1, 2), dim=2)  # cos in [-1,1]
+            # 1 - cos -> [0,2], use huber for smoothness
+            alignment_cost = self._huber(1.0 - alignment).mean(dim=1)
         else:
             alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
 
-        # Normalized costs
-        lookahead_normalized = lookahead_cost / (self.xy_goal_tolerance + 1e-6)
-        heading_normalized = torch.abs(yaw_errors) / (self.yaw_goal_tolerance + 1e-6)
+        # 4) (옵션) Progress reward: 가까워질수록 비용을 깎음
+        progress_term = torch.zeros(K, device=self.device, dtype=self.dtype)
+        if self.use_progress_reward:
+            init_d = torch.norm(traj_positions[:, 0, :] - goal_pos.view(1, 2), dim=1)
+            final_d = torch.norm(traj_positions[:, -1, :] - goal_pos.view(1, 2), dim=1)
+            progress = init_d - final_d  # >0 이면 진전
+            progress_term = -progress  # 비용에 더하므로, 진전이 크면 더 작은 비용
 
-        # Combined cost
+        # --- Combine with scales
         total_cost = (
-            0.5 * lookahead_normalized +
-            0.3 * heading_normalized +
-            0.2 * alignment_cost
+            self.distance_scale * lookahead_cost +
+            self.angle_scale    * heading_cost +
+            self.alignment_scale * alignment_cost +
+            self.progress_scale  * progress_term
         )
 
         return self.apply_weight(total_cost)
-    
-    def _compute_nav2_lookahead(self, current_pos: torch.Tensor, current_vel: torch.Tensor, 
-                               goal_pos: torch.Tensor) -> torch.Tensor:
-        # Base lookahead distance (configurable)
+
+    def _compute_nav2_lookahead(self, current_pos: torch.Tensor, current_vel_abs: torch.Tensor,
+                                goal_pos: torch.Tensor) -> torch.Tensor:
         base_offset = self.lookahead_base_distance
-        
-        # Velocity-based additional lookahead (configurable factor)
-        velocity_offset = self.lookahead_velocity_factor * current_vel
-        
-        # Total lookahead distance
-        total_lookahead = base_offset + velocity_offset
-        
-        # Clamp lookahead distance (configurable limits)
-        total_lookahead = torch.clamp(total_lookahead, self.lookahead_min_distance, self.lookahead_max_distance)
-        
-        # Direction to goal
+        velocity_offset = self.lookahead_velocity_factor * current_vel_abs
+        total_lookahead = torch.clamp(base_offset + velocity_offset,
+                                      self.lookahead_min_distance,
+                                      self.lookahead_max_distance)
         goal_vec = goal_pos - current_pos
         goal_distance = torch.norm(goal_vec) + 1e-9
-        
+
         if (goal_distance <= total_lookahead).item():
             return goal_pos
-        else:
-            # Place lookahead point along the goal direction
-            goal_direction = goal_vec / goal_distance
-            lookahead_point = current_pos + goal_direction * total_lookahead
-            return lookahead_point
-    
+        goal_dir = goal_vec / goal_distance
+        return current_pos + goal_dir * total_lookahead
+
     def get_lookahead_point(self) -> Optional[torch.Tensor]:
-        """Get the current lookahead point for visualization"""
         return getattr(self, 'last_lookahead_point', None)
-    
+
     def set_multiple_waypoints(self, waypoints_msg):
-        """Set multiple waypoints for advanced lookahead"""
         self.multiple_waypoints = waypoints_msg
-    
-    def _compute_multiple_waypoints_lookahead(self, current_pos: torch.Tensor, current_vel: torch.Tensor, 
-                                            goal_pos: torch.Tensor) -> torch.Tensor:
-        """
-        Compute lookahead point using multiple waypoints for smooth path following
-        Prevents speed reduction near intermediate goals by considering next waypoints
-        """
-        # If multiple waypoints are available and enabled, use them
+
+    def _compute_multiple_waypoints_lookahead(self, current_pos: torch.Tensor, current_vel_abs: torch.Tensor,
+                                              goal_pos: torch.Tensor) -> torch.Tensor:
         if self.use_multiple_waypoints and self.multiple_waypoints is not None:
-            return self._compute_waypoint_chain_lookahead(current_pos, current_vel)
-        else:
-            # Fallback to single goal lookahead
-            return self._compute_nav2_lookahead(current_pos, current_vel, goal_pos)
-    
-    def _compute_waypoint_chain_lookahead(self, current_pos: torch.Tensor, current_vel: torch.Tensor) -> torch.Tensor:
-        """
-        Compute lookahead using waypoint chain for continuous smooth motion
-        """
-        waypoints = self.multiple_waypoints
-        
-        # Current goal position
+            return self._compute_waypoint_chain_lookahead(current_pos, current_vel_abs)
+        return self._compute_nav2_lookahead(current_pos, current_vel_abs, goal_pos)
+
+    def _compute_waypoint_chain_lookahead(self, current_pos: torch.Tensor, current_vel_abs: torch.Tensor) -> torch.Tensor:
+        wp = self.multiple_waypoints
+
+        # 방어적 가드
+        if not hasattr(wp, "current_goal") or wp.current_goal is None:
+            return current_pos  # 정보 없으면 현재 위치 반환
+
         current_goal_pos = torch.tensor([
-            waypoints.current_goal.pose.position.x,
-            waypoints.current_goal.pose.position.y
+            wp.current_goal.pose.position.x,
+            wp.current_goal.pose.position.y
         ], device=self.device, dtype=self.dtype)
-        
-        # Calculate lookahead distance
-        base_distance = self.lookahead_base_distance
-        velocity_distance = self.lookahead_velocity_factor * current_vel
+
         total_lookahead = torch.clamp(
-            base_distance + velocity_distance, 
-            self.lookahead_min_distance, 
+            self.lookahead_base_distance + self.lookahead_velocity_factor * current_vel_abs,
+            self.lookahead_min_distance,
             self.lookahead_max_distance
         )
-        
-        # Distance to current goal
-        distance_to_current = torch.norm(current_pos - current_goal_pos)
-        
-        # If current goal is far enough, use standard lookahead
-        if (distance_to_current > total_lookahead).item():
-            direction = (current_goal_pos - current_pos) / (distance_to_current + 1e-9)
+
+        d_cur = torch.norm(current_pos - current_goal_pos)
+
+        if (d_cur > total_lookahead).item():
+            direction = (current_goal_pos - current_pos) / (d_cur + 1e-9)
             return current_pos + direction * total_lookahead
-        
-        # Current goal is close - use waypoint chain for extended lookahead
-        if len(waypoints.next_waypoints) > 0:
-            # Calculate extended lookahead through waypoint chain
-            remaining_distance = total_lookahead - distance_to_current
-            
-            # Start from current goal, extend to next waypoints
-            extended_point = self._extend_lookahead_through_waypoints(
-                current_goal_pos, remaining_distance, waypoints.next_waypoints
+
+        # 가까우면 next_waypoints로 연장
+        next_wps = getattr(wp, "next_waypoints", None) or []
+        if len(next_wps) == 0:
+            return current_goal_pos
+
+        remaining = float((total_lookahead - d_cur).item())
+        return self._extend_lookahead_through_waypoints(current_goal_pos, remaining, next_wps)
+
+    def _extend_lookahead_through_waypoints(self, start_pos: torch.Tensor, remaining_distance: float, next_waypoints: list) -> torch.Tensor:
+        current = start_pos
+        remaining = float(remaining_distance)
+
+        for waypoint in next_waypoints:
+            next_pos = torch.tensor(
+                [waypoint.pose.position.x, waypoint.pose.position.y],
+                device=self.device, dtype=self.dtype
             )
-            return extended_point
-        else:
-            # No next waypoints - this is final goal, use direct approach
-            if waypoints.is_final_waypoint:
-                return current_goal_pos
-            else:
-                # Use current goal as lookahead
-                return current_goal_pos
-    
-    def _extend_lookahead_through_waypoints(self, start_pos: torch.Tensor, remaining_distance: float, 
-                                          next_waypoints: list) -> torch.Tensor:
-        """
-        Extend lookahead through a chain of waypoints
-        """
-        current_pos = start_pos
-        remaining = remaining_distance
-        
-        for i, waypoint in enumerate(next_waypoints):
-            next_pos = torch.tensor([
-                waypoint.pose.position.x,
-                waypoint.pose.position.y
-            ], device=self.device, dtype=self.dtype)
-            
-            segment_vec = next_pos - current_pos
-            segment_length = torch.norm(segment_vec)
-            
-            if (remaining <= segment_length).item():
-                # Lookahead point is within this segment
-                if segment_length > 1e-9:
-                    direction = segment_vec / segment_length
-                    return current_pos + direction * remaining
+            seg_vec = next_pos - current
+            seg_len = float(torch.norm(seg_vec).item())
+
+            if remaining <= seg_len:
+                if seg_len > 1e-9:
+                    direction = seg_vec / (seg_len + 1e-9)
+                    return current + direction * remaining
                 else:
-                    return current_pos
+                    return current
             else:
-                # Move to next waypoint and continue
-                remaining = (remaining - segment_length).item() if torch.is_tensor(remaining) else (remaining - segment_length)
-                current_pos = next_pos
-        
-        # If we've exhausted all waypoints, return the last waypoint
-        return current_pos
-    
+                remaining -= seg_len
+                current = next_pos
+
+        # 모든 세그먼트를 지나도 남으면 마지막 점
+        return current
+
     def is_goal_reached(self, current_pose: torch.Tensor, goal_state: torch.Tensor) -> bool:
-        """
-        Check if goal is reached
-        
-        Args:
-            current_pose: [3] current pose (x, y, theta)
-            goal_state: [3] goal state (x, y, theta)
-            
-        Returns:
-            reached: True if goal is reached
-        """
         if goal_state is None:
             return False
-        
-        # Distance check
-        distance = torch.sqrt(torch.sum((current_pose[:2] - goal_state[:2]) ** 2))
-        
-        # Angle check
-        angle_diff = abs(self.normalize_angle(current_pose[2] - goal_state[2]))
-        
-        return (distance < self.xy_goal_tolerance and 
-                angle_diff < self.yaw_goal_tolerance)
-    
-    def compute_progress_cost(self, trajectories: torch.Tensor, 
-                             goal_state: torch.Tensor) -> torch.Tensor:
-        """
-        Compute progress-based cost (reward getting closer to goal)
-        
-        Args:
-            trajectories: [K, T+1, 3] trajectory states
-            goal_state: [3] goal state
-            
-        Returns:
-            costs: [K] progress costs (negative for progress)
-        """
-        if goal_state is None:
-            return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
-        
-        # Initial distances
-        initial_distances = torch.sqrt(torch.sum(
-            (trajectories[:, 0, :2] - goal_state[:2]) ** 2, dim=1
-        ))
-        
-        # Final distances  
-        final_distances = torch.sqrt(torch.sum(
-            (trajectories[:, -1, :2] - goal_state[:2]) ** 2, dim=1
-        ))
-        
-        # Progress (negative cost for getting closer)
-        progress = initial_distances - final_distances
-        
-        return -progress  # Negative for reward
-    
+        dist = torch.norm(current_pose[:2] - goal_state[:2])
+        ang = abs(self.normalize_angle(current_pose[2] - goal_state[2]))
+        return (dist < self.xy_goal_tolerance) and (ang < self.yaw_goal_tolerance)
+
     def update_parameters(self, params: dict):
-        """Update goal critic parameters"""
-        if 'xy_goal_tolerance' in params:
-            self.xy_goal_tolerance = params['xy_goal_tolerance']
-        if 'yaw_goal_tolerance' in params:  
-            self.yaw_goal_tolerance = params['yaw_goal_tolerance']
-        if 'distance_scale' in params:
-            self.distance_scale = params['distance_scale']
-        if 'angle_scale' in params:
-            self.angle_scale = params['angle_scale']
-            
-        print(f"[GoalCritic] Parameters updated")
+        # 토러런스/스케일/옵션 갱신
+        self.xy_goal_tolerance = params.get('xy_goal_tolerance', self.xy_goal_tolerance)
+        self.yaw_goal_tolerance = params.get('yaw_goal_tolerance', self.yaw_goal_tolerance)
+        self.distance_scale = params.get('distance_scale', self.distance_scale)
+        self.angle_scale = params.get('angle_scale', self.angle_scale)
+        self.alignment_scale = params.get('alignment_scale', self.alignment_scale)
+        self.progress_scale = params.get('progress_scale', self.progress_scale)
+        self.use_progress_reward = params.get('use_progress_reward', self.use_progress_reward)
+        self.respect_reverse_heading = params.get('respect_reverse_heading', self.respect_reverse_heading)
+        self.yaw_blend_distance = params.get('yaw_blend_distance', self.yaw_blend_distance)
+        self.lookahead_base_distance = params.get('lookahead_base_distance', self.lookahead_base_distance)
+        self.lookahead_velocity_factor = params.get('lookahead_velocity_factor', self.lookahead_velocity_factor)
+        self.lookahead_min_distance = params.get('lookahead_min_distance', self.lookahead_min_distance)
+        self.lookahead_max_distance = params.get('lookahead_max_distance', self.lookahead_max_distance)
+        self.use_multiple_waypoints = params.get('use_multiple_waypoints', self.use_multiple_waypoints)
+        print("[GoalCritic] Parameters updated")

@@ -147,7 +147,7 @@ class VisualizationNode(Node):
         self.robot_state_sub = self.create_subscription(
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
         self.lookahead_sub = self.create_subscription(
-            PointStamped, '/smppi/lookahead_point', self.lookahead_callback, reliable_qos)
+            PointStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
         
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
