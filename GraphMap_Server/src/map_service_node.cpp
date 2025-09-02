@@ -13,6 +13,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <cmath>
 
 using json = nlohmann::json;
 
@@ -31,6 +32,76 @@ public:
     }
 
 private:
+    // Helper function to calculate heading between two UTM points
+    double calculateHeading(double from_easting, double from_northing, 
+                           double to_easting, double to_northing)
+    {
+        double dx = to_easting - from_easting;
+        double dy = to_northing - from_northing;
+        
+        // Calculate heading in radians (atan2 returns -pi to pi)
+        double heading_rad = std::atan2(dy, dx);
+        
+        // Convert to degrees and normalize to 0-360
+        double heading_deg = heading_rad * 180.0 / M_PI;
+        if (heading_deg < 0) {
+            heading_deg += 360.0;
+        }
+        
+        return heading_deg;
+    }
+    
+    // Calculate headings for nodes with heading = 0.0 based on link connectivity
+    void calculateNodeHeadings(std::shared_ptr<gmserver::srv::LoadMap::Response> response)
+    {
+        auto& nodes = response->graph_map.map_data.nodes;
+        const auto& links = response->graph_map.map_data.links;
+        
+        // Build a map of node ID to index for fast lookup
+        std::unordered_map<std::string, size_t> node_id_to_index;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            node_id_to_index[nodes[i].id] = i;
+        }
+        
+        // Build adjacency map to find incoming links (previous nodes)
+        std::unordered_map<std::string, std::string> incoming_node_map;
+        for (const auto& link : links) {
+            incoming_node_map[link.to_node_id] = link.from_node_id;
+        }
+        
+        // Calculate headings for nodes with heading = 0.0
+        for (auto& node : nodes) {
+            if (std::abs(node.heading) < 1e-6) {  // heading is approximately 0.0
+                // Find the previous node via incoming link
+                auto incoming_it = incoming_node_map.find(node.id);
+                if (incoming_it != incoming_node_map.end()) {
+                    const std::string& prev_node_id = incoming_it->second;
+                    auto prev_node_it = node_id_to_index.find(prev_node_id);
+                    
+                    if (prev_node_it != node_id_to_index.end()) {
+                        const auto& prev_node = nodes[prev_node_it->second];
+                        
+                        // Calculate heading from previous node to current node
+                        double calculated_heading = calculateHeading(
+                            prev_node.utm_info.easting, prev_node.utm_info.northing,
+                            node.utm_info.easting, node.utm_info.northing
+                        );
+                        
+                        node.heading = calculated_heading;
+                        
+                        RCLCPP_DEBUG(this->get_logger(), 
+                                   "Calculated heading for node %s: %.2f degrees (from node %s)",
+                                   node.id.c_str(), calculated_heading, prev_node_id.c_str());
+                    }
+                } else {
+                    RCLCPP_DEBUG(this->get_logger(), 
+                               "Node %s has heading=0.0 but no incoming link found", 
+                               node.id.c_str());
+                }
+            }
+        }
+    }
+    
     void handleLoadMapService(
         const std::shared_ptr<gmserver::srv::LoadMap::Request> request,
         std::shared_ptr<gmserver::srv::LoadMap::Response> response)
@@ -95,6 +166,7 @@ private:
                     map_node.remark = node_json.value("Remark", "");
                     map_node.hist_type = node_json.value("HistType", "");
                     map_node.hist_remark = node_json.value("HistRemark", "");
+                    map_node.heading = node_json.value("Heading", 0.0);
                     
                     // GPS Information
                     if (node_json.contains("GpsInfo")) {
@@ -146,6 +218,9 @@ private:
                     response->graph_map.map_data.links.push_back(map_link);
                 }
             }
+            
+            // Calculate headings for nodes with heading = 0.0
+            calculateNodeHeadings(response);
             
             RCLCPP_INFO(this->get_logger(), "Parsed %zu nodes and %zu links from JSON", 
                        response->graph_map.map_data.nodes.size(), response->graph_map.map_data.links.size());
