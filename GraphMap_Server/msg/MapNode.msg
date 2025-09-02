@@ -8,5 +8,6 @@ string version
 string remark
 string hist_type
 string hist_remark
+float64 heading
 GpsInfo gps_info
 UtmInfo utm_info

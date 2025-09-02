@@ -10,6 +10,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import rcl_interfaces.srv
 
 import os
+import math
 from typing import List, Dict, Any, Optional
 
 # Import utilities
@@ -171,6 +172,39 @@ class SequentialPlannerNode(Node):
         if len(self.ordered_nodes) > 0:
             self.get_logger().info(f'Path: {self.ordered_nodes[0]} -> ... -> {self.ordered_nodes[-1]}')
     
+    def calculate_heading(self, from_easting: float, from_northing: float, 
+                         to_easting: float, to_northing: float) -> float:
+        """Calculate heading between two UTM points in degrees (0-360)"""
+        dx = to_easting - from_easting
+        dy = to_northing - from_northing
+        
+        # Calculate heading in radians
+        heading_rad = math.atan2(dy, dx)
+        
+        # Convert to degrees and normalize to 0-360
+        heading_deg = math.degrees(heading_rad)
+        if heading_deg < 0:
+            heading_deg += 360.0
+            
+        return heading_deg
+    
+    def calculate_node_headings(self, map_data: MapData) -> None:
+        """Calculate headings for nodes with heading = 0.0 based on sequential order"""
+        for i, node in enumerate(map_data.nodes):
+            if abs(node.heading) < 1e-6:  # heading is approximately 0.0
+                if i > 0:
+                    # Calculate heading from previous node
+                    prev_node = map_data.nodes[i-1]
+                    calculated_heading = self.calculate_heading(
+                        prev_node.utm_info.easting, prev_node.utm_info.northing,
+                        node.utm_info.easting, node.utm_info.northing
+                    )
+                    node.heading = calculated_heading
+                    
+                    self.get_logger().debug(
+                        f'Calculated heading for node {node.id}: {calculated_heading:.2f} degrees'
+                    )
+    
     def create_planned_path_message(self) -> PlannedPath:
         """Create PlannedPath message compatible with behavior_planner"""
         planned_path = PlannedPath()
@@ -203,6 +237,7 @@ class SequentialPlannerNode(Node):
             map_node.remark = node_data.get('Remark', '')
             map_node.hist_type = node_data.get('HistType', '02A')
             map_node.hist_remark = node_data.get('HistRemark', '')
+            map_node.heading = node_data.get('Heading', 0.0)
             
             # GPS info
             map_node.gps_info.lat = node_data['GpsInfo']['Lat']
@@ -236,6 +271,9 @@ class SequentialPlannerNode(Node):
                 map_link.length = link_data.get('Length', 0.1)
                 
                 map_data.links.append(map_link)
+        
+        # Calculate headings for nodes with heading = 0.0
+        self.calculate_node_headings(map_data)
         
         # Loop closure if enabled
         if self.loop_path and len(map_data.nodes) > 1:
