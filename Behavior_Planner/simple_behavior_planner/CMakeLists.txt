@@ -19,6 +19,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python scripts
 install(PROGRAMS
   scripts/simple_behavior_planner_node.py
+  scripts/test_behavior_params.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -26,6 +27,12 @@ install(PROGRAMS
 install(DIRECTORY
   launch/
   DESTINATION share/${PROJECT_NAME}/launch
+)
+
+# Install config files
+install(DIRECTORY
+  config/
+  DESTINATION share/${PROJECT_NAME}/config
 )
 
 if(BUILD_TESTING)

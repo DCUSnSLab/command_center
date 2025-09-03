@@ -15,7 +15,7 @@ def generate_launch_description():
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
-                    'zzzzz.json'
+                    'mando2.json'
                 ])
 
     # Declare launch argument for map file path
