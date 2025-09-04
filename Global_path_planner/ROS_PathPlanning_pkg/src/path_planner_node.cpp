@@ -344,13 +344,16 @@ private:
                 viz_marker.id = i;
                 viz_marker.type = visualization_msgs::msg::Marker::ARROW;
                 viz_marker.scale.x = 1.5;
-                viz_marker.scale.x = 0.5 + (1.0 * node_types_[i]);
+                // viz_marker.scale.x = 0.5 + (1.0 * node_types_[i]);
                 viz_marker.scale.y = 0.5;
                 viz_marker.scale.z = 0.5;
-                viz_marker.color.a = 0.25;
-                viz_marker.color.r = 1.0;
-                viz_marker.color.g = 0.0;
-                viz_marker.color.b = 0.0;
+                viz_marker.color.a = 0.35;
+
+                auto color = getRGBColor(node_types_[i]);
+
+                viz_marker.color.r = std::get<0>(color);
+                viz_marker.color.g = std::get<1>(color);
+                viz_marker.color.b = std::get<2>(color);
                 viz_marker.pose.position.x = pose.position.x;
                 viz_marker.pose.position.y = pose.position.y;
                 viz_marker.pose.position.z = 0;
@@ -422,6 +425,27 @@ private:
         RCLCPP_INFO(this->get_logger(), "Published visualization data");
     }
     
+    std::tuple<int, int, int> getRGBColor(int index) {
+        if (index < 1 || index > 11) {
+            throw std::invalid_argument("Index must be between 1 and 11");
+        }
+        
+        switch (index) {
+            case 1:  return std::make_tuple(255, 0, 0);     // Red
+            case 2:  return std::make_tuple(0, 255, 0);     // Green  
+            case 3:  return std::make_tuple(0, 0, 255);     // Blue
+            case 4:  return std::make_tuple(255, 255, 0);   // Yellow
+            case 5:  return std::make_tuple(255, 0, 255);   // Magenta
+            case 6:  return std::make_tuple(0, 255, 255);   // Cyan
+            case 7:  return std::make_tuple(255, 165, 0);   // Orange
+            case 8:  return std::make_tuple(128, 0, 128);   // Purple
+            case 9:  return std::make_tuple(255, 192, 203); // Pink
+            case 10: return std::make_tuple(165, 42, 42);   // Brown
+            case 11: return std::make_tuple(128, 128, 128); // Gray
+            default: return std::make_tuple(0, 0, 0);       // Black (fallback)
+        }
+    }
+
     void createMarkertext(visualization_msgs::msg::MarkerArray graph, visualization_msgs::msg::Marker origin, int sequence)
     {
         visualization_msgs::msg::Marker text_marker;
@@ -1105,8 +1129,8 @@ private:
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
                 map_node.heading = graph_map_.map_data.nodes[node_idx].heading;
                 
-                // If heading is 0.0, calculate from previous node in path
-                if (std::abs(map_node.heading) < 1e-6 && i > 0) {
+                // If heading is -1.0, calculate from previous node in path
+                if (std::abs(map_node.heading + 1.0) < 1e-6 && i > 0) {
                     double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
                     double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
                     double heading_rad = std::atan2(dy, dx);
