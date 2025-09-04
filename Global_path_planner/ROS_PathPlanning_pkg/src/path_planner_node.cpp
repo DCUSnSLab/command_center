@@ -212,6 +212,7 @@ private:
         // Convert nodes to PoseArray
         map_nodes_.poses.clear();
         node_ids_.clear();
+        node_types_.clear();
         
         for (const auto& node : graph_map_.map_data.nodes) {
             geometry_msgs::msg::Pose pose;
@@ -237,6 +238,7 @@ private:
             
             map_nodes_.poses.push_back(pose);
             node_ids_.push_back(node.id);
+            node_types_.push_back(node.node_type);
         }
         
         map_nodes_.header.frame_id = "map";
@@ -342,6 +344,7 @@ private:
                 viz_marker.id = i;
                 viz_marker.type = visualization_msgs::msg::Marker::ARROW;
                 viz_marker.scale.x = 1.5;
+                viz_marker.scale.x = 0.5 + (1.0 * node_types_[i]);
                 viz_marker.scale.y = 0.5;
                 viz_marker.scale.z = 0.5;
                 viz_marker.color.a = 0.25;
@@ -419,6 +422,27 @@ private:
         RCLCPP_INFO(this->get_logger(), "Published visualization data");
     }
     
+    void createMarkertext(visualization_msgs::msg::MarkerArray graph, visualization_msgs::msg::Marker origin, int sequence)
+    {
+        visualization_msgs::msg::Marker text_marker;
+
+        text_marker.header.frame_id = origin.header.frame_id;
+        text_marker.header.stamp = origin.header.stamp;
+        text_marker.ns = origin.ns;
+        text_marker.id = origin.id;
+        text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        
+        text_marker.scale.z = 1.0;
+
+        text_marker.pose.position.x = origin.pose.position.x;
+        text_marker.pose.position.y = origin.pose.position.y;
+
+        // text_marker.text = node_types_[sequence];
+        text_marker.text = "test";
+
+        graph.markers.push_back(text_marker);
+    }
+
     void gpsCallback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
     {
         if (msg->status.status < 0) {
@@ -1307,6 +1331,7 @@ private:
     geometry_msgs::msg::PoseArray map_nodes_;
     geometry_msgs::msg::PoseArray map_links_;
     std::vector<std::string> node_ids_;
+    std::vector<short> node_types_;
     
     // Node ID to index mapping for efficient lookup
     std::unordered_map<std::string, int> node_id_to_index_;
