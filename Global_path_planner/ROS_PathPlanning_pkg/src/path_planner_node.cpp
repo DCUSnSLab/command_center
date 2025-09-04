@@ -212,6 +212,7 @@ private:
         // Convert nodes to PoseArray
         map_nodes_.poses.clear();
         node_ids_.clear();
+        node_types_.clear();
         
         for (const auto& node : graph_map_.map_data.nodes) {
             geometry_msgs::msg::Pose pose;
@@ -228,10 +229,16 @@ private:
                 pose.position.z = node.gps_info.alt;
             }
             
-            pose.orientation.w = 1.0; // No rotation for nodes
+            // Convert heading from degrees to quaternion
+            double heading_rad = node.heading * M_PI / 180.0;
+            pose.orientation.x = 0.0;
+            pose.orientation.y = 0.0;
+            pose.orientation.z = sin(heading_rad / 2.0);
+            pose.orientation.w = cos(heading_rad / 2.0);
             
             map_nodes_.poses.push_back(pose);
             node_ids_.push_back(node.id);
+            node_types_.push_back(node.node_type);
         }
         
         map_nodes_.header.frame_id = "map";
@@ -335,17 +342,27 @@ private:
                 viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
-                viz_marker.scale.x = 1.0;
-                viz_marker.scale.y = 1.0;
-                viz_marker.scale.z = 1.0;
-                viz_marker.color.a = 0.25;
-                viz_marker.color.r = 1.0;
-                viz_marker.color.g = 0.0;
-                viz_marker.color.b = 0.0;
+                viz_marker.type = visualization_msgs::msg::Marker::ARROW;
+                viz_marker.scale.x = 1.5;
+                // viz_marker.scale.x = 0.5 + (1.0 * node_types_[i]);
+                viz_marker.scale.y = 0.5;
+                viz_marker.scale.z = 0.5;
+                viz_marker.color.a = 0.35;
+
+                auto color = getRGBColor(node_types_[i]);
+
+                viz_marker.color.r = std::get<0>(color);
+                viz_marker.color.g = std::get<1>(color);
+                viz_marker.color.b = std::get<2>(color);
                 viz_marker.pose.position.x = pose.position.x;
                 viz_marker.pose.position.y = pose.position.y;
                 viz_marker.pose.position.z = 0;
+
+                viz_marker.pose.orientation.x = pose.orientation.x;
+                viz_marker.pose.orientation.y = pose.orientation.y;
+                viz_marker.pose.orientation.z = pose.orientation.z;
+                viz_marker.pose.orientation.w = pose.orientation.w;
+
                 viz_graph.markers.push_back(viz_marker);
 
                 i++;
@@ -359,42 +376,46 @@ private:
         }
         
         // Adjust map links for RViz visualization
-        if (!map_links_.poses.empty()) {
-            RCLCPP_INFO(this->get_logger(), "links viz init");
-            geometry_msgs::msg::PoseArray viz_links = map_links_;
-            for (auto& pose : viz_links.poses) {
-                //pose.position.x -= gps_ref_utm_easting_;
-                //pose.position.y -= gps_ref_utm_northing_;
-                pose.position.x -= map_utm_easting_;
-                pose.position.y -= map_utm_northing_;
+        // 링크 시각화는 불필요해 보이므로 우선 비활성화 하겠음
+        // if (!map_links_.poses.empty()) {
+        //     RCLCPP_INFO(this->get_logger(), "links viz init");
+        //     geometry_msgs::msg::PoseArray viz_links = map_links_;
+        //     for (auto& pose : viz_links.poses) {
+        //         //pose.position.x -= gps_ref_utm_easting_;
+        //         //pose.position.y -= gps_ref_utm_northing_;
+        //         pose.position.x -= map_utm_easting_;
+        //         pose.position.y -= map_utm_northing_;
 
-                viz_marker.header.frame_id = "map";
-                viz_marker.header.stamp = this->get_clock()->now();
-                viz_marker.ns = "graph";
-                viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
-                viz_marker.scale.x = 3.0;
-                viz_marker.scale.y = 3.0;
-                viz_marker.scale.z = 3.0;
-                viz_marker.color.a = 1.0;
-                viz_marker.color.r = 1.0;
-                viz_marker.color.g = 0.0;
-                viz_marker.color.b = 0.0;
-                viz_marker.pose.position.x = pose.position.x;
-                viz_marker.pose.position.y = pose.position.y;
-                viz_marker.pose.position.z = 0;
-                viz_graph.markers.push_back(viz_marker);
+        //         viz_marker.header.frame_id = "map";
+        //         viz_marker.header.stamp = this->get_clock()->now();
+        //         viz_marker.ns = "graph";
+        //         viz_marker.id = i;
+        //         viz_marker.type = visualization_msgs::msg::Marker::CUBE;
+        //         viz_marker.scale.x = 3.0;
+        //         viz_marker.scale.y = 3.0;
+        //         viz_marker.scale.z = 3.0;
+        //         viz_marker.color.a = 1.0;
+        //         viz_marker.color.r = 1.0;
+        //         viz_marker.color.g = 0.0;
+        //         viz_marker.color.b = 0.0;
+        //         viz_marker.pose.position.x = pose.position.x;
+        //         viz_marker.pose.position.y = pose.position.y;
+        //         viz_marker.pose.position.z = 0;
 
-                i++;
-            }
-            viz_links.header.stamp = this->get_clock()->now();
+        //         viz_marker.pose.orientation.x = pose.orientation.x;
+        //         viz_marker.pose.orientation.y = pose.orientation.y;
+        //         viz_marker.pose.orientation.z = pose.orientation.z;
+        //         viz_marker.pose.orientation.w = pose.orientation.w;
 
-            //geometry_msgs::msg::PoseArray transformed_viz_links;
-            //transformPoseArray(viz_links, transformed_viz_links, transform);
+        //         viz_graph.markers.push_back(viz_marker);
 
-            links_publisher_->publish(viz_links);
+        //         i++;
+        //     }
+        //     viz_links.header.stamp = this->get_clock()->now();
+
+        //     links_publisher_->publish(viz_links);
             
-        }
+        // }
 
         //visualization_msgs::msg::MarkerArray transformed_viz_graph;
         //transformMarkerArray(viz_graph, transformed_viz_graph, transform);
@@ -404,6 +425,48 @@ private:
         RCLCPP_INFO(this->get_logger(), "Published visualization data");
     }
     
+    std::tuple<int, int, int> getRGBColor(int index) {
+        if (index < 1 || index > 11) {
+            throw std::invalid_argument("Index must be between 1 and 11");
+        }
+        
+        switch (index) {
+            case 1:  return std::make_tuple(255, 0, 0);     // Red
+            case 2:  return std::make_tuple(0, 255, 0);     // Green  
+            case 3:  return std::make_tuple(0, 0, 255);     // Blue
+            case 4:  return std::make_tuple(255, 255, 0);   // Yellow
+            case 5:  return std::make_tuple(255, 0, 255);   // Magenta
+            case 6:  return std::make_tuple(0, 255, 255);   // Cyan
+            case 7:  return std::make_tuple(255, 165, 0);   // Orange
+            case 8:  return std::make_tuple(128, 0, 128);   // Purple
+            case 9:  return std::make_tuple(255, 192, 203); // Pink
+            case 10: return std::make_tuple(165, 42, 42);   // Brown
+            case 11: return std::make_tuple(128, 128, 128); // Gray
+            default: return std::make_tuple(0, 0, 0);       // Black (fallback)
+        }
+    }
+
+    void createMarkertext(visualization_msgs::msg::MarkerArray graph, visualization_msgs::msg::Marker origin, int sequence)
+    {
+        visualization_msgs::msg::Marker text_marker;
+
+        text_marker.header.frame_id = origin.header.frame_id;
+        text_marker.header.stamp = origin.header.stamp;
+        text_marker.ns = origin.ns;
+        text_marker.id = origin.id;
+        text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        
+        text_marker.scale.z = 1.0;
+
+        text_marker.pose.position.x = origin.pose.position.x;
+        text_marker.pose.position.y = origin.pose.position.y;
+
+        // text_marker.text = node_types_[sequence];
+        text_marker.text = "test";
+
+        graph.markers.push_back(text_marker);
+    }
+
     void gpsCallback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
     {
         if (msg->status.status < 0) {
@@ -1065,9 +1128,8 @@ private:
                 map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
                 map_node.heading = graph_map_.map_data.nodes[node_idx].heading;
-                
-                // If heading is 0.0, calculate from previous node in path
-                if (std::abs(map_node.heading) < 1e-6 && i > 0) {
+                // If heading is -1.0, calculate from previous node in path
+                if (std::abs(map_node.heading + 1.0) < 1e-6 && i > 0) {
                     double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
                     double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
                     double heading_rad = std::atan2(dy, dx);
@@ -1292,6 +1354,7 @@ private:
     geometry_msgs::msg::PoseArray map_nodes_;
     geometry_msgs::msg::PoseArray map_links_;
     std::vector<std::string> node_ids_;
+    std::vector<short> node_types_;
     
     // Node ID to index mapping for efficient lookup
     std::unordered_map<std::string, int> node_id_to_index_;
