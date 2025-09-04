@@ -228,7 +228,12 @@ private:
                 pose.position.z = node.gps_info.alt;
             }
             
-            pose.orientation.w = 1.0; // No rotation for nodes
+            // Convert heading from degrees to quaternion
+            double heading_rad = node.heading * M_PI / 180.0;
+            pose.orientation.x = 0.0;
+            pose.orientation.y = 0.0;
+            pose.orientation.z = sin(heading_rad / 2.0);
+            pose.orientation.w = cos(heading_rad / 2.0);
             
             map_nodes_.poses.push_back(pose);
             node_ids_.push_back(node.id);
@@ -335,10 +340,10 @@ private:
                 viz_marker.header.stamp = this->get_clock()->now();
                 viz_marker.ns = "graph";
                 viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
-                viz_marker.scale.x = 1.0;
-                viz_marker.scale.y = 1.0;
-                viz_marker.scale.z = 1.0;
+                viz_marker.type = visualization_msgs::msg::Marker::ARROW;
+                viz_marker.scale.x = 1.5;
+                viz_marker.scale.y = 0.5;
+                viz_marker.scale.z = 0.5;
                 viz_marker.color.a = 0.25;
                 viz_marker.color.r = 1.0;
                 viz_marker.color.g = 0.0;
@@ -346,6 +351,12 @@ private:
                 viz_marker.pose.position.x = pose.position.x;
                 viz_marker.pose.position.y = pose.position.y;
                 viz_marker.pose.position.z = 0;
+
+                viz_marker.pose.orientation.x = pose.orientation.x;
+                viz_marker.pose.orientation.y = pose.orientation.y;
+                viz_marker.pose.orientation.z = pose.orientation.z;
+                viz_marker.pose.orientation.w = pose.orientation.w;
+
                 viz_graph.markers.push_back(viz_marker);
 
                 i++;
@@ -359,42 +370,46 @@ private:
         }
         
         // Adjust map links for RViz visualization
-        if (!map_links_.poses.empty()) {
-            RCLCPP_INFO(this->get_logger(), "links viz init");
-            geometry_msgs::msg::PoseArray viz_links = map_links_;
-            for (auto& pose : viz_links.poses) {
-                //pose.position.x -= gps_ref_utm_easting_;
-                //pose.position.y -= gps_ref_utm_northing_;
-                pose.position.x -= map_utm_easting_;
-                pose.position.y -= map_utm_northing_;
+        // 링크 시각화는 불필요해 보이므로 우선 비활성화 하겠음
+        // if (!map_links_.poses.empty()) {
+        //     RCLCPP_INFO(this->get_logger(), "links viz init");
+        //     geometry_msgs::msg::PoseArray viz_links = map_links_;
+        //     for (auto& pose : viz_links.poses) {
+        //         //pose.position.x -= gps_ref_utm_easting_;
+        //         //pose.position.y -= gps_ref_utm_northing_;
+        //         pose.position.x -= map_utm_easting_;
+        //         pose.position.y -= map_utm_northing_;
 
-                viz_marker.header.frame_id = "map";
-                viz_marker.header.stamp = this->get_clock()->now();
-                viz_marker.ns = "graph";
-                viz_marker.id = i;
-                viz_marker.type = visualization_msgs::msg::Marker::CUBE;
-                viz_marker.scale.x = 3.0;
-                viz_marker.scale.y = 3.0;
-                viz_marker.scale.z = 3.0;
-                viz_marker.color.a = 1.0;
-                viz_marker.color.r = 1.0;
-                viz_marker.color.g = 0.0;
-                viz_marker.color.b = 0.0;
-                viz_marker.pose.position.x = pose.position.x;
-                viz_marker.pose.position.y = pose.position.y;
-                viz_marker.pose.position.z = 0;
-                viz_graph.markers.push_back(viz_marker);
+        //         viz_marker.header.frame_id = "map";
+        //         viz_marker.header.stamp = this->get_clock()->now();
+        //         viz_marker.ns = "graph";
+        //         viz_marker.id = i;
+        //         viz_marker.type = visualization_msgs::msg::Marker::CUBE;
+        //         viz_marker.scale.x = 3.0;
+        //         viz_marker.scale.y = 3.0;
+        //         viz_marker.scale.z = 3.0;
+        //         viz_marker.color.a = 1.0;
+        //         viz_marker.color.r = 1.0;
+        //         viz_marker.color.g = 0.0;
+        //         viz_marker.color.b = 0.0;
+        //         viz_marker.pose.position.x = pose.position.x;
+        //         viz_marker.pose.position.y = pose.position.y;
+        //         viz_marker.pose.position.z = 0;
 
-                i++;
-            }
-            viz_links.header.stamp = this->get_clock()->now();
+        //         viz_marker.pose.orientation.x = pose.orientation.x;
+        //         viz_marker.pose.orientation.y = pose.orientation.y;
+        //         viz_marker.pose.orientation.z = pose.orientation.z;
+        //         viz_marker.pose.orientation.w = pose.orientation.w;
 
-            //geometry_msgs::msg::PoseArray transformed_viz_links;
-            //transformPoseArray(viz_links, transformed_viz_links, transform);
+        //         viz_graph.markers.push_back(viz_marker);
 
-            links_publisher_->publish(viz_links);
+        //         i++;
+        //     }
+        //     viz_links.header.stamp = this->get_clock()->now();
+
+        //     links_publisher_->publish(viz_links);
             
-        }
+        // }
 
         //visualization_msgs::msg::MarkerArray transformed_viz_graph;
         //transformMarkerArray(viz_graph, transformed_viz_graph, transform);
