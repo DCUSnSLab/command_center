@@ -1064,6 +1064,19 @@ private:
                 // 실제 맵 노드의 경우 GPS 정보는 원본 유지, UTM은 odom frame으로 변환
                 map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
                 map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
+                map_node.heading = graph_map_.map_data.nodes[node_idx].heading;
+                
+                // If heading is 0.0, calculate from previous node in path
+                if (std::abs(map_node.heading) < 1e-6 && i > 0) {
+                    double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
+                    double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
+                    double heading_rad = std::atan2(dy, dx);
+                    double heading_deg = heading_rad * 180.0 / M_PI;
+                    if (heading_deg < 0) {
+                        heading_deg += 360.0;
+                    }
+                    map_node.heading = heading_deg;
+                }
                 // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
                 //map_node.utm_info.easting -= gps_ref_utm_easting_;
                 //map_node.utm_info.northing -= gps_ref_utm_northing_;
@@ -1075,6 +1088,20 @@ private:
                 map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
                 map_node.gps_info.longitude = 0.0;
                 map_node.gps_info.alt = path_nodes[i]->pose.position.z;
+                
+                // Calculate heading from previous node if available
+                if (i > 0) {
+                    double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
+                    double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
+                    double heading_rad = std::atan2(dy, dx);
+                    double heading_deg = heading_rad * 180.0 / M_PI;
+                    if (heading_deg < 0) {
+                        heading_deg += 360.0;
+                    }
+                    map_node.heading = heading_deg;
+                } else {
+                    map_node.heading = 0.0;
+                }
                 // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
                 //map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
                 //map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
