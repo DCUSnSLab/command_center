@@ -295,9 +295,11 @@ class MPPIMainNode(Node):
             MPPIParams, '/mppi_update_params', self.params_update_callback, reliable_qos)
         
         # Visualization publishers - publish lookahead point for visualization node
-        from geometry_msgs.msg import PointStamped
+        from geometry_msgs.msg import PoseStamped, PointStamped
         self.lookahead_pub = self.create_publisher(
-            PointStamped, '/smppi_visualization/lookahead_point', reliable_qos)
+            PoseStamped, '/smppi_visualization/lookahead_point', reliable_qos)
+        self.target_direction_pub = self.create_publisher(
+            PointStamped, '/smppi_visualization/target_direction', reliable_qos)
         
         self.get_logger().info(f"Topics configured: obstacles={self.obstacles_topic}, state={self.robot_state_topic}")
     
@@ -535,19 +537,50 @@ class MPPIMainNode(Node):
             
             if goal_critic is not None:
                 lookahead_point = goal_critic.get_lookahead_point()
+                lookahead_yaw = goal_critic.get_lookahead_yaw()
+                target_direction = goal_critic.get_target_direction()
                 
                 if lookahead_point is not None:
+                    from geometry_msgs.msg import PoseStamped
+                    import math
+                    
+                    pose_msg = PoseStamped()
+                    pose_msg.header.stamp = self.get_clock().now().to_msg()
+                    pose_msg.header.frame_id = "odom"
+                    
+                    pose_msg.pose.position.x = float(lookahead_point[0])
+                    pose_msg.pose.position.y = float(lookahead_point[1])
+                    pose_msg.pose.position.z = 0.0
+                    
+                    # Add yaw orientation
+                    if lookahead_yaw is not None:
+                        yaw = float(lookahead_yaw)
+                        pose_msg.pose.orientation.w = math.cos(yaw / 2.0)
+                        pose_msg.pose.orientation.z = math.sin(yaw / 2.0)
+                    else:
+                        pose_msg.pose.orientation.w = 1.0
+                    
+                    self.lookahead_pub.publish(pose_msg)
+                
+                # Publish target direction as a point from robot position
+                if target_direction is not None and hasattr(self, 'robot_state') and self.robot_state is not None:
                     from geometry_msgs.msg import PointStamped
                     
-                    point_msg = PointStamped()
-                    point_msg.header.stamp = self.get_clock().now().to_msg()
-                    point_msg.header.frame_id = "odom"
+                    direction_msg = PointStamped()
+                    direction_msg.header.stamp = self.get_clock().now().to_msg()
+                    direction_msg.header.frame_id = "odom"
                     
-                    point_msg.point.x = float(lookahead_point[0])
-                    point_msg.point.y = float(lookahead_point[1])
-                    point_msg.point.z = 0.0
+                    # Robot current position from MPPIState
+                    robot_x = float(self.robot_state.state_vector[0])
+                    robot_y = float(self.robot_state.state_vector[1])
                     
-                    self.lookahead_pub.publish(point_msg)
+                    # Target direction scaled for visualization (2m length)
+                    direction_scale = 2.0
+                    direction_msg.point.x = robot_x + float(target_direction[0]) * direction_scale
+                    direction_msg.point.y = robot_y + float(target_direction[1]) * direction_scale
+                    direction_msg.point.z = 0.0
+                    
+                    self.target_direction_pub.publish(direction_msg)
                     
         except Exception as e:
             self.get_logger().warn(f"Lookahead point publishing error: {str(e)}")

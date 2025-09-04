@@ -84,17 +84,22 @@ class GoalCritic(BaseCritic):
 
         # --- Lookahead point (multi-waypoints aware)
         lookahead_point = self._compute_multiple_waypoints_lookahead(current_pos, v_abs, goal_pos)
-        # store for viz without holding the graph
-        self.last_lookahead_point = lookahead_point.detach().cpu()
-
+        
         # --- Target direction / yaw (with reverse-aware option)
         lookahead_vec = lookahead_point - current_pos
         lookahead_dist = torch.norm(lookahead_vec) + 1e-9
         target_direction = lookahead_vec / lookahead_dist
         target_yaw = torch.atan2(target_direction[1], target_direction[0])
+        
+        # store lookahead point, yaw and target direction for viz without holding the graph
+        self.last_lookahead_point = lookahead_point.detach().cpu()
+        self.last_lookahead_yaw = target_yaw.detach().cpu()
+        self.last_target_direction = target_direction.detach().cpu()
 
-        if self.respect_reverse_heading and (v_scalar < 0):
-            target_yaw = self.normalize_angle(target_yaw + math.pi)
+        # waypoint Pose 관련 lookahead 디버깅 블록
+
+        # if self.respect_reverse_heading and (v_scalar < 0):
+        #     target_yaw = self.normalize_angle(target_yaw + math.pi)
 
         # Near-goal: blend target yaw towards desired final yaw to avoid flipping
         goal_vec = goal_pos - current_pos
@@ -171,6 +176,12 @@ class GoalCritic(BaseCritic):
 
     def get_lookahead_point(self) -> Optional[torch.Tensor]:
         return getattr(self, 'last_lookahead_point', None)
+    
+    def get_lookahead_yaw(self) -> Optional[torch.Tensor]:
+        return getattr(self, 'last_lookahead_yaw', None)
+    
+    def get_target_direction(self) -> Optional[torch.Tensor]:
+        return getattr(self, 'last_target_direction', None)
 
     def set_multiple_waypoints(self, waypoints_msg):
         self.multiple_waypoints = waypoints_msg
