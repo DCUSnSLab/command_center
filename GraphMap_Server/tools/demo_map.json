@@ -1,0 +1,200 @@
+{
+    "Node": [
+        {
+            "ID": "N0000",
+            "AdminCode": "110",
+            "NodeType": 1,
+            "ITSNodeID": "ITS_N0000",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo waypoint 0 - Forward",
+            "HistType": "02A",
+            "HistRemark": "순차 경로 노드",
+            "GpsInfo": {
+                "Lat": 37.23965631,
+                "Long": 126.7736361,
+                "Alt": 0.0
+            },
+            "UtmInfo": {
+                "Easting": 302516.9182,
+                "Northing": 4123781.294,
+                "Zone": "52N"
+            }
+        },
+        {
+            "ID": "N0001",
+            "AdminCode": "110",
+            "NodeType": 5,
+            "ITSNodeID": "ITS_N0001",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo waypoint 1 - Fast Forward",
+            "HistType": "02A",
+            "HistRemark": "순차 경로 노드",
+            "GpsInfo": {
+                "Lat": 37.23970000,
+                "Long": 126.7737000,
+                "Alt": 0.0
+            },
+            "UtmInfo": {
+                "Easting": 302520.0,
+                "Northing": 4123790.0,
+                "Zone": "52N"
+            }
+        },
+        {
+            "ID": "N0002",
+            "AdminCode": "110",
+            "NodeType": 7,
+            "ITSNodeID": "ITS_N0002",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo waypoint 2 - Pause 1s",
+            "HistType": "02A",
+            "HistRemark": "순차 경로 노드",
+            "GpsInfo": {
+                "Lat": 37.23975000,
+                "Long": 126.7738000,
+                "Alt": 0.0
+            },
+            "UtmInfo": {
+                "Easting": 302525.0,
+                "Northing": 4123800.0,
+                "Zone": "52N"
+            }
+        },
+        {
+            "ID": "N0003",
+            "AdminCode": "110",
+            "NodeType": 2,
+            "ITSNodeID": "ITS_N0003",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo waypoint 3 - Reverse",
+            "HistType": "02A",
+            "HistRemark": "순차 경로 노드",
+            "GpsInfo": {
+                "Lat": 37.23980000,
+                "Long": 126.7739000,
+                "Alt": 0.0
+            },
+            "UtmInfo": {
+                "Easting": 302530.0,
+                "Northing": 4123810.0,
+                "Zone": "52N"
+            }
+        },
+        {
+            "ID": "N0004",
+            "AdminCode": "110",
+            "NodeType": 9,
+            "ITSNodeID": "ITS_N0004",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo waypoint 4 - End Point",
+            "HistType": "02A",
+            "HistRemark": "순차 경로 노드",
+            "GpsInfo": {
+                "Lat": 37.23985000,
+                "Long": 126.7740000,
+                "Alt": 0.0
+            },
+            "UtmInfo": {
+                "Easting": 302535.0,
+                "Northing": 4123820.0,
+                "Zone": "52N"
+            }
+        }
+    ],
+    "Link": [
+        {
+            "ID": "L00000000",
+            "AdminCode": "110",
+            "RoadRank": 1,
+            "RoadType": 1,
+            "RoadNo": "20",
+            "LinkType": 3,
+            "LaneNo": 2,
+            "R_LinkID": "R_0000",
+            "L_LinkID": "L_0000",
+            "FromNodeID": "N0000",
+            "ToNodeID": "N0001",
+            "SectionID": "SEQ_SECTION_00",
+            "Length": 12.8,
+            "ITSLinkID": "ITS_L00000000",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo link N0000-N0001",
+            "HistType": "02A"
+        },
+        {
+            "ID": "L00000001",
+            "AdminCode": "110",
+            "RoadRank": 1,
+            "RoadType": 1,
+            "RoadNo": "20",
+            "LinkType": 3,
+            "LaneNo": 2,
+            "R_LinkID": "R_0001",
+            "L_LinkID": "L_0001",
+            "FromNodeID": "N0001",
+            "ToNodeID": "N0002",
+            "SectionID": "SEQ_SECTION_01",
+            "Length": 12.8,
+            "ITSLinkID": "ITS_L00000001",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo link N0001-N0002",
+            "HistType": "02A"
+        },
+        {
+            "ID": "L00000002",
+            "AdminCode": "110",
+            "RoadRank": 1,
+            "RoadType": 1,
+            "RoadNo": "20",
+            "LinkType": 3,
+            "LaneNo": 2,
+            "R_LinkID": "R_0002",
+            "L_LinkID": "L_0002",
+            "FromNodeID": "N0002",
+            "ToNodeID": "N0003",
+            "SectionID": "SEQ_SECTION_02",
+            "Length": 12.8,
+            "ITSLinkID": "ITS_L00000002",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo link N0002-N0003",
+            "HistType": "02A"
+        },
+        {
+            "ID": "L00000003",
+            "AdminCode": "110",
+            "RoadRank": 1,
+            "RoadType": 1,
+            "RoadNo": "20",
+            "LinkType": 3,
+            "LaneNo": 2,
+            "R_LinkID": "R_0003",
+            "L_LinkID": "L_0003",
+            "FromNodeID": "N0003",
+            "ToNodeID": "N0004",
+            "SectionID": "SEQ_SECTION_03",
+            "Length": 12.8,
+            "ITSLinkID": "ITS_L00000003",
+            "Maker": "한국도로공사",
+            "UpdateDate": "20250418",
+            "Version": "2021",
+            "Remark": "Demo link N0003-N0004",
+            "HistType": "02A"
+        }
+    ]
+}

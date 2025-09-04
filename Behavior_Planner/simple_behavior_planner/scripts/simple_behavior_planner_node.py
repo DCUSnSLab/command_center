@@ -31,7 +31,12 @@ from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs.tf2_geometry_msgs as tf2_geometry_msgs
 
 # Custom messages
-from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints
+from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints, MPPIParams
+
+# Behavior parameter management
+import os
+import yaml
+from simple_behavior_planner.behavior_parameter_manager import BehaviorParameterManager
 
 
 class SimpleBehaviorPlannerNode(Node):
@@ -51,6 +56,8 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('lookahead_distance', 10.0)  # meters
         self.declare_parameter('goal_tolerance', 2.0)  # meters
         self.declare_parameter('waypoint_mode', 'multiple')  # 'single' or 'multiple'
+        self.declare_parameter('behavior_config_path', 'behavior_modifiers.yaml')  # behavior config file
+        self.declare_parameter('enable_behavior_control', True)  # enable behavior-based parameter control
         
         # Get parameters
         self.current_position_topic = self.get_parameter('current_position_topic').get_parameter_value().string_value
@@ -63,6 +70,8 @@ class SimpleBehaviorPlannerNode(Node):
         self.lookahead_distance = self.get_parameter('lookahead_distance').get_parameter_value().double_value
         self.goal_tolerance = self.get_parameter('goal_tolerance').get_parameter_value().double_value
         self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
+        self.behavior_config_path = self.get_parameter('behavior_config_path').get_parameter_value().string_value
+        self.enable_behavior_control = self.get_parameter('enable_behavior_control').get_parameter_value().bool_value
         
         if self.waypoint_mode not in ['single', 'multiple']:
             self.get_logger().warn(f"Invalid waypoint_mode '{self.waypoint_mode}', defaulting to 'multiple'")
@@ -77,6 +86,18 @@ class SimpleBehaviorPlannerNode(Node):
         self.emergency_stop_requested = False
         self.subgoal_published = False  # 현재 서브골이 발행되었는지 추적
         self.last_completed_goal_id = None  # 마지막으로 완료된 goal_id 추적
+        
+        # Behavior control state
+        self.current_node_type = 1  # 현재 행동 타입 (기본: 전진)
+        self.previous_node_type = 1  # 이전 행동 타입
+        self.is_paused = False  # 일시 정지 상태
+        self.pause_timer = None  # 일시 정지 타이머
+        self.pause_start_time = None
+        
+        # Initialize behavior parameter manager
+        self.behavior_param_manager = None
+        if self.enable_behavior_control:
+            self._init_behavior_parameter_manager()
         
         # TF2 for coordinate transformation
         self.tf_buffer = Buffer()
@@ -131,6 +152,14 @@ class SimpleBehaviorPlannerNode(Node):
             reliable_qos
         )
         
+        # MPPI parameter publisher for behavior control
+        if self.enable_behavior_control:
+            self.mppi_param_pub = self.create_publisher(
+                MPPIParams,
+                '/mppi_update_params',
+                reliable_qos
+            )
+        
         if self.waypoint_mode == 'single':
             self.subgoal_pub = self.create_publisher(
                 PoseStamped, 
@@ -165,6 +194,53 @@ class SimpleBehaviorPlannerNode(Node):
         self.get_logger().info('Simple Behavior Planner Node initialized')
         self.get_logger().info(f'Subscribed to: {self.planned_path_topic}')
         self.get_logger().info(f'Publishing subgoals to: {self.subgoal_topic}')
+        if self.enable_behavior_control:
+            self.get_logger().info('Behavior-based parameter control enabled')
+        else:
+            self.get_logger().info('Behavior-based parameter control disabled')
+    
+    def _init_behavior_parameter_manager(self):
+        """Initialize behavior parameter manager"""
+        try:
+            # Get the package path using ament_index
+            from ament_index_python.packages import get_package_share_directory
+            try:
+                package_share_path = get_package_share_directory('simple_behavior_planner')
+                config_full_path = os.path.join(package_share_path, 'config', self.behavior_config_path)
+            except Exception as e:
+                # Fallback to relative path
+                self.get_logger().warn(f"Could not find package share directory, using fallback path: {e}")
+                package_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_full_path = os.path.join(package_path, 'config', self.behavior_config_path)
+            
+            if not os.path.exists(config_full_path):
+                self.get_logger().error(f"Behavior config file not found: {config_full_path}")
+                self.enable_behavior_control = False
+                return
+            
+            # Load behavior modifiers config
+            with open(config_full_path, 'r') as file:
+                config = yaml.safe_load(file)
+            
+            behavior_config = config.get('/**', {}).get('ros__parameters', {})
+            # Use simple_behavior_planner config directory for smppi_params.yaml
+            smppi_config_path = behavior_config.get('smppi_config_path', 'smppi_params.yaml')
+            
+            # Initialize parameter manager
+            self.behavior_param_manager = BehaviorParameterManager(smppi_config_path, behavior_config)
+            
+            self.get_logger().info(f"Behavior parameter manager initialized with config: {config_full_path}")
+            
+            # Log available behaviors
+            behaviors = self.behavior_param_manager.get_available_behaviors()
+            self.get_logger().info(f"Available behaviors: {len(behaviors)}")
+            for behavior_type, description in behaviors.items():
+                self.get_logger().info(f"  {behavior_type}: {description}")
+                
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize behavior parameter manager: {e}")
+            self.enable_behavior_control = False
+            self.behavior_param_manager = None
     
     def current_pose_callback(self, msg: Odometry):
         """현재 위치 정보 수신 (Odometry에서 PoseStamped로 변환)"""
@@ -181,12 +257,13 @@ class SimpleBehaviorPlannerNode(Node):
         
         # Extract node positions from planned path (in map frame - absolute coordinates)
         for node in msg.path_data.nodes:
-            # Store nodes in map frame coordinates (absolute UTM)
+            # Store nodes in map frame coordinates (absolute UTM) with node_type
             node_pose = {
                 'id': node.id,
                 'x': node.utm_info.easting,  # Absolute UTM coordinates in map frame
                 'y': node.utm_info.northing,
-                'z': node.gps_info.alt
+                'z': node.gps_info.alt,
+                'node_type': node.node_type  # Add node_type for behavior control
             }
             self.path_nodes.append(node_pose)
         
@@ -196,8 +273,19 @@ class SimpleBehaviorPlannerNode(Node):
         self.subgoal_published = False  # 새로운 경로에 대해 서브골 발행 준비
         self.last_completed_goal_id = None  # 새로운 경로 시작 시 완료된 goal_id 리셋
         
+        # Check first node's behavior type and update MPPI parameters if needed
+        if self.enable_behavior_control and self.path_nodes:
+            first_node_type = self.path_nodes[0].get('node_type', 1)
+            if first_node_type != self.current_node_type:
+                self._update_behavior_parameters(first_node_type)
+        
         self.get_logger().info(f'Received new planned path with {len(self.path_nodes)} nodes')
         self.get_logger().info(f'Path ID: {msg.path_id}, Start: {msg.start_node_id}, Goal: {msg.goal_node_id}')
+        
+        if self.enable_behavior_control and self.path_nodes:
+            node_types = [node.get('node_type', 1) for node in self.path_nodes]
+            unique_types = list(set(node_types))
+            self.get_logger().info(f'Path contains behavior types: {unique_types}')
     
     def perception_callback(self, msg: String):
         """인지 결과 수신 (현재는 placeholder)"""
@@ -224,7 +312,7 @@ class SimpleBehaviorPlannerNode(Node):
             return
         
         if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
-            self.get_logger().info(f'Goal {msg.goal_id} reached! Distance: {msg.distance_to_goal:.3f}m. Moving to next target node.')
+            # self.get_logger().info(f'Goal {msg.goal_id} reached! Distance: {msg.distance_to_goal:.3f}m. Moving to next target node.')
             self.last_completed_goal_id = msg.goal_id  # 완료된 goal_id 기록
             self.advance_to_next_node()
             self.subgoal_published = False  # 다음 서브골 발행 준비
@@ -243,6 +331,19 @@ class SimpleBehaviorPlannerNode(Node):
         if self.emergency_stop_requested:
             self.publish_emergency_stop()
             return
+        
+        # Check if we need to handle pause behavior
+        if self.is_paused:
+            return  # Skip normal processing during pause
+        
+        # Check current node behavior and update parameters if needed
+        if self.enable_behavior_control and self.path_nodes and self.current_target_node_index < len(self.path_nodes):
+            current_node = self.path_nodes[self.current_target_node_index]
+            current_node_type = current_node.get('node_type', 1)
+            
+            # Update behavior parameters if node type changed
+            if current_node_type != self.current_node_type:
+                self._update_behavior_parameters(current_node_type)
         
         # Find and publish next subgoal (only if not already published)
         if not self.subgoal_published:
@@ -271,7 +372,8 @@ class SimpleBehaviorPlannerNode(Node):
             target_node = self.path_nodes[self.current_target_node_index]
             
             self.get_logger().debug(f'Target node {self.current_target_node_index}: {target_node["id"]} '
-                                  f'at ({target_node["x"]:.2f}, {target_node["y"]:.2f})')
+                                  f'at ({target_node["x"]:.2f}, {target_node["y"]:.2f}) '
+                                  f'type={target_node.get("node_type", 1)}')
             
             return target_node
         else:
@@ -350,7 +452,7 @@ class SimpleBehaviorPlannerNode(Node):
             self.current_target_node_index += 1
             next_node = self.path_nodes[self.current_target_node_index]
             self.get_logger().info(f'Advanced to next node: {next_node["id"]} '
-                                 f'({self.current_target_node_index + 1}/{len(self.path_nodes)})')
+                                 f'({self.current_target_node_index + 1}/{len(self.path_nodes)}), node_type: {self.current_node_type}')
         else:
             self.get_logger().info('Reached final destination!')
             self.is_path_following = False
@@ -451,6 +553,173 @@ class SimpleBehaviorPlannerNode(Node):
             fallback_pose.pose.position.z = node['z']
             fallback_pose.pose.orientation.w = 1.0
             return fallback_pose
+    
+    def _update_behavior_parameters(self, node_type: int):
+        """Update MPPI parameters based on behavior type"""
+        if not self.enable_behavior_control or self.behavior_param_manager is None:
+            return
+        
+        try:
+            # Handle pause behaviors
+            if self.behavior_param_manager.is_pause_behavior(node_type):
+                pause_duration = self.behavior_param_manager.get_pause_duration(node_type)
+                self._handle_pause_behavior(pause_duration)
+                return
+            
+            # Get behavior-specific parameters
+            behavior_params = self.behavior_param_manager.get_behavior_params(node_type)
+            
+            # Validate parameters
+            if not self.behavior_param_manager.validate_behavior_params(behavior_params):
+                self.get_logger().error(f"Invalid parameters for behavior {node_type}, skipping update")
+                return
+            
+            # Send parameters to MPPI
+            self._send_mppi_parameters(behavior_params)
+            
+            # Update current behavior state
+            self.previous_node_type = self.current_node_type
+            self.current_node_type = node_type
+            
+            behavior_desc = self.behavior_param_manager.get_behavior_description(node_type)
+            self.get_logger().info(f"Updated to behavior {node_type}: {behavior_desc}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to update behavior parameters: {e}")
+    
+    def _send_mppi_parameters(self, behavior_params: dict):
+        """Send behavior parameters to MPPI controller"""
+        try:
+            msg = MPPIParams()
+            msg.header = Header()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = f"behavior_{behavior_params.get('behavior_type', 1)}"
+            
+            # Vehicle parameters
+            if 'max_linear_velocity' in behavior_params:
+                msg.update_vehicle = True
+                msg.max_linear_velocity = behavior_params['max_linear_velocity']
+                msg.min_linear_velocity = behavior_params.get('min_linear_velocity', 0.0)
+                msg.max_angular_velocity = behavior_params.get('max_angular_velocity', 1.16)
+                msg.min_angular_velocity = behavior_params.get('min_angular_velocity', -1.16)
+                msg.wheelbase = behavior_params.get('wheelbase', 0.65)
+                msg.max_steering_angle = behavior_params.get('max_steering_angle', 0.3665)
+                msg.radius = behavior_params.get('radius', 0.6)
+                msg.footprint_padding = behavior_params.get('footprint_padding', 0.15)
+            
+            # Cost weights
+            if 'goal_weight' in behavior_params or 'obstacle_weight' in behavior_params:
+                msg.update_costs = True
+                msg.goal_weight = behavior_params.get('goal_weight', 30.0)
+                msg.obstacle_weight = behavior_params.get('obstacle_weight', 100.0)
+            
+            # Lookahead parameters
+            lookahead_updated = False
+            if 'lookahead_base_distance' in behavior_params:
+                msg.update_lookahead = True
+                msg.lookahead_base_distance = behavior_params['lookahead_base_distance']
+                lookahead_updated = True
+            if 'lookahead_velocity_factor' in behavior_params:
+                msg.update_lookahead = True
+                msg.lookahead_velocity_factor = behavior_params['lookahead_velocity_factor']
+                lookahead_updated = True
+            if 'lookahead_min_distance' in behavior_params:
+                msg.update_lookahead = True
+                msg.lookahead_min_distance = behavior_params['lookahead_min_distance']
+                lookahead_updated = True
+            if 'lookahead_max_distance' in behavior_params:
+                msg.update_lookahead = True
+                msg.lookahead_max_distance = behavior_params['lookahead_max_distance']
+                lookahead_updated = True
+            
+            # Goal critic parameters
+            if 'xy_goal_tolerance' in behavior_params or 'yaw_goal_tolerance' in behavior_params:
+                msg.update_goal_critic = True
+                msg.xy_goal_tolerance = behavior_params.get('xy_goal_tolerance', 0.25)
+                msg.yaw_goal_tolerance = behavior_params.get('yaw_goal_tolerance', 0.25)
+                msg.respect_reverse_heading = behavior_params.get('respect_reverse_heading', True)
+            
+            # Control parameters - always set to ensure force_stop is properly managed
+            msg.update_control = True
+            msg.goal_reached_threshold = behavior_params.get('goal_reached_threshold', 2.0)
+            msg.control_frequency = behavior_params.get('control_frequency', 20.0)
+            msg.force_stop = False  # Resume normal operation (override any previous stop)
+            
+            # Publish the parameter update
+            self.mppi_param_pub.publish(msg)
+            
+            self.get_logger().debug(f"Sent MPPI parameters for behavior {behavior_params.get('behavior_type', 1)}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to send MPPI parameters: {e}")
+    
+    def _handle_pause_behavior(self, pause_duration: float):
+        """Handle pause behaviors (node_type 7, 8)"""
+        if self.is_paused:
+            self.get_logger().debug("Already in pause state, ignoring new pause request")
+            return
+        
+        self.is_paused = True
+        self.pause_start_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # Send zero velocity to MPPI
+        self._send_pause_parameters()
+        
+        # Create timer for resume
+        if self.pause_timer is not None:
+            self.pause_timer.cancel()
+        
+        self.pause_timer = self.create_timer(pause_duration, self._resume_from_pause)
+        
+        self.get_logger().info(f"Started pause behavior for {pause_duration} seconds")
+    
+    def _send_pause_parameters(self):
+        """Send pause parameters to MPPI (force stop flag)"""
+        try:
+            msg = MPPIParams()
+            msg.header = Header()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = "pause_behavior"
+            
+            # Set force stop flag
+            msg.update_control = True
+            msg.force_stop = True
+            msg.control_frequency = 20.0
+            msg.goal_reached_threshold = 2.0
+            
+            self.mppi_param_pub.publish(msg)
+            self.get_logger().debug("Sent pause (force_stop=True) parameters to MPPI")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to send pause parameters: {e}")
+    
+    def _resume_from_pause(self):
+        """Resume from pause behavior"""
+        if not self.is_paused:
+            return
+        
+        self.is_paused = False
+        self.pause_start_time = None
+        
+        # Cancel pause timer
+        if self.pause_timer is not None:
+            self.pause_timer.cancel()
+            self.pause_timer = None
+        
+        # Restore previous behavior parameters if available
+        if self.enable_behavior_control and self.path_nodes and self.current_target_node_index < len(self.path_nodes):
+            current_node = self.path_nodes[self.current_target_node_index]
+            current_node_type = current_node.get('node_type', 1)
+            
+            # If current node is still a pause node, move to next
+            if self.behavior_param_manager.is_pause_behavior(current_node_type):
+                self.advance_to_next_node()
+                self.subgoal_published = False
+            else:
+                # Restore normal behavior parameters
+                self._update_behavior_parameters(current_node_type)
+        
+        self.get_logger().info("Resumed from pause behavior")
 
 
 def main(args=None):

@@ -20,10 +20,13 @@ except ImportError as e:
 
 
 class BagToMapGenerator:
-    def __init__(self, min_distance=1.0):
+    def __init__(self, min_distance=1.0, start_time=None, duration=None, node_prefix="N"):
         self.gps_points = []
         self.utm_transformer = None
         self.min_distance = min_distance  # Minimum distance in meters
+        self.start_time = start_time  # Start time in seconds from bag start
+        self.duration = duration  # Duration in seconds
+        self.node_prefix = node_prefix  # Node ID prefix (e.g., "N", "Na", "Nb")
         
     def setup_utm_transformer(self, lat: float, lon: float):
         """Setup UTM transformer based on first GPS coordinate"""
@@ -74,26 +77,67 @@ class BagToMapGenerator:
         cursor.execute("SELECT type FROM topics WHERE id = ?", (topic_id,))
         msg_type = cursor.fetchone()[0]
         
+        # Get start timestamp for time filtering
+        cursor.execute("SELECT MIN(timestamp) FROM messages WHERE topic_id = ?", (topic_id,))
+        bag_start_time = cursor.fetchone()[0]
+        
+        # Calculate time window
+        start_timestamp = bag_start_time
+        end_timestamp = None
+        
+        if self.start_time is not None:
+            start_timestamp = bag_start_time + int(self.start_time * 1e9)  # Convert to nanoseconds
+            
+        if self.duration is not None:
+            # If start_time is not specified, start from bag beginning
+            if self.start_time is None:
+                end_timestamp = bag_start_time + int(self.duration * 1e9)
+            else:
+                end_timestamp = start_timestamp + int(self.duration * 1e9)
+        
+        # Build query with time filtering
+        query = "SELECT data, timestamp FROM messages WHERE topic_id = ?"
+        params = [topic_id]
+        
+        if self.start_time is not None:
+            query += " AND timestamp >= ?"
+            params.append(start_timestamp)
+            
+        if end_timestamp is not None:
+            query += " AND timestamp <= ?"
+            params.append(end_timestamp)
+            
+        query += " ORDER BY timestamp"
+        
+        # Print time filtering info
+        start_time_str = f"{self.start_time}s" if self.start_time is not None else "beginning"
+        duration_str = f"{self.duration}s" if self.duration is not None else "end"
+        print(f"Time filtering: start={start_time_str}, duration={duration_str}")
+        if end_timestamp is not None:
+            print(f"Timestamp range: {start_timestamp} to {end_timestamp} ({(end_timestamp - start_timestamp) / 1e9:.3f}s)")
+        
         # Get messages
-        cursor.execute(
-            "SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp",
-            (topic_id,)
-        )
+        cursor.execute(query, params)
         
         message_class = get_message(msg_type)
+        total_messages = 0
+        filtered_messages = 0
         
         for row in cursor.fetchall():
+            total_messages += 1
             msg = deserialize_message(row[0], message_class)
             
             # Extract GPS coordinates based on message type
             lat, lon = self.extract_gps_from_message(msg)
             if lat is not None and lon is not None:
+                filtered_messages += 1
                 # Filter points based on minimum distance
                 if self.should_add_point(lat, lon):
                     self.gps_points.append((lat, lon))
         
         conn.close()
-        print(f"Read {len(self.gps_points)} GPS points from bag file")
+        print(f"Processed {total_messages} messages, {filtered_messages} valid GPS points")
+        print(f"Generated {len(self.gps_points)} GPS points after distance filtering")
     
     def should_add_point(self, lat: float, lon: float) -> bool:
         """Check if GPS point should be added based on minimum distance"""
@@ -141,15 +185,16 @@ class BagToMapGenerator:
         for i, (lat, lon) in enumerate(self.gps_points):
             easting, northing, zone = self.gps_to_utm(lat, lon)
             
+            node_id = f"{self.node_prefix}{i:03d}"
             node = {
-                "ID": f"N{i:04d}",
+                "ID": node_id,
                 "AdminCode": "110",
                 "NodeType": 1,
-                "ITSNodeID": f"ITS_N{i:04d}",
+                "ITSNodeID": f"ITS_{node_id}",
                 "Maker": "한국도로공사",
                 "UpdateDate": "20250822",
                 "Version": "2021",
-                "Remark": f"Generated node {i}",
+                "Remark": f"Generated node {i} (prefix: {self.node_prefix})",
                 "HistType": "02A",
                 "HistRemark": "자동 생성",
                 "GpsInfo": {
@@ -232,13 +277,24 @@ def main():
     parser.add_argument('gps_topic', help='GPS topic name (e.g., /gps/fix)')
     parser.add_argument('-o', '--output', default='generated_map.json', 
                        help='Output JSON file path (default: generated_map.json)')
-    parser.add_argument('-d', '--distance', type=float, default=10.0,
+    parser.add_argument('-d', '--distance', type=float, default=3.0,
                        help='Minimum distance between GPS points in meters (default: 1.0)')
+    parser.add_argument('-s', '--start-time', type=float, default=None,
+                       help='Start time in seconds from bag start (default: from beginning)')
+    parser.add_argument('-t', '--duration', type=float, default=None,
+                       help='Duration in seconds to extract (default: until end)')
+    parser.add_argument('-p', '--prefix', type=str, default='N',
+                       help='Node ID prefix (default: N, e.g., Na, Nb, Route1)')
     
     args = parser.parse_args()
     
     try:
-        generator = BagToMapGenerator(min_distance=args.distance)
+        generator = BagToMapGenerator(
+            min_distance=args.distance,
+            start_time=args.start_time,
+            duration=args.duration,
+            node_prefix=args.prefix
+        )
         generator.read_bag_file(args.bag_path, args.gps_topic)
         generator.generate_map_json(args.output)
         
