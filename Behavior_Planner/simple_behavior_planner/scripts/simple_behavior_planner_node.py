@@ -257,13 +257,14 @@ class SimpleBehaviorPlannerNode(Node):
         
         # Extract node positions from planned path (in map frame - absolute coordinates)
         for node in msg.path_data.nodes:
-            # Store nodes in map frame coordinates (absolute UTM) with node_type
+            # Store nodes in map frame coordinates (absolute UTM) with node_type and heading
             node_pose = {
                 'id': node.id,
                 'x': node.utm_info.easting,  # Absolute UTM coordinates in map frame
                 'y': node.utm_info.northing,
                 'z': node.gps_info.alt,
-                'node_type': node.node_type  # Add node_type for behavior control
+                'node_type': node.node_type,  # Add node_type for behavior control
+                'heading': node.heading  # Geographic heading (북쪽 기준 0-360도)
             }
             self.path_nodes.append(node_pose)
         
@@ -404,15 +405,27 @@ class SimpleBehaviorPlannerNode(Node):
             # Set frame_id and goal_id
             odom_pose.header.frame_id = target_node['id']  # goal_id를 frame_id에 설정
             
-            # 방향은 현재 위치에서 목표점으로의 방향으로 설정 (odom 좌표계에서)
-            if self.current_pose:
-                dx = odom_pose.pose.position.x - self.current_pose.pose.position.x
-                dy = odom_pose.pose.position.y - self.current_pose.pose.position.y
-                yaw = math.atan2(dy, dx)
+            # 노드의 지리학적 heading을 odom 좌표계 heading으로 변환하여 orientation 설정
+            if 'heading' in target_node and target_node['heading'] is not None:
+                odom_heading_rad = self._convert_geographic_to_odom_heading(target_node['heading'])
                 
-                # Quaternion 변환
-                odom_pose.pose.orientation.z = math.sin(yaw / 2.0)
-                odom_pose.pose.orientation.w = math.cos(yaw / 2.0)
+                # Quaternion 변환 (yaw만 적용)
+                odom_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
+                odom_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
+                odom_pose.pose.orientation.x = 0.0
+                odom_pose.pose.orientation.y = 0.0
+            else:
+                # Fallback: 현재 위치에서 목표점으로의 방향으로 설정 (odom 좌표계에서)
+                if self.current_pose:
+                    dx = odom_pose.pose.position.x - self.current_pose.pose.position.x
+                    dy = odom_pose.pose.position.y - self.current_pose.pose.position.y
+                    yaw = math.atan2(dy, dx)
+                    
+                    # Quaternion 변환
+                    odom_pose.pose.orientation.z = math.sin(yaw / 2.0)
+                    odom_pose.pose.orientation.w = math.cos(yaw / 2.0)
+                    odom_pose.pose.orientation.x = 0.0
+                    odom_pose.pose.orientation.y = 0.0
             
             self.subgoal_pub.publish(odom_pose)
             
@@ -438,7 +451,16 @@ class SimpleBehaviorPlannerNode(Node):
             subgoal_msg.pose.position.x = target_node['x']
             subgoal_msg.pose.position.y = target_node['y']
             subgoal_msg.pose.position.z = target_node['z']
-            subgoal_msg.pose.orientation.w = 1.0
+            
+            # Fallback에서도 heading 적용
+            if 'heading' in target_node and target_node['heading'] is not None:
+                odom_heading_rad = self._convert_geographic_to_odom_heading(target_node['heading'])
+                subgoal_msg.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
+                subgoal_msg.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
+                subgoal_msg.pose.orientation.x = 0.0
+                subgoal_msg.pose.orientation.y = 0.0
+            else:
+                subgoal_msg.pose.orientation.w = 1.0
             
             if hasattr(self, 'subgoal_pub') and self.subgoal_pub is not None:
                 self.subgoal_pub.publish(subgoal_msg)
@@ -473,6 +495,22 @@ class SimpleBehaviorPlannerNode(Node):
         """긴급 정지 해제"""
         self.emergency_stop_requested = False
         self.get_logger().info('Emergency stop cleared')
+    
+    def _convert_geographic_to_odom_heading(self, geographic_heading_deg: float) -> float:
+        """
+        지리학적 heading(북쪽 기준, 시계방향)을 odom heading(동쪽 기준, 반시계방향)으로 변환
+        
+        Args:
+            geographic_heading_deg: 북쪽 기준 0-360도 (시계방향)
+            
+        Returns:
+            odom heading in radians (동쪽 기준, 반시계방향)
+        """
+        # 북쪽 기준 → 동쪽 기준 변환
+        # 지리학적: 북쪽=0°, 시계방향
+        # 수학적(odom): 동쪽=0°, 반시계방향
+        math_angle_deg = (geographic_heading_deg) % 360
+        return math.radians(math_angle_deg)
     
     def publish_multiple_waypoints(self):
         """Multiple waypoints 발행 - 현재 목표 + 다음 목표들"""
@@ -531,7 +569,18 @@ class SimpleBehaviorPlannerNode(Node):
             map_pose.pose.position.x = node['x']
             map_pose.pose.position.y = node['y'] 
             map_pose.pose.position.z = node['z']
-            map_pose.pose.orientation.w = 1.0
+            
+            # 노드의 지리학적 heading을 odom 좌표계 heading으로 변환하여 orientation 설정
+            if 'heading' in node and node['heading'] is not None:
+                odom_heading_rad = self._convert_geographic_to_odom_heading(node['heading'])
+                
+                # Quaternion 변환 (yaw만 적용)
+                map_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
+                map_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
+                map_pose.pose.orientation.x = 0.0
+                map_pose.pose.orientation.y = 0.0
+            else:
+                map_pose.pose.orientation.w = 1.0
             
             # Transform to odom frame
             transform = self.tf_buffer.lookup_transform('odom', 'map', rclpy.time.Time())
@@ -551,7 +600,16 @@ class SimpleBehaviorPlannerNode(Node):
             fallback_pose.pose.position.x = node['x']
             fallback_pose.pose.position.y = node['y']
             fallback_pose.pose.position.z = node['z']
-            fallback_pose.pose.orientation.w = 1.0
+            
+            # Fallback에서도 heading 적용
+            if 'heading' in node and node['heading'] is not None:
+                odom_heading_rad = self._convert_geographic_to_odom_heading(node['heading'])
+                fallback_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
+                fallback_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
+                fallback_pose.pose.orientation.x = 0.0
+                fallback_pose.pose.orientation.y = 0.0
+            else:
+                fallback_pose.pose.orientation.w = 1.0
             return fallback_pose
     
     def _update_behavior_parameters(self, node_type: int):

@@ -57,7 +57,8 @@ class VisualizationNode(Node):
         self.latest_goal: Optional[PoseStamped] = None
         self.multiple_waypoints: Optional[MultipleWaypoints] = None
         self.robot_state: Optional[MPPIState] = None
-        self.lookahead_point: Optional[PointStamped] = None
+        self.lookahead_point: Optional[PoseStamped] = None
+        self.target_direction: Optional[PointStamped] = None
         
         # Visualization timer (runs at lower frequency)
         self.visualization_timer = self.create_timer(
@@ -147,7 +148,9 @@ class VisualizationNode(Node):
         self.robot_state_sub = self.create_subscription(
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
         self.lookahead_sub = self.create_subscription(
-            PointStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
+            PoseStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
+        self.target_direction_sub = self.create_subscription(
+            PointStamped, '/smppi_visualization/target_direction', self.target_direction_callback, reliable_qos)
         
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
@@ -194,9 +197,13 @@ class VisualizationNode(Node):
         """Receive robot state"""
         self.robot_state = msg
     
-    def lookahead_callback(self, msg: PointStamped):
+    def lookahead_callback(self, msg: PoseStamped):
         """Receive lookahead point"""
         self.lookahead_point = msg
+    
+    def target_direction_callback(self, msg: PointStamped):
+        """Receive target direction"""
+        self.target_direction = msg
     
     def visualization_callback(self):
         """Main visualization callback (runs at lower frequency)"""
@@ -236,6 +243,18 @@ class VisualizationNode(Node):
                 footprint_marker = self.create_footprint_marker()
                 if footprint_marker:
                     marker_array.markers.append(footprint_marker)
+            
+            # Robot heading marker
+            if self.robot_state is not None:
+                heading_marker = self.create_heading_marker()
+                if heading_marker:
+                    marker_array.markers.append(heading_marker)
+            
+            # Target direction marker
+            if self.target_direction is not None and self.robot_state is not None:
+                direction_marker = self.create_target_direction_marker()
+                if direction_marker:
+                    marker_array.markers.append(direction_marker)
             
             # Publish markers
             if len(marker_array.markers) > 0:
@@ -386,7 +405,7 @@ class VisualizationNode(Node):
             return None
     
     def create_lookahead_marker(self) -> Optional[Marker]:
-        """Create lookahead point visualization marker"""
+        """Create lookahead point visualization marker with direction arrow"""
         if not self.lookahead_point:
             return None
         
@@ -396,21 +415,21 @@ class VisualizationNode(Node):
             lookahead_marker.header.stamp = self.get_clock().now().to_msg()
             lookahead_marker.ns = "lookahead"
             lookahead_marker.id = 30
-            lookahead_marker.type = Marker.SPHERE
+            lookahead_marker.type = Marker.ARROW
             lookahead_marker.action = Marker.ADD
             
-            # Position from lookahead point
-            lookahead_marker.pose.position.x = self.lookahead_point.point.x
-            lookahead_marker.pose.position.y = self.lookahead_point.point.y
-            lookahead_marker.pose.position.z = 0.15  # Slightly above ground
-            lookahead_marker.pose.orientation.w = 1.0
+            # Position and orientation from lookahead pose
+            lookahead_marker.pose.position.x = self.lookahead_point.pose.position.x
+            lookahead_marker.pose.position.y = self.lookahead_point.pose.position.y
+            lookahead_marker.pose.position.z = 0.2  # Above ground
+            lookahead_marker.pose.orientation = self.lookahead_point.pose.orientation
             
-            # Scale - visible but not too large
-            lookahead_marker.scale.x = 0.4
-            lookahead_marker.scale.y = 0.4
-            lookahead_marker.scale.z = 0.4
+            # Arrow scale - smaller than robot heading but visible
+            lookahead_marker.scale.x = 0.8  # Arrow length
+            lookahead_marker.scale.y = 0.12  # Arrow width
+            lookahead_marker.scale.z = 0.12  # Arrow height
             
-            # Bright green color for lookahead point
+            # Bright green color for lookahead direction
             lookahead_marker.color.r = 0.0
             lookahead_marker.color.g = 1.0
             lookahead_marker.color.b = 0.2
@@ -440,26 +459,26 @@ class VisualizationNode(Node):
                 marker.header.stamp = self.get_clock().now().to_msg()
                 marker.ns = "next_waypoints"
                 marker.id = 40 + i  # Start from ID 40
-                marker.type = Marker.CYLINDER
+                marker.type = Marker.ARROW
                 marker.action = Marker.ADD
                 
-                # Position from waypoint
+                # Position and orientation from waypoint pose
                 marker.pose.position.x = waypoint.pose.position.x
                 marker.pose.position.y = waypoint.pose.position.y
-                marker.pose.position.z = 0.1  # Slightly above ground
-                marker.pose.orientation.w = 1.0
+                marker.pose.position.z = 0.15  # Above ground
+                marker.pose.orientation = waypoint.pose.orientation  # Use waypoint's orientation
                 
-                # Scale - smaller than current goal
-                marker.scale.x = 0.3
-                marker.scale.y = 0.3
-                marker.scale.z = 0.2
+                # Arrow scale - smaller than current goal and lookahead
+                marker.scale.x = 0.6  # Arrow length
+                marker.scale.y = 0.08  # Arrow width
+                marker.scale.z = 0.08  # Arrow height
                 
-                # Color - blue with decreasing intensity
-                alpha = 0.8 - (i * 0.2)  # Fade out for distant waypoints
-                marker.color.r = 0.2
-                marker.color.g = 0.4
+                # Color - blue with decreasing intensity for distant waypoints
+                alpha = 0.8 - (i * 0.15)  # Fade out for distant waypoints
+                marker.color.r = 0.3
+                marker.color.g = 0.5
                 marker.color.b = 1.0
-                marker.color.a = max(alpha, 0.3)
+                marker.color.a = max(alpha, 0.4)
                 
                 # Lifetime
                 marker.lifetime.sec = 0
@@ -472,6 +491,109 @@ class VisualizationNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Next waypoints marker creation error: {str(e)}")
             return []
+
+    def create_heading_marker(self) -> Optional[Marker]:
+        """Create robot heading visualization marker"""
+        if not self.robot_state:
+            return None
+        
+        try:
+            # Extract robot pose from robot state
+            robot_x, robot_y, robot_yaw = self.robot_state.state_vector
+            
+            heading_marker = Marker()
+            heading_marker.header.frame_id = "odom"
+            heading_marker.header.stamp = self.get_clock().now().to_msg()
+            heading_marker.ns = "robot_heading"
+            heading_marker.id = 50
+            heading_marker.type = Marker.ARROW
+            heading_marker.action = Marker.ADD
+            
+            # Position from robot state
+            heading_marker.pose.position.x = float(robot_x)
+            heading_marker.pose.position.y = float(robot_y)
+            heading_marker.pose.position.z = 0.3  # Above robot footprint
+            
+            # Orientation from robot yaw
+            import math
+            heading_marker.pose.orientation.w = math.cos(robot_yaw / 2.0)
+            heading_marker.pose.orientation.z = math.sin(robot_yaw / 2.0)
+            
+            # Arrow scale - larger than goal arrow to show robot heading clearly
+            heading_marker.scale.x = 1.2  # Arrow length
+            heading_marker.scale.y = 0.15  # Arrow width
+            heading_marker.scale.z = 0.15  # Arrow height
+            
+            # Distinctive color - purple/magenta for robot heading
+            heading_marker.color.r = 1.0
+            heading_marker.color.g = 0.0
+            heading_marker.color.b = 1.0  # Magenta
+            heading_marker.color.a = 0.9
+            
+            # Short lifetime for real-time updates
+            heading_marker.lifetime.sec = 0
+            heading_marker.lifetime.nanosec = 200000000  # 0.2 seconds
+            
+            return heading_marker
+            
+        except Exception as e:
+            self.get_logger().warn(f"Heading marker creation error: {str(e)}")
+            return None
+
+    def create_target_direction_marker(self) -> Optional[Marker]:
+        """Create target direction visualization marker as line from robot to direction point"""
+        if not self.target_direction or not self.robot_state:
+            return None
+        
+        try:
+            # Extract robot position from robot state
+            robot_x, robot_y, robot_yaw = self.robot_state.state_vector
+            
+            direction_marker = Marker()
+            direction_marker.header.frame_id = "odom"
+            direction_marker.header.stamp = self.get_clock().now().to_msg()
+            direction_marker.ns = "target_direction"
+            direction_marker.id = 60
+            direction_marker.type = Marker.ARROW
+            direction_marker.action = Marker.ADD
+            
+            # Create arrow from robot position to direction point
+            from geometry_msgs.msg import Point
+            
+            # Start point (robot position)
+            start_point = Point()
+            start_point.x = float(robot_x)
+            start_point.y = float(robot_y)
+            start_point.z = 0.4  # Higher than other markers
+            
+            # End point (direction target)
+            end_point = Point()
+            end_point.x = self.target_direction.point.x
+            end_point.y = self.target_direction.point.y
+            end_point.z = 0.4
+            
+            direction_marker.points = [start_point, end_point]
+            
+            # Arrow appearance - distinctive color (cyan/orange)
+            direction_marker.scale.x = 0.08  # Arrow shaft diameter
+            direction_marker.scale.y = 0.15  # Arrow head diameter
+            direction_marker.scale.z = 0.0   # Arrow head length (auto)
+            
+            # Orange color for target direction
+            direction_marker.color.r = 1.0
+            direction_marker.color.g = 0.5
+            direction_marker.color.b = 0.0  # Orange
+            direction_marker.color.a = 0.8
+            
+            # Short lifetime for real-time updates
+            direction_marker.lifetime.sec = 0
+            direction_marker.lifetime.nanosec = 200000000  # 0.2 seconds
+            
+            return direction_marker
+            
+        except Exception as e:
+            self.get_logger().warn(f"Target direction marker creation error: {str(e)}")
+            return None
 
 
 def main(args=None):
