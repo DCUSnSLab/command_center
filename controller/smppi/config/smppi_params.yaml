@@ -1,56 +1,81 @@
 /**:
   ros__parameters:
-    # Control parameters
-    control_rate: 20.0
-    goal_reached_threshold: 0.5
-    max_control_linear_velocity: 2.0
-    max_control_angular_velocity: 1.0
-    
-    # MPPI Optimization parameters
+    # 제어 파라미터
+    control_frequency: 20.0               # 제어 주기 [Hz]
+    visualization_frequency: 5.0          # 시각화 주기 [Hz]
+    enable_visualization: true            # 시각화 활성화
+    goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
+    waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
+
+    # SMPPI 최적화 파라미터
     optimizer:
-      batch_size: 2000
-      time_steps: 50
-      time_horizon: 1.5
-      iteration_count: 1
-      temperature: 1.0
-      lambda_action: 0.1
-      smoothing_factor: 0.8
-      shift_control_sequence: true
-      
-    # Vehicle Configuration
+      batch_size: 3000                    # 샘플 궤적 수 [개]
+      time_steps: 30                      # 예측 시간 스텝 수 [개]
+      model_dt: 0.1                       # 시뮬레이션 시간 간격 [s]
+      iteration_count: 1                  # MPPI 반복 횟수 [회]
+      temperature: 1.8                    # 소프트맥스 온도 (작을수록 탐욕적) [무단위]
+      lambda_action: 0.08                 # 액션 스무딩 비용 가중치 [무단위]
+      shift_control_sequence: true        # MPC 시퀀스 시프트 활성화 [bool]
+      noise_std_u: [0.40, 0.18]          # U 노이즈 표준편차 [m/s², rad/s²]
+      omega_diag: [0.6, 1.2]              # 액션 스무딩 대각 가중치 [v가중치, w가중치]
+  
+    # 차량 파라미터
     vehicle:
-      wheelbase: 0.65
-      max_linear_velocity: 2.0
-      max_angular_velocity: 1.0
-      min_turning_radius: 0.5
+      wheelbase: 0.65                     # 휠베이스 길이 [m]
+      max_linear_velocity: 2.0            # 최대 선속도 [m/s]
+      min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
+      max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
+      min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      max_steering_angle: 0.3665          # 최대 조향각 [rad] (21도)
+      min_turning_radius: 1.70            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
       
-    # Cost Function Weights
+      # HUNTER 2.0 실제 footprint (980x745mm)
+      footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]  # [x1,y1,x2,y2,x3,y3,x4,y4]
+      footprint_padding: 0.15             # 안전 마진 [m]
+      use_polygon_collision: true         # polygon vs circle 충돌 감지
+      use_footprint_filtering: true       # sensor processor에서 footprint 기반 필터링 활성화
+      
+      # 기존 원형 근사 (fallback)
+      radius: 0.6                         # 원형 근사 반지름 [m] (대각선/2 + padding)
+
+    # 비용 함수 가중치
     costs:
-      obstacle_weight: 100.0
-      goal_weight: 10.0
-      control_weight: 1.0
-      action_smoothing_weight: 0.1
+      obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
+      goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
       
-    # Sensor Processing
+      lookahead:
+        base_distance: 3.0                # 기본 lookahead 거리 [m]
+        velocity_factor: 1.2              # 속도 비례 팩터 [s] (거리 = 속도 × 팩터)
+        min_distance: 1.0                 # 최소 lookahead 거리 [m]
+        max_distance: 6.0                 # 최대 lookahead 거리 [m]
+      
+      # 디버깅 설정
+      debug: false                        # 디버깅 활성화
+      debug_level: 1                      # 디버깅 레벨 (1: 요약, 2: 상세)
+
+    # 센서 처리 파라미터
     sensor:
-      scan_downsample_ratio: 3
-      obstacle_cost_threshold: 0.5
-      max_obstacle_distance: 3.0
-      obstacle_margin: 0.3
-      
-    # Topics Configuration
+      scan_downsample_ratio: 2            # 레이저 스캔 다운샘플링 비율 [정수]
+      obstacle_cost_threshold: 0.5        # 장애물 비용 임계값 [무단위]
+      max_obstacle_distance: 3.5          # 최대 장애물 감지 거리 [m]
+      obstacle_margin: 0.3                # 장애물 안전 여유 거리 [m]
+
+    # ROS 토픽 설정
     topics:
       input:
-        laser_scan: '/ptl/scan'
-        odometry: '/odom'
-        goal_pose: '/goal_pose'
+        laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
+        odometry: '/odom'                 # 오도메트리 입력 토픽
+        goal_pose: '/subgoal'             # 단일 목표 위치 입력 토픽
+        multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
+        processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
+        robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
-        cmd_vel: '/ackermann_like_controller/cmd_vel'
-        goal_status: '/goal_status'
-        optimal_path: '/mppi_optimal_path'
-        
-    # Visualization
-    visualization:
-      publish_trajectories: true
-      trajectory_count_limit: 10
-      marker_scale: 0.1
+        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
+        goal_status: '/goal_status'                    # 목표 상태 출력 토픽
+        optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
+        markers: '/smppi_visualization'                # 시각화 마커 출력 토픽
+
+    # TF 프레임 설정  
+    frames:
+      target_frame: 'odom'                # 목표 좌표계
+      laser_frame: 'base_link'            # 레이저 좌표계

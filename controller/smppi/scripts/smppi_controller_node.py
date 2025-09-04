@@ -15,6 +15,11 @@ import numpy as np
 import time
 from typing import Optional
 
+# TF2 imports
+import tf2_ros
+import tf2_geometry_msgs
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+
 # ROS2 messages
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, Path
@@ -30,7 +35,6 @@ from command_center_interfaces.msg import ControllerGoalStatus
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
 from smppi_controller.critics.obstacle_critic import ObstacleCritic
 from smppi_controller.critics.goal_critic import GoalCritic
-from smppi_controller.critics.control_critic import ControlCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.sensor_processor import SensorProcessor
 from smppi_controller.utils.transforms import Transforms
@@ -48,6 +52,9 @@ class SMPPIControllerNode(Node):
         # Initialize parameters
         self._declare_parameters()
         self._load_parameters()
+        
+        # Initialize TF
+        self._init_tf()
         
         # Initialize components
         self._init_sensor_processor()
@@ -77,6 +84,13 @@ class SMPPIControllerNode(Node):
             self.control_callback
         )
         
+        # Visualization loop (separate timer)
+        if self.enable_visualization:
+            self.visualization_timer = self.create_timer(
+                1.0 / self.visualization_frequency,
+                self.visualization_callback
+            )
+        
         # Statistics
         self.last_control_time = time.time()
         self.control_count = 0
@@ -96,6 +110,7 @@ class SMPPIControllerNode(Node):
         # Control parameters
         self.declare_parameter('control_frequency', 20.0)
         self.declare_parameter('enable_visualization', True)
+        self.declare_parameter('visualization_frequency', 5.0)  # 5Hz for visualization
         
         # SMPPI optimizer parameters
         self.declare_parameter('optimizer.batch_size', 1000)
@@ -107,11 +122,13 @@ class SMPPIControllerNode(Node):
         self.declare_parameter('optimizer.smoothing_factor', 0.8)
         
         # Vehicle parameters
-        self.declare_parameter('vehicle.wheelbase', 1.0)
+        self.declare_parameter('vehicle.wheelbase', 0.65)
+        self.declare_parameter('vehicle.max_steering_angle', 0.4)
+        self.declare_parameter('vehicle.min_turning_radius', 1.54)
         self.declare_parameter('vehicle.max_linear_velocity', 2.0)
-        self.declare_parameter('vehicle.max_angular_velocity', 1.0)
         self.declare_parameter('vehicle.min_linear_velocity', 0.0)
-        self.declare_parameter('vehicle.min_angular_velocity', -1.0)
+        self.declare_parameter('vehicle.max_angular_velocity', 2.5)
+        self.declare_parameter('vehicle.min_angular_velocity', -2.5)
         
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
@@ -129,12 +146,17 @@ class SMPPIControllerNode(Node):
         # QoS
         self.declare_parameter('qos.sensor_depth', 1)
         self.declare_parameter('qos.reliable_depth', 5)
+        
+        # TF frames
+        self.declare_parameter('frames.target_frame', 'odom')
+        self.declare_parameter('frames.laser_frame', 'base_link')
     
     def _load_parameters(self):
         """Load parameters from ROS2 parameter server"""
         # Control frequency
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
         self.enable_visualization = self.get_parameter('enable_visualization').get_parameter_value().bool_value
+        self.visualization_frequency = self.get_parameter('visualization_frequency').get_parameter_value().double_value
         
         # Topic names
         self.scan_topic = self.get_parameter('topics.input.laser_scan').get_parameter_value().string_value
@@ -157,13 +179,14 @@ class SMPPIControllerNode(Node):
             'v_max': self.get_parameter('vehicle.max_linear_velocity').get_parameter_value().double_value,
             'w_min': self.get_parameter('vehicle.min_angular_velocity').get_parameter_value().double_value,
             'w_max': self.get_parameter('vehicle.max_angular_velocity').get_parameter_value().double_value,
+            'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value
         }
         
         # Vehicle parameters
         self.vehicle_params = {
             'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value,
-            'max_steering_angle': np.pi / 4,  # 45 degrees
-            'min_turning_radius': 0.5
+            'max_steering_angle': self.get_parameter('vehicle.max_steering_angle').get_parameter_value().double_value,
+            'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value
         }
         
         # Sensor parameters
@@ -187,10 +210,22 @@ class SMPPIControllerNode(Node):
         
         # Goal tracking parameters
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
+        
+        # TF frame parameters
+        self.target_frame = self.get_parameter('frames.target_frame').get_parameter_value().string_value
+        self.laser_frame = self.get_parameter('frames.laser_frame').get_parameter_value().string_value
+    
+    def _init_tf(self):
+        """Initialize TF listener"""
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.get_logger().info(f"TF listener initialized: {self.laser_frame} -> {self.target_frame}")
     
     def _init_sensor_processor(self):
         """Initialize sensor processor"""
         self.sensor_processor = SensorProcessor(self.sensor_params)
+        # Set TF buffer for coordinate transformations
+        self.sensor_processor.set_tf_buffer(self.tf_buffer)
         self.get_logger().info("Sensor processor initialized")
     
     def _init_motion_model(self):
@@ -229,16 +264,7 @@ class SMPPIControllerNode(Node):
         goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(goal_critic)
         
-        # Control critic
-        control_params = {
-            'weight': self.critic_weights['control_weight'],
-            'linear_cost_weight': 1.0,
-            'angular_cost_weight': 1.0,
-            'linear_change_weight': 1.0,
-            'angular_change_weight': 1.0
-        }
-        control_critic = ControlCritic(control_params)
-        self.optimizer.add_critic(control_critic)
+        # Control smoothing is now handled internally by SMPPI optimizer via lambda_action
         
         self.get_logger().info("Critics initialized")
     
@@ -281,6 +307,11 @@ class SMPPIControllerNode(Node):
         """Process laser scan data"""
         self.latest_scan = msg
         self.obstacles = self.sensor_processor.process_laser_scan(msg)
+        
+        # Debug log for coordinate verification
+        if self.obstacles and len(self.obstacles.obstacle_points) > 0:
+            first_obs = self.obstacles.obstacle_points[0]
+            self.get_logger().debug(f"First obstacle in odom frame: ({first_obs.x:.2f}, {first_obs.y:.2f})")
     
     def odom_callback(self, msg: Odometry):
         """Process odometry data"""
@@ -346,29 +377,52 @@ class SMPPIControllerNode(Node):
                 
                 # Check if goal reached
                 if goal_distance_float < self.goal_reached_threshold:
-                    self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m')
-            
+                    self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
-            
-            # Visualization
-            if self.enable_visualization:
-                self.publish_visualization()
-                self.publish_markers()
+            debug = self.optimizer.get_debug()
             
             # Statistics
             end_time = time.perf_counter()
             compute_time = (end_time - start_time) * 1000  # ms
             
             self.control_count += 1
+            # if self.control_count % 10 == 0:
+            #     self.get_logger().info(
+            #         f"[DBG] it={debug.get('iter')} | "
+            #         f"a0=({debug.get('a0_v'):.2f},{debug.get('a0_w'):.2f}) "
+            #         f"a_first=({debug.get('a_first_v'):.2f},{debug.get('a_first_w'):.2f}) | "
+            #         f"wH={debug.get('weights_entropy'):.2f} | "
+            #         f"traj(mean/min)=({debug.get('traj_cost_mean'):.2f}/{debug.get('traj_cost_min'):.2f}) "
+            #         f"omega(mean)={debug.get('omega_cost_mean'):.2f} | "
+            #         f"total_min={debug.get('total_cost_min'):.2f} | "
+            #         f"dU_norm={debug.get('dU_norm'):.3f} | "
+            #         f"prog(mean/max)=({debug.get('progress_mean'):.3f}/{debug.get('progress_max'):.3f}) | "
+            #         f"clamp(v/w)=({debug.get('clamp_ratio_v'):.2f}/{debug.get('clamp_ratio_w'):.2f})"
+            #     )
             if self.control_count % 100 == 0:
                 self.get_logger().info(f"Control loop: {compute_time:.2f}ms, commands published: {self.control_count}")
-        
+            # debug = self.optimizer.get_debug()
+            # for name, t_ms, shape in debug.get("critic_timings", []):
+            #     self.get_logger().info(f"[CRITIC] {name}: {t_ms:.2f}ms, cost_shape={shape}")
         except Exception as e:
             self.get_logger().error(f"Control loop error: {str(e)}")
             # Publish zero command in case of error
             cmd_vel = Twist()
             self.cmd_pub.publish(cmd_vel)
+    
+    def visualization_callback(self):
+        """Separate visualization callback (runs at lower frequency)"""
+        if not self.enable_visualization:
+            return
+            
+        try:
+            # Only publish visualization if we have valid data
+            if self.is_ready():
+                self.publish_visualization()
+                self.publish_markers()
+        except Exception as e:
+            self.get_logger().warn(f"Visualization callback error: {str(e)}")
     
     def is_ready(self) -> bool:
         """Check if controller is ready to compute commands"""
@@ -416,7 +470,6 @@ class SMPPIControllerNode(Node):
                 path_msg.path_points = pose_points
                 path_msg.total_cost = 0.0  # Set total cost from optimizer if available
                 path_msg.costs = []  # Individual costs for each point (optional)
-                
                 self.path_pub.publish(path_msg)
         
         except Exception as e:
@@ -480,12 +533,81 @@ class SMPPIControllerNode(Node):
                 
                 marker_array.markers.append(traj_marker)
             
+            # Obstacle markers
+            if self.obstacles is not None:
+                obstacle_markers = self.create_obstacle_markers()
+                marker_array.markers.extend(obstacle_markers)
+            
             # Publish markers
             if len(marker_array.markers) > 0:
                 self.marker_pub.publish(marker_array)
                 
         except Exception as e:
             self.get_logger().warn(f"Marker visualization error: {str(e)}")
+    
+    def create_obstacle_markers(self) -> list:
+        """Create obstacle visualization markers"""
+        markers = []
+        
+        if not hasattr(self.obstacles, 'obstacle_points') or not self.obstacles.obstacle_points:
+            return markers
+        
+        # Create points marker for all obstacles
+        obstacle_marker = Marker()
+        obstacle_marker.header.frame_id = "odom"
+        obstacle_marker.header.stamp = self.get_clock().now().to_msg()
+        obstacle_marker.ns = "smppi_obstacles"
+        obstacle_marker.id = 10
+        obstacle_marker.type = Marker.POINTS
+        obstacle_marker.action = Marker.ADD
+        
+        # Add obstacle points (already in odom frame from sensor processor)
+        for point in self.obstacles.obstacle_points:
+            p = Point()
+            p.x = float(point.x)  # odom frame x
+            p.y = float(point.y)  # odom frame y
+            p.z = 0.1
+            obstacle_marker.points.append(p)
+        
+        # Obstacle appearance
+        obstacle_marker.scale.x = 0.1  # Point width
+        obstacle_marker.scale.y = 0.1  # Point height
+        obstacle_marker.color.r = 1.0  # Red color
+        obstacle_marker.color.g = 0.0
+        obstacle_marker.color.b = 0.0
+        obstacle_marker.color.a = 0.8
+        
+        markers.append(obstacle_marker)
+        
+        # Create safety zone circles for nearby obstacles (optional)
+        if len(self.obstacles.obstacle_points) > 0:
+            safety_marker = Marker()
+            safety_marker.header.frame_id = "odom"
+            safety_marker.header.stamp = self.get_clock().now().to_msg()
+            safety_marker.ns = "smppi_safety_zones"
+            safety_marker.id = 11
+            safety_marker.type = Marker.CYLINDER
+            safety_marker.action = Marker.ADD
+            
+            # Use first obstacle as example (can be extended for multiple)
+            first_obstacle = self.obstacles.obstacle_points[0]
+            safety_marker.pose.position.x = float(first_obstacle.x)  # odom frame x
+            safety_marker.pose.position.y = float(first_obstacle.y)  # odom frame y
+            safety_marker.pose.position.z = 0.05
+            safety_marker.pose.orientation.w = 1.0
+            
+            # Safety zone appearance
+            safety_marker.scale.x = 1.0  # Safety radius * 2
+            safety_marker.scale.y = 1.0
+            safety_marker.scale.z = 0.1  # Height
+            safety_marker.color.r = 1.0
+            safety_marker.color.g = 1.0
+            safety_marker.color.b = 0.0  # Yellow
+            safety_marker.color.a = 0.3  # Semi-transparent
+            
+            markers.append(safety_marker)
+        
+        return markers
     
     def publish_goal_status(self, distance_to_goal: float):
         """Publish goal status information (from BAE MPPI)"""
@@ -508,7 +630,6 @@ class SMPPIControllerNode(Node):
         else:
             status_msg.goal_reached = False
             status_msg.status_code = 0  # PENDING
-        
         self.goal_status_pub.publish(status_msg)
     
     def shutdown(self):
