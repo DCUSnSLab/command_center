@@ -115,6 +115,31 @@ class SMPPIOptimizer:
             weights = torch.exp(-(total_costs - beta) / max(1e-9, self.temperature))
             weights = weights / (torch.sum(weights) + 1e-12)
 
+            # DEBUG: Log MPPI optimization details
+            with torch.no_grad():
+                # Count negative velocity samples and their weights
+                A_first = A_samples[:, 0, 0]  # First timestep velocities for all samples
+                neg_mask = A_first < 0
+                pos_mask = A_first >= 0
+                neg_count = neg_mask.sum().item()
+                pos_count = pos_mask.sum().item()
+                
+                # Weighted average of first timestep velocity
+                weighted_v_first = torch.sum(weights * A_first).item()
+                
+                # Weight distribution for negative vs positive samples
+                neg_weight_sum = torch.sum(weights[neg_mask]).item() if neg_count > 0 else 0.0
+                pos_weight_sum = torch.sum(weights[pos_mask]).item() if pos_count > 0 else 0.0
+                
+                # Cost statistics for negative vs positive samples
+                neg_cost_avg = torch.mean(total_costs[neg_mask]).item() if neg_count > 0 else float('inf')
+                pos_cost_avg = torch.mean(total_costs[pos_mask]).item() if pos_count > 0 else float('inf')
+                
+                print(f"[MPPI_OPT_DEBUG] Samples - neg:{neg_count}, pos:{pos_count}")
+                print(f"[MPPI_OPT_DEBUG] Costs - neg_avg:{neg_cost_avg:.3f}, pos_avg:{pos_cost_avg:.3f}, beta:{beta:.3f}")
+                print(f"[MPPI_OPT_DEBUG] Weights - neg_sum:{neg_weight_sum:.3f}, pos_sum:{pos_weight_sum:.3f}")
+                print(f"[MPPI_OPT_DEBUG] Weighted_v_first: {weighted_v_first:.3f}")
+
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
             self.control_sequence = self.control_sequence + dU
@@ -172,11 +197,25 @@ class SMPPIOptimizer:
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
         if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
             a0 = self.last_cmd_applied.clone()
-        a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)     # v >= 0 보장
+        # DEBUG: Log initial conditions
+        print(f"[SMPPI_A0_DEBUG] last_cmd: {float(self.last_cmd_applied[0]):.3f}, a0_before_clamp: {float(a0[0]):.3f}")
+        
+        a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         A_samples = self._integrate_U_to_A(a0, U_samples)
+        
+        # DEBUG: Check velocity samples before and after clamping
+        v_samples_before = A_samples[..., 0].clone()
         A_samples[..., 0] = torch.clamp(A_samples[..., 0], self.v_min, self.v_max)
         A_samples[..., 1] = torch.clamp(A_samples[..., 1], self.w_min, self.w_max)
+        
+        # Log sampling statistics
+        v_min_sample = float(v_samples_before.min())
+        v_max_sample = float(v_samples_before.max())
+        v_neg_count = (v_samples_before < 0).sum().item()
+        v_pos_count = (v_samples_before > 0).sum().item()
+        print(f"[SMPPI_SAMPLE_DEBUG] a0: {float(a0[0]):.3f}, v_range: [{v_min_sample:.3f}, {v_max_sample:.3f}], neg/pos: {v_neg_count}/{v_pos_count}")
+        
         return U_samples, A_samples, eps
 
     def _integrate_U_to_A(self, a0: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
@@ -258,9 +297,14 @@ class SMPPIOptimizer:
         a0 = self.last_cmd_applied  # [v, δ]로 유지하면 더 안정적
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)[0]   # [T,2] = [v, δ]
+        A_unclamped = A[0].clone()  # Store unclamped values for debugging
         A[:, 0] = torch.clamp(A[:, 0], self.v_min, self.v_max)
         A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)
         v_next, delta_next = float(A[0,0]), float(A[0,1])
+        
+        # DEBUG: Log velocity generation
+        print(f"[GET_CMD_DEBUG] control_seq[0]: {float(self.control_sequence[0,0]):.3f}, last_cmd: {float(self.last_cmd_applied[0]):.3f}")
+        print(f"[GET_CMD_DEBUG] v_limits: [{self.v_min:.2f}, {self.v_max:.2f}], unclamped_v: {float(A_unclamped[0]):.3f}, final_v: {v_next:.3f}")
 
         # δ -> ω 변환 (Twist 규약 준수)
         if abs(v_next) < 1e-3:
@@ -301,6 +345,32 @@ class SMPPIOptimizer:
     def reset(self):
         self.control_sequence.zero_()
         print("[SMPPI] Optimizer reset (U cleared)")
+
+    # ---------- dynamic parameter updates ----------
+    def update_velocity_limits(self, min_v: float = None, max_v: float = None, 
+                              min_w: float = None, max_w: float = None):
+        """Update velocity limits dynamically"""
+        if min_v is not None:
+            self.v_min = min_v
+        if max_v is not None:
+            self.v_max = max_v
+        if min_w is not None:
+            self.w_min = min_w
+        if max_w is not None:
+            self.w_max = max_w
+        
+        print(f"[SMPPI] Velocity limits updated: v_min={self.v_min:.2f}, v_max={self.v_max:.2f}, "
+              f"w_min={self.w_min:.3f}, w_max={self.w_max:.3f}")
+    
+    def set_action_bounds(self, v_bounds: list = None, w_bounds: list = None):
+        """Alternative method for setting action bounds"""
+        if v_bounds and len(v_bounds) == 2:
+            self.v_min, self.v_max = v_bounds[0], v_bounds[1]
+        if w_bounds and len(w_bounds) == 2:
+            self.w_min, self.w_max = w_bounds[0], w_bounds[1]
+        
+        print(f"[SMPPI] Action bounds updated: v=[{self.v_min:.2f}, {self.v_max:.2f}], "
+              f"w=[{self.w_min:.3f}, {self.w_max:.3f}]")
 
     # ---------- expose debug ----------
     def get_debug(self) -> Dict[str, Any]:

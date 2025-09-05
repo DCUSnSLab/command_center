@@ -46,7 +46,7 @@
       lookahead:
         base_distance: 3.0                # 기본 lookahead 거리 [m]
         velocity_factor: 1.2              # 속도 비례 팩터 [s] (거리 = 속도 × 팩터)
-        min_distance: 1.0                 # 최소 lookahead 거리 [m]
+        min_distance: 3.0                 # 최소 lookahead 거리 [m]
         max_distance: 6.0                 # 최대 lookahead 거리 [m]
       
       # 디버깅 설정

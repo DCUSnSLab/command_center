@@ -618,6 +618,12 @@ class SimpleBehaviorPlannerNode(Node):
             return
         
         try:
+            # DEBUG: Log behavior transition
+            self.get_logger().info(f"=== BEHAVIOR TRANSITION DEBUG ===")
+            self.get_logger().info(f"Previous behavior: {self.previous_node_type}")
+            self.get_logger().info(f"Current behavior: {self.current_node_type}")  
+            self.get_logger().info(f"Requested behavior: {node_type}")
+            
             # Handle pause behaviors
             if self.behavior_param_manager.is_pause_behavior(node_type):
                 pause_duration = self.behavior_param_manager.get_pause_duration(node_type)
@@ -690,18 +696,20 @@ class SimpleBehaviorPlannerNode(Node):
                 msg.lookahead_max_distance = behavior_params['lookahead_max_distance']
                 lookahead_updated = True
             
-            # Goal critic parameters
-            if 'xy_goal_tolerance' in behavior_params or 'yaw_goal_tolerance' in behavior_params:
+            # Goal critic parameters - only respect_reverse_heading (from config)
+            if 'respect_reverse_heading' in behavior_params:
                 msg.update_goal_critic = True
-                msg.xy_goal_tolerance = behavior_params.get('xy_goal_tolerance', 0.25)
-                msg.yaw_goal_tolerance = behavior_params.get('yaw_goal_tolerance', 0.25)
-                msg.respect_reverse_heading = behavior_params.get('respect_reverse_heading', True)
+                msg.respect_reverse_heading = behavior_params['respect_reverse_heading']
             
             # Control parameters - always set to ensure force_stop is properly managed
             msg.update_control = True
             msg.goal_reached_threshold = behavior_params.get('goal_reached_threshold', 2.0)
             msg.control_frequency = behavior_params.get('control_frequency', 20.0)
             msg.force_stop = False  # Resume normal operation (override any previous stop)
+            
+            # Current behavior mode information
+            msg.current_behavior_type = behavior_params.get('behavior_type', 1)
+            msg.current_behavior_desc = behavior_params.get('behavior_description', 'Normal forward movement')
             
             # Publish the parameter update
             self.mppi_param_pub.publish(msg)
@@ -745,8 +753,21 @@ class SimpleBehaviorPlannerNode(Node):
             msg.control_frequency = 20.0
             msg.goal_reached_threshold = 2.0
             
+            # Get current node type for pause behavior info
+            current_node_type = self.current_node_type
+            if current_node_type == 7:
+                msg.current_behavior_type = 7
+                msg.current_behavior_desc = "Pause for 1 second"
+            elif current_node_type == 8:
+                msg.current_behavior_type = 8
+                msg.current_behavior_desc = "Pause for 4 seconds"
+            else:
+                # Fallback - should not happen
+                msg.current_behavior_type = 7
+                msg.current_behavior_desc = "Pause behavior"
+            
             self.mppi_param_pub.publish(msg)
-            self.get_logger().debug("Sent pause (force_stop=True) parameters to MPPI")
+            self.get_logger().debug(f"Sent pause (force_stop=True) parameters to MPPI, behavior_type: {msg.current_behavior_type}")
             
         except Exception as e:
             self.get_logger().error(f"Failed to send pause parameters: {e}")

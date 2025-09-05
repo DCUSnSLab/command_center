@@ -37,15 +37,7 @@ float64 lookahead_max_distance
 
 # Goal critic parameters
 bool update_goal_critic
-float64 xy_goal_tolerance
-float64 yaw_goal_tolerance
-float64 distance_scale
-float64 angle_scale
-float64 alignment_scale
-float64 progress_scale
-bool use_progress_reward
 bool respect_reverse_heading
-float64 yaw_blend_distance
 
 # Obstacle critic parameters
 bool update_obstacle_critic
@@ -69,3 +61,7 @@ bool use_multiple_waypoints
 bool update_debug
 bool debug
 int32 debug_level
+
+# Current behavior mode information
+int32 current_behavior_type     # 1=forward, 2=reverse, 3=precise_forward, etc.
+string current_behavior_desc    # Human-readable description of current behavior

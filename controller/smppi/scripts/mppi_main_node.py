@@ -12,6 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 import torch
 import numpy as np
 import time
+import math
 from typing import Optional
 
 # ROS2 messages
@@ -61,6 +62,10 @@ class MPPIMainNode(Node):
         
         # Goal tracking
         self.current_goal_id = ""
+        
+        # Current behavior mode tracking
+        self.current_behavior_type = 1
+        self.current_behavior_desc = "Normal forward movement"
         
         # Control loop
         self.control_timer = self.create_timer(
@@ -354,8 +359,8 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.set_multiple_waypoints(msg)
         
-        self.get_logger().info(f"New multiple waypoints: current={self.current_goal_id}, "
-                             f"next_count={len(msg.next_waypoints)}, final={msg.is_final_waypoint}")
+        # self.get_logger().info(f"New multiple waypoints: current={self.current_goal_id}, "
+        #                      f"next_count={len(msg.next_waypoints)}, final={msg.is_final_waypoint}")
     
     def params_update_callback(self, msg: MPPIParams):
         """Handle dynamic parameter updates"""
@@ -397,6 +402,11 @@ class MPPIMainNode(Node):
             # Update debug parameters
             if msg.update_debug:
                 self._update_debug_params(msg)
+            
+            # Update current behavior mode information
+            if msg.current_behavior_type > 0:  # Valid behavior type
+                self.current_behavior_type = msg.current_behavior_type
+                self.current_behavior_desc = msg.current_behavior_desc if msg.current_behavior_desc else f"Behavior {msg.current_behavior_type}"
                 
             self.get_logger().info("MPPI parameters updated successfully")
             
@@ -447,9 +457,9 @@ class MPPIMainNode(Node):
                 goal_distance_float = float(goal_distance)
                 self.publish_goal_status(goal_distance_float)
                 
-                # Check if goal reached
-                if goal_distance_float < self.goal_reached_threshold:
-                    self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
+                # # Check if goal reached
+                # if goal_distance_float < self.goal_reached_threshold:
+                #     self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
             
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
@@ -460,13 +470,15 @@ class MPPIMainNode(Node):
             # Publish lookahead point for visualization
             self.publish_lookahead_point()
             
-            # Statistics
+            # Statistics and real-time monitoring
             end_time = time.perf_counter()
             compute_time = (end_time - start_time) * 1000  # ms
             
             self.control_count += 1
-            if self.control_count % 100 == 0:
-                self.get_logger().info(f"Control loop: {compute_time:.2f}ms, commands published: {self.control_count}")
+            
+            # Real-time monitoring info (every 50 iterations = ~2.5 seconds at 20Hz)
+            if self.control_count % 10 == 0:
+                self._publish_monitoring_info(cmd_vel, goal_distance_float if self.goal_state is not None else 0.0, compute_time)
                 
         except Exception as e:
             self.get_logger().error(f"Control loop error: {str(e)}")
@@ -632,10 +644,10 @@ class MPPIMainNode(Node):
         """Update vehicle parameters"""
         if msg.wheelbase > 0:
             self.vehicle_params['wheelbase'] = msg.wheelbase
-        if msg.max_linear_velocity > 0:
+        if msg.max_linear_velocity >= 0:
             self.vehicle_params['max_linear_velocity'] = msg.max_linear_velocity
-        if msg.min_linear_velocity >= 0:
-            self.vehicle_params['min_linear_velocity'] = msg.min_linear_velocity
+        # Allow negative min_linear_velocity for reverse movement
+        self.vehicle_params['min_linear_velocity'] = msg.min_linear_velocity
         if msg.max_angular_velocity > 0:
             self.vehicle_params['max_angular_velocity'] = msg.max_angular_velocity
         if msg.min_angular_velocity < 0:
@@ -657,6 +669,8 @@ class MPPIMainNode(Node):
                 # For AckermannModel, we need to update internal parameters manually
                 if hasattr(self.motion_model, 'max_linear_velocity'):
                     self.motion_model.max_linear_velocity = self.vehicle_params.get('max_linear_velocity', 2.0)
+                if hasattr(self.motion_model, 'min_linear_velocity'):
+                    self.motion_model.min_linear_velocity = self.vehicle_params.get('min_linear_velocity', 0.0)
                 if hasattr(self.motion_model, 'max_angular_velocity'):
                     self.motion_model.max_angular_velocity = self.vehicle_params.get('max_angular_velocity', 1.16)
                 if hasattr(self.motion_model, 'min_angular_velocity'):
@@ -668,46 +682,32 @@ class MPPIMainNode(Node):
         if hasattr(self, 'optimizer') and self.optimizer is not None:
             if hasattr(self.optimizer, 'update_velocity_limits'):
                 self.optimizer.update_velocity_limits(
+                    min_v=self.vehicle_params.get('min_linear_velocity', 0.0),
                     max_v=self.vehicle_params.get('max_linear_velocity', 2.0),
-                    max_w=self.vehicle_params.get('max_angular_velocity', 1.16),
-                    min_w=self.vehicle_params.get('min_angular_velocity', -1.16)
+                    min_w=self.vehicle_params.get('min_angular_velocity', -1.16),
+                    max_w=self.vehicle_params.get('max_angular_velocity', 1.16)
                 )
             elif hasattr(self.optimizer, 'set_action_bounds'):
                 # Alternative method name
                 self.optimizer.set_action_bounds(
-                    v_bounds=[0.0, self.vehicle_params.get('max_linear_velocity', 2.0)],
+                    v_bounds=[self.vehicle_params.get('min_linear_velocity', 0.0), 
+                             self.vehicle_params.get('max_linear_velocity', 2.0)],
                     w_bounds=[self.vehicle_params.get('min_angular_velocity', -1.16), 
                              self.vehicle_params.get('max_angular_velocity', 1.16)]
                 )
         
-        self.get_logger().info(f"Vehicle parameters updated: "
-                             f"max_v={self.vehicle_params['max_linear_velocity']:.1f}m/s, "
-                             f"max_w={self.vehicle_params['max_angular_velocity']:.2f}rad/s")
+        # self.get_logger().info(f"Vehicle parameters updated: "
+        #                      f"max_v={self.vehicle_params['max_linear_velocity']:.1f}m/s, "
+        #                      f"max_w={self.vehicle_params['max_angular_velocity']:.2f}rad/s")
     
     def _update_goal_critic_params(self, msg: MPPIParams):
-        """Update goal critic parameters"""
+        """Update goal critic parameters - only respect_reverse_heading"""
         goal_params = {}
         
-        if msg.xy_goal_tolerance > 0:
-            goal_params['xy_goal_tolerance'] = msg.xy_goal_tolerance
-        if msg.yaw_goal_tolerance > 0:
-            goal_params['yaw_goal_tolerance'] = msg.yaw_goal_tolerance
-        if msg.distance_scale >= 0:
-            goal_params['distance_scale'] = msg.distance_scale
-        if msg.angle_scale >= 0:
-            goal_params['angle_scale'] = msg.angle_scale
-        if msg.alignment_scale >= 0:
-            goal_params['alignment_scale'] = msg.alignment_scale
-        if msg.progress_scale >= 0:
-            goal_params['progress_scale'] = msg.progress_scale
-            
-        goal_params['use_progress_reward'] = msg.use_progress_reward
+        # Only update respect_reverse_heading from behavior planner
         goal_params['respect_reverse_heading'] = msg.respect_reverse_heading
         
-        if msg.yaw_blend_distance > 0:
-            goal_params['yaw_blend_distance'] = msg.yaw_blend_distance
-        
-        # Add lookahead parameters
+        # Add lookahead parameters (these come from lookahead updates)
         goal_params.update({
             'lookahead_base_distance': self.lookahead_params['base_distance'],
             'lookahead_velocity_factor': self.lookahead_params['velocity_factor'],
@@ -737,7 +737,7 @@ class MPPIMainNode(Node):
         if msg.goal_weight >= 0:
             self.critic_weights['goal_weight'] = msg.goal_weight
             
-        self.get_logger().info(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
+        # self.get_logger().info(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
     
     def _update_lookahead_params(self, msg: MPPIParams):
         """Update lookahead parameters"""
@@ -879,6 +879,135 @@ class MPPIMainNode(Node):
         """
             self.obstaclecritic, self.goalcritic 의 멤버 함수 update_parameters
         """
+    
+    def _publish_monitoring_info(self, cmd_vel: Twist, goal_distance: float, compute_time: float):
+        """Publish real-time monitoring information"""
+        try:
+            # Get behavior mode info
+            behavior_name = self._get_behavior_name(self.current_behavior_type)
+            
+            # Get current robot velocity from robot_state
+            current_v = self.robot_state.velocity.linear.x if self.robot_state else 0.0
+            current_w = self.robot_state.velocity.angular.z if self.robot_state else 0.0
+            
+            # Convert angular velocity to steering angle for display
+            if abs(cmd_vel.linear.x) < 1e-3:
+                steering_angle = 0.0
+            else:
+                steering_angle = math.atan((cmd_vel.angular.z * self.vehicle_params['wheelbase']) / max(1e-6, abs(cmd_vel.linear.x)))
+            
+            # Get optimizer debug info if available
+            debug_info = {}
+            if hasattr(self.optimizer, 'get_debug'):
+                debug_info = self.optimizer.get_debug()
+            
+            total_cost = debug_info.get('total_cost_min', 0.0)
+            progress = debug_info.get('progress_mean', 0.0)
+            
+            # Get closest obstacle distance (simplified)
+            closest_obstacle = self._get_closest_obstacle_distance()
+            
+            # Get current parameter values
+            current_params = self._get_current_parameters()
+            
+            # Determine goal status
+            if goal_distance <= self.goal_reached_threshold:
+                status = "REACHED"
+            elif goal_distance < self.goal_reached_threshold * 2:
+                status = "APPROACHING"
+            else:
+                status = "TRACKING"
+            
+            # Format monitoring message (split into two lines for readability)
+            monitoring_msg_line1 = (
+                f"Mode:{behavior_name}({self.current_behavior_type}) | "
+                f"Goal:{goal_distance:.2f}m | "
+                f"Time:{compute_time:.1f}ms | "
+                f"Cmd:v={cmd_vel.linear.x:.2f},ω={cmd_vel.angular.z:.3f},δ={steering_angle:.3f} | "
+                f"Actual:v={current_v:.2f},ω={current_w:.3f} | "
+                f"Status:{status}"
+            )
+            
+            monitoring_msg_line2 = (
+                f"Params: V[{current_params['min_v']:.1f},{current_params['max_v']:.1f}] | "
+                f"GoalW={current_params['goal_weight']:.1f} | "
+                f"ObsW={current_params['obstacle_weight']:.1f} | "
+                f"LA_base={current_params['lookahead_base']:.1f} | "
+                f"LA_vel={current_params['lookahead_vel_factor']:.1f} | "
+                f"GoalTol={current_params['goal_tolerance']:.2f} | "
+                f"Cost:{total_cost:.1f} | Obs:{closest_obstacle:.1f}m | Prog:{progress:.2f}"
+            )
+            
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line1}")
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line2}")
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to publish monitoring info: {e}")
+    
+    def _get_behavior_name(self, behavior_type: int) -> str:
+        """Get short behavior name for display"""
+        behavior_names = {
+            1: "FWD", 2: "REV", 3: "PREC_FWD", 4: "PREC_REV", 
+            5: "FAST", 6: "SLOW", 7: "PAUSE1", 8: "PAUSE4",
+            9: "FINAL", 10: "TRAFFIC", 11: "LANE_IGN"
+        }
+        return behavior_names.get(behavior_type, f"UNK_{behavior_type}")
+    
+    def _get_closest_obstacle_distance(self) -> float:
+        """Get distance to closest obstacle (simplified implementation)"""
+        try:
+            if self.processed_obstacles and hasattr(self.processed_obstacles, 'obstacle_points'):
+                if len(self.processed_obstacles.obstacle_points) > 0:
+                    # Simple calculation - find closest point to robot
+                    robot_x = self.robot_state.state_vector[0] if self.robot_state else 0.0
+                    robot_y = self.robot_state.state_vector[1] if self.robot_state else 0.0
+                    
+                    min_dist = float('inf')
+                    for point in self.processed_obstacles.obstacle_points:
+                        dist = math.sqrt((point.x - robot_x)**2 + (point.y - robot_y)**2)
+                        min_dist = min(min_dist, dist)
+                    
+                    return min_dist if min_dist != float('inf') else 99.9
+            return 99.9  # No obstacles detected
+        except:
+            return 99.9  # Error fallback
+    
+    def _get_current_parameters(self) -> dict:
+        """Get current parameter values for monitoring"""
+        try:
+            # Get goal critic for lookahead and tolerance parameters
+            goal_critic = None
+            if hasattr(self, 'goal_critic') and self.goal_critic is not None:
+                goal_critic = self.goal_critic
+            elif hasattr(self, 'optimizer') and self.optimizer is not None:
+                for critic in self.optimizer.critics:
+                    if hasattr(critic, 'set_multiple_waypoints'):
+                        goal_critic = critic
+                        break
+            
+            # Extract current parameter values
+            params = {
+                'min_v': self.vehicle_params.get('min_linear_velocity', 0.0),
+                'max_v': self.vehicle_params.get('max_linear_velocity', 2.0),
+                'goal_weight': self.critic_weights.get('goal_weight', 30.0),
+                'obstacle_weight': self.critic_weights.get('obstacle_weight', 100.0),
+                'lookahead_base': self.lookahead_params.get('base_distance', 2.5),
+                'lookahead_vel_factor': self.lookahead_params.get('velocity_factor', 1.2),
+                'goal_tolerance': 0.25  # Default value
+            }
+            
+            # Try to get goal tolerance from goal critic
+            if goal_critic and hasattr(goal_critic, 'xy_goal_tolerance'):
+                params['goal_tolerance'] = goal_critic.xy_goal_tolerance
+            
+            return params
+            
+        except Exception as e:
+            # Return default values on error
+            return {
+                'min_v': 0.0, 'max_v': 2.0, 'goal_weight': 30.0, 'obstacle_weight': 100.0,
+                'lookahead_base': 2.5, 'lookahead_vel_factor': 1.2, 'goal_tolerance': 0.25
+            }
     
     def shutdown(self):
         """Shutdown controller"""
