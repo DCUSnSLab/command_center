@@ -71,7 +71,7 @@ private:
         
         // Calculate headings for nodes with heading = 0.0
         for (auto& node : nodes) {
-            if (std::abs(node.heading) < 1e-6) {  // heading is approximately 0.0
+            if (std::abs(node.heading + 1.0) < 1e-6) {  // heading is approximately 0.0
                 // Find the previous node via incoming link
                 auto incoming_it = incoming_node_map.find(node.id);
                 if (incoming_it != incoming_node_map.end()) {
