@@ -5,9 +5,11 @@ std_msgs/Header header
 
 # Current target waypoint (what we're heading to now)
 geometry_msgs/PoseStamped current_goal
+bool current_goal_reverse_heading        # True if current goal requires reverse heading
 
 # Next waypoints for lookahead (typically 1-3 waypoints ahead)
 geometry_msgs/PoseStamped[] next_waypoints
+bool[] next_waypoints_reverse_heading    # True if corresponding waypoint requires reverse heading
 
 # Path information
 string path_id                    # Path identifier

@@ -4,7 +4,7 @@
     control_frequency: 20.0               # 제어 주기 [Hz]
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
-    goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
+    goal_reached_threshold: 1.5           # 목표 도달 거리 임계값 [m]
     waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
 
     # SMPPI 최적화 파라미터
@@ -64,7 +64,7 @@
     topics:
       input:
         laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
-        odometry: '/odom'                 # 오도메트리 입력 토픽
+        odometry: '/odometry/local'                 # 오도메트리 입력 토픽
         goal_pose: '/subgoal'             # 단일 목표 위치 입력 토픽
         multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
         processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽

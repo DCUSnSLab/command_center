@@ -93,10 +93,8 @@ class GoalCritic(BaseCritic):
         
         # waypoint Pose 관련 lookahead 디버깅 블록  
         # Apply reverse heading when respect_reverse_heading is True (reverse mode)
-        original_target_yaw = target_yaw
         if self.respect_reverse_heading:
             target_yaw = self.normalize_angle(target_yaw + math.pi)
-            print(f"[GoalCritic_DEBUG] Reverse heading: {original_target_yaw:.3f} -> {target_yaw:.3f}, respect_reverse_heading: {self.respect_reverse_heading}")
 
         # store lookahead point, yaw and target direction for viz without holding the graph
         self.last_lookahead_point = lookahead_point.detach().cpu()
@@ -125,22 +123,12 @@ class GoalCritic(BaseCritic):
         # hinge on tolerance -> inside tol => 0
         hinge_d = self._relu(distances_to_lookahead - self.xy_goal_tolerance)
         lookahead_cost = (hinge_d * weights.view(1, -1)).sum(dim=1)  # [K]
-        
-        # DEBUG: Log cost components
-        min_dist = float(distances_to_lookahead.min())
-        lookahead_cost_min = float(lookahead_cost.min())
-        print(f"[GOAL_COST_DEBUG] min_dist: {min_dist:.3f}, tolerance: {self.xy_goal_tolerance:.3f}, lookahead_cost_min: {lookahead_cost_min:.3f}")
 
         # 2) Heading alignment (final yaw vs target_yaw), hinge on yaw tolerance
         final_yaws = traj_yaws[:, -1]  # [K]
         yaw_errors = torch.abs(self.normalize_angle(final_yaws - target_yaw))
         hinge_yaw = self._relu(yaw_errors - self.yaw_goal_tolerance)
         heading_cost = self._huber(hinge_yaw, delta=0.5)  # smoother than square
-        
-        # DEBUG: Log yaw alignment
-        min_yaw_error = float(yaw_errors.min())
-        heading_cost_min = float(heading_cost.min())
-        print(f"[GOAL_YAW_DEBUG] target_yaw: {float(target_yaw):.3f}, min_yaw_error: {min_yaw_error:.3f}, heading_cost_min: {heading_cost_min:.3f}")
 
         # 3) Path alignment cost (step-wise cosine alignment to target direction)
         if T_plus_1 > 1:
@@ -152,10 +140,6 @@ class GoalCritic(BaseCritic):
             alignment_cost = self._huber(1.0 - alignment).mean(dim=1)
         else:
             alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
-        
-        # DEBUG: Log alignment cost
-        alignment_cost_min = float(alignment_cost.min())
-        print(f"[GOAL_ALIGN_DEBUG] alignment_cost_min: {alignment_cost_min:.3f}")
 
         # 4) (옵션) Progress reward: 가까워질수록 비용을 깎음
         progress_term = torch.zeros(K, device=self.device, dtype=self.dtype)
@@ -164,11 +148,6 @@ class GoalCritic(BaseCritic):
             final_d = torch.norm(traj_positions[:, -1, :] - goal_pos.view(1, 2), dim=1)
             progress = init_d - final_d  # >0 이면 진전
             progress_term = -progress  # 비용에 더하므로, 진전이 크면 더 작은 비용
-        
-        # DEBUG: Log progress term
-        progress_term_min = float(progress_term.min())
-        progress_term_max = float(progress_term.max())
-        print(f"[GOAL_PROGRESS_DEBUG] use_progress_reward: {self.use_progress_reward}, progress_term_range: [{progress_term_min:.3f}, {progress_term_max:.3f}]")
 
         # --- Combine with scales
         distance_term = self.distance_scale * lookahead_cost
@@ -178,21 +157,7 @@ class GoalCritic(BaseCritic):
         
         total_cost = distance_term + angle_term + alignment_term + progress_term_scaled
         
-        # DEBUG: Detailed cost breakdown
-        distance_min = float(distance_term.min())
-        angle_min = float(angle_term.min())
-        alignment_min = float(alignment_term.min())
-        progress_scaled_min = float(progress_term_scaled.min())
-        print(f"[GOAL_SCALES_DEBUG] distance_scale: {self.distance_scale:.1f}, angle_scale: {self.angle_scale:.1f}, alignment_scale: {self.alignment_scale:.1f}, progress_scale: {self.progress_scale:.1f}")
-        print(f"[GOAL_BREAKDOWN_DEBUG] distance_term_min: {distance_min:.3f}, angle_term_min: {angle_min:.3f}, alignment_term_min: {alignment_min:.3f}, progress_term_min: {progress_scaled_min:.3f}")
-        
-        # DEBUG: Final cost breakdown
-        final_cost = self.apply_weight(total_cost)
-        total_cost_min = float(total_cost.min())
-        final_cost_min = float(final_cost.min())
-        print(f"[GOAL_FINAL_DEBUG] total_cost_min: {total_cost_min:.3f}, final_cost_min: {final_cost_min:.3f}, weight: {self.weight:.1f}")
-
-        return final_cost
+        return self.apply_weight(total_cost)
 
     def _compute_nav2_lookahead(self, current_pos: torch.Tensor, current_vel_abs: torch.Tensor,
                                 goal_pos: torch.Tensor) -> torch.Tensor:
@@ -251,9 +216,16 @@ class GoalCritic(BaseCritic):
             direction = (current_goal_pos - current_pos) / (d_cur + 1e-9)
             return current_pos + direction * total_lookahead
 
-        # 가까우면 next_waypoints로 연장
+        # 가까우면 next_waypoints로 연장 (단, 다음이 후진 모드가 아닐 때만)
         next_wps = getattr(wp, "next_waypoints", None) or []
+        next_reverse_flags = getattr(wp, "next_waypoints_reverse_heading", None) or []
+        
         if len(next_wps) == 0:
+            return current_goal_pos
+        
+        # 다음 waypoint가 후진 모드이면 lookahead를 현재 goal에 고정
+        if len(next_reverse_flags) > 0 and next_reverse_flags[0]:
+            # Next waypoint requires reverse heading - keep lookahead at current goal
             return current_goal_pos
 
         remaining = float((total_lookahead - d_cur).item())

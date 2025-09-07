@@ -115,31 +115,6 @@ class SMPPIOptimizer:
             weights = torch.exp(-(total_costs - beta) / max(1e-9, self.temperature))
             weights = weights / (torch.sum(weights) + 1e-12)
 
-            # DEBUG: Log MPPI optimization details
-            with torch.no_grad():
-                # Count negative velocity samples and their weights
-                A_first = A_samples[:, 0, 0]  # First timestep velocities for all samples
-                neg_mask = A_first < 0
-                pos_mask = A_first >= 0
-                neg_count = neg_mask.sum().item()
-                pos_count = pos_mask.sum().item()
-                
-                # Weighted average of first timestep velocity
-                weighted_v_first = torch.sum(weights * A_first).item()
-                
-                # Weight distribution for negative vs positive samples
-                neg_weight_sum = torch.sum(weights[neg_mask]).item() if neg_count > 0 else 0.0
-                pos_weight_sum = torch.sum(weights[pos_mask]).item() if pos_count > 0 else 0.0
-                
-                # Cost statistics for negative vs positive samples
-                neg_cost_avg = torch.mean(total_costs[neg_mask]).item() if neg_count > 0 else float('inf')
-                pos_cost_avg = torch.mean(total_costs[pos_mask]).item() if pos_count > 0 else float('inf')
-                
-                print(f"[MPPI_OPT_DEBUG] Samples - neg:{neg_count}, pos:{pos_count}")
-                print(f"[MPPI_OPT_DEBUG] Costs - neg_avg:{neg_cost_avg:.3f}, pos_avg:{pos_cost_avg:.3f}, beta:{beta:.3f}")
-                print(f"[MPPI_OPT_DEBUG] Weights - neg_sum:{neg_weight_sum:.3f}, pos_sum:{pos_weight_sum:.3f}")
-                print(f"[MPPI_OPT_DEBUG] Weighted_v_first: {weighted_v_first:.3f}")
-
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
             self.control_sequence = self.control_sequence + dU
@@ -197,24 +172,13 @@ class SMPPIOptimizer:
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
         if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
             a0 = self.last_cmd_applied.clone()
-        # DEBUG: Log initial conditions
-        print(f"[SMPPI_A0_DEBUG] last_cmd: {float(self.last_cmd_applied[0]):.3f}, a0_before_clamp: {float(a0[0]):.3f}")
-        
         a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         A_samples = self._integrate_U_to_A(a0, U_samples)
         
-        # DEBUG: Check velocity samples before and after clamping
-        v_samples_before = A_samples[..., 0].clone()
+        # 속도 한계 적용
         A_samples[..., 0] = torch.clamp(A_samples[..., 0], self.v_min, self.v_max)
         A_samples[..., 1] = torch.clamp(A_samples[..., 1], self.w_min, self.w_max)
-        
-        # Log sampling statistics
-        v_min_sample = float(v_samples_before.min())
-        v_max_sample = float(v_samples_before.max())
-        v_neg_count = (v_samples_before < 0).sum().item()
-        v_pos_count = (v_samples_before > 0).sum().item()
-        print(f"[SMPPI_SAMPLE_DEBUG] a0: {float(a0[0]):.3f}, v_range: [{v_min_sample:.3f}, {v_max_sample:.3f}], neg/pos: {v_neg_count}/{v_pos_count}")
         
         return U_samples, A_samples, eps
 
@@ -302,26 +266,32 @@ class SMPPIOptimizer:
         A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)
         v_next, delta_next = float(A[0,0]), float(A[0,1])
         
-        # DEBUG: Log velocity generation
-        print(f"[GET_CMD_DEBUG] control_seq[0]: {float(self.control_sequence[0,0]):.3f}, last_cmd: {float(self.last_cmd_applied[0]):.3f}")
-        print(f"[GET_CMD_DEBUG] v_limits: [{self.v_min:.2f}, {self.v_max:.2f}], unclamped_v: {float(A_unclamped[0]):.3f}, final_v: {v_next:.3f}")
 
-        # δ -> ω 변환 (Twist 규약 준수)
+        # δ -> ω 변환 (Twist 규약 준수, 후진 시 조향 방향 반전)
         if abs(v_next) < 1e-3:
             omega_next = 0.0
         else:
-            omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
+            # 후진 시 조향 방향 반전: 물리적으로 정확한 조향-회전 관계
+            if v_next < 0:  # 후진
+                omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
+            else:  # 전진
+                omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
 
         # Twist publish
         cmd = Twist()
         cmd.linear.x  = v_next
         cmd.angular.z = omega_next
+        
 
         # Convert omega back to delta for verification
         if abs(v_next) < 1e-3:
             delta_recovered = 0.0
         else:
-            delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
+            # 후진 시 역변환에도 동일한 물리 모델 적용
+            if v_next < 0:  # 후진
+                delta_recovered = math.atan(-(omega_next * self.wheelbase) / v_next)
+            else:  # 전진
+                delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
         
         # Debug log - show steering angle in radians (not rad/s)
         # print(f"[SMPPI] Control: v={v_next:.3f} m/s, δ={delta_next:.3f} rad, ω={omega_next:.3f} rad/s, δ_recovered={delta_recovered:.3f} rad")

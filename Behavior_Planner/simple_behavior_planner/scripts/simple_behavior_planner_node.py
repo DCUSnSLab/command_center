@@ -537,10 +537,17 @@ class SimpleBehaviorPlannerNode(Node):
             # 현재 목표 설정
             waypoints_msg.current_goal = self.create_pose_stamped(current_node)
             
+            # 현재 목표의 reverse heading 정보
+            current_behavior_type = current_node.get('node_type', 1)
+            waypoints_msg.current_goal_reverse_heading = self._is_reverse_behavior(current_behavior_type)
+            
             # 다음 목표들 설정
             waypoints_msg.next_waypoints = []
+            waypoints_msg.next_waypoints_reverse_heading = []
             for node in next_nodes:
                 waypoints_msg.next_waypoints.append(self.create_pose_stamped(node))
+                next_behavior_type = node.get('node_type', 1)
+                waypoints_msg.next_waypoints_reverse_heading.append(self._is_reverse_behavior(next_behavior_type))
             
             # 경로 정보 설정
             waypoints_msg.path_id = self.planned_path.path_id if self.planned_path else ""
@@ -558,6 +565,18 @@ class SimpleBehaviorPlannerNode(Node):
                                  
         except Exception as e:
             self.get_logger().warn(f'Failed to publish multiple waypoints: {str(e)}')
+    
+    def _is_reverse_behavior(self, behavior_type: int) -> bool:
+        """Check if behavior type requires reverse heading"""
+        if self.behavior_param_manager is None:
+            return False
+        
+        try:
+            behavior_params = self.behavior_param_manager.get_parameters(behavior_type)
+            return behavior_params.get('respect_reverse_heading', False)
+        except Exception as e:
+            self.get_logger().warn(f"Could not check reverse behavior for type {behavior_type}: {e}")
+            return False
     
     def create_pose_stamped(self, node: dict) -> PoseStamped:
         """노드에서 PoseStamped 메시지 생성 (odom 좌표로 변환)"""
@@ -696,10 +715,10 @@ class SimpleBehaviorPlannerNode(Node):
                 msg.lookahead_max_distance = behavior_params['lookahead_max_distance']
                 lookahead_updated = True
             
-            # Goal critic parameters - only respect_reverse_heading (from config)
-            if 'respect_reverse_heading' in behavior_params:
-                msg.update_goal_critic = True
-                msg.respect_reverse_heading = behavior_params['respect_reverse_heading']
+            # Goal critic parameters - always reset to ensure proper mode switching
+            msg.update_goal_critic = True
+            # Default to False, only True for reverse behaviors
+            msg.respect_reverse_heading = behavior_params.get('respect_reverse_heading', False)
             
             # Control parameters - always set to ensure force_stop is properly managed
             msg.update_control = True

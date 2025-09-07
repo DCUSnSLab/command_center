@@ -716,7 +716,7 @@
         {
             "ID": "N0032",
             "AdminCode": "110",
-            "NodeType": 1,
+            "NodeType": 4,
             "ITSNodeID": "ITS_N1013",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",
@@ -1383,7 +1383,7 @@
         {
             "ID": "N0061",
             "AdminCode": "110",
-            "NodeType": 1,
+            "NodeType": 4,
             "ITSNodeID": "ITS_N5000",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",
@@ -1406,7 +1406,7 @@
         {
             "ID": "N0062",
             "AdminCode": "110",
-            "NodeType": 1,
+            "NodeType": 4,
             "ITSNodeID": "ITS_N5001",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",
@@ -1429,7 +1429,7 @@
         {
             "ID": "N0063",
             "AdminCode": "110",
-            "NodeType": 1,
+            "NodeType": 4,
             "ITSNodeID": "ITS_N5002",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",
@@ -1452,7 +1452,7 @@
         {
             "ID": "N0064",
             "AdminCode": "110",
-            "NodeType": 1,
+            "NodeType": 4,
             "ITSNodeID": "ITS_N5003",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",

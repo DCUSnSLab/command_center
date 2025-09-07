@@ -802,6 +802,7 @@ class MPPIMainNode(Node):
             self.control_frequency = msg.control_frequency
         if msg.goal_reached_threshold > 0:
             self.goal_reached_threshold = msg.goal_reached_threshold
+            self.get_logger().info(f"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@update {self.goal_reached_threshold}@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             
         self.get_logger().info("Control parameters updated")
     
@@ -840,14 +841,14 @@ class MPPIMainNode(Node):
         self.get_logger().info("Debug parameters updated")
     
     def _apply_velocity_limits(self, cmd_vel: Twist) -> Twist:
-        """Apply velocity limits to command"""
-        # Get current limits from vehicle parameters
-        max_v = self.vehicle_params.get('max_linear_velocity', 2.0)
+        """Apply velocity limits to command - MPPI already applies internal limits, so this is just a safety check"""
+        # MPPI optimizer already applies proper velocity limits internally including reverse mode
+        # This function is kept for safety but should not override MPPI's careful velocity planning
+        
         max_w = self.vehicle_params.get('max_angular_velocity', 1.16)
         min_w = self.vehicle_params.get('min_angular_velocity', -1.16)
         
-        # Apply limits
-        cmd_vel.linear.x = max(-max_v, min(max_v, cmd_vel.linear.x))
+        # Only apply angular velocity limits (linear velocity is already properly limited by MPPI)
         cmd_vel.angular.z = max(min_w, min(max_w, cmd_vel.angular.z))
         
         return cmd_vel
@@ -923,7 +924,7 @@ class MPPIMainNode(Node):
                 f"Mode:{behavior_name}({self.current_behavior_type}) | "
                 f"Goal:{goal_distance:.2f}m | "
                 f"Time:{compute_time:.1f}ms | "
-                f"Cmd:v={cmd_vel.linear.x:.2f},ω={cmd_vel.angular.z:.3f},δ={steering_angle:.3f} | "
+                f"Cmd:v={cmd_vel.linear.x:.3f},ω={cmd_vel.angular.z:.3f},δ={steering_angle:.3f} | "
                 f"Actual:v={current_v:.2f},ω={current_w:.3f} | "
                 f"Status:{status}"
             )
