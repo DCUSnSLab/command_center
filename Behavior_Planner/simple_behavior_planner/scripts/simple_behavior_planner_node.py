@@ -2,39 +2,25 @@
 """
 Simple Behavior Planner Node
 차량의 전반적인 행동 결정을 담당하는 노드
-
-Subscriptions:
-- /planned_path_detailed: 전체 경로의 노드와 링크 정보
-- /perception: 인지 결과 (현재는 구독만)
-- /goal_status: 목적지 도달 상태 (현재는 구독만)
-
-Publications:
-- /subgoal: 현재 위치에서 가장 가까운 다음 노드의 UTM 좌표
-- /emergency_stop: 긴급 정지 명령 (현재는 발행만)
 """
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 import math
-import numpy as np
-from typing import Optional, List
+import os
+from typing import Optional
 
-# ROS2 messages
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String, Header
 
-# TF2 for coordinate transformation
 import tf2_ros
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs.tf2_geometry_msgs as tf2_geometry_msgs
 
-# Custom messages
 from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints, MPPIParams
 
-# Behavior parameter management
-import os
 import yaml
 from simple_behavior_planner.behavior_parameter_manager import BehaviorParameterManager
 
@@ -84,14 +70,14 @@ class SimpleBehaviorPlannerNode(Node):
         self.path_nodes = []
         self.is_path_following = False
         self.emergency_stop_requested = False
-        self.subgoal_published = False  # 현재 서브골이 발행되었는지 추적
-        self.last_completed_goal_id = None  # 마지막으로 완료된 goal_id 추적
+        self.subgoal_published = False
+        self.last_completed_goal_id = None
         
         # Behavior control state
-        self.current_node_type = 1  # 현재 행동 타입 (기본: 전진)
-        self.previous_node_type = 1  # 이전 행동 타입
-        self.is_paused = False  # 일시 정지 상태
-        self.pause_timer = None  # 일시 정지 타이머
+        self.current_node_type = 1
+        self.previous_node_type = 1
+        self.is_paused = False
+        self.pause_timer = None
         self.pause_start_time = None
         
         # Initialize behavior parameter manager
@@ -243,44 +229,52 @@ class SimpleBehaviorPlannerNode(Node):
             self.behavior_param_manager = None
     
     def current_pose_callback(self, msg: Odometry):
-        """현재 위치 정보 수신 (Odometry에서 PoseStamped로 변환)"""
-        # Odometry 메시지에서 PoseStamped로 변환
+        """Process current position from odometry"""
         pose_stamped = PoseStamped()
         pose_stamped.header = msg.header
         pose_stamped.pose = msg.pose.pose
         self.current_pose = pose_stamped
     
     def planned_path_callback(self, msg: PlannedPath):
-        """계획된 경로 정보 수신"""
+        """Process received planned path"""
         self.planned_path = msg
-        self.path_nodes = []
-        
-        # Extract node positions from planned path (in map frame - absolute coordinates)
+        self.path_nodes = self._extract_path_nodes(msg)
+        self._reset_path_state()
+        self._update_initial_behavior()
+        self._log_path_info(msg)
+    
+    def _extract_path_nodes(self, msg: PlannedPath) -> list:
+        """Extract node information from planned path message"""
+        nodes = []
         for node in msg.path_data.nodes:
-            # Store nodes in map frame coordinates (absolute UTM) with node_type and heading
             node_pose = {
                 'id': node.id,
-                'x': node.utm_info.easting,  # Absolute UTM coordinates in map frame
+                'x': node.utm_info.easting,
                 'y': node.utm_info.northing,
                 'z': node.gps_info.alt,
-                'node_type': node.node_type,  # Add node_type for behavior control
-                'heading': node.heading  # Geographic heading (북쪽 기준 0-360도)
+                'node_type': node.node_type,
+                'heading': node.heading
             }
-            self.path_nodes.append(node_pose)
-        
-        # Reset target node index for new path
+            nodes.append(node_pose)
+        return nodes
+    
+    def _reset_path_state(self):
+        """Reset state variables for new path"""
         self.current_target_node_index = 0
         self.is_path_following = True
-        self.subgoal_published = False  # 새로운 경로에 대해 서브골 발행 준비
-        self.last_completed_goal_id = None  # 새로운 경로 시작 시 완료된 goal_id 리셋
-        
-        # Check first node's behavior type and update MPPI parameters if needed
+        self.subgoal_published = False
+        self.last_completed_goal_id = None
+    
+    def _update_initial_behavior(self):
+        """Update behavior parameters for first node if needed"""
         if self.enable_behavior_control and self.path_nodes:
             first_node_type = self.path_nodes[0].get('node_type', 1)
             if first_node_type != self.current_node_type:
                 self._update_behavior_parameters(first_node_type)
-        
-        self.get_logger().info(f'Received new planned path with {len(self.path_nodes)} nodes')
+    
+    def _log_path_info(self, msg: PlannedPath):
+        """Log information about received path"""
+        self.get_logger().info(f'Received path with {len(self.path_nodes)} nodes')
         self.get_logger().info(f'Path ID: {msg.path_id}, Start: {msg.start_node_id}, Goal: {msg.goal_node_id}')
         
         if self.enable_behavior_control and self.path_nodes:
@@ -289,40 +283,47 @@ class SimpleBehaviorPlannerNode(Node):
             self.get_logger().info(f'Path contains behavior types: {unique_types}')
     
     def perception_callback(self, msg: String):
-        """인지 결과 수신 (현재는 placeholder)"""
-        # TODO: 실제 인지 결과에 따른 행동 계획 수정
+        """Handle perception data (placeholder)"""
         self.get_logger().debug(f'Perception data received: {msg.data}')
     
     def goal_status_callback(self, msg: ControllerGoalStatus):
-        """목표 도달 상태 수신"""
-        # 현재 목표 노드가 있는지 확인
-        if not self.path_nodes or self.current_target_node_index >= len(self.path_nodes):
-            self.get_logger().debug(f'Received goal_status for {msg.goal_id} but no current target node')
+        """Handle goal status updates from controller"""
+        if not self._is_valid_goal_status(msg):
             return
+            
+        if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
+            self._handle_goal_success(msg)
+        elif msg.status_code == 2:  # FAILED
+            self._handle_goal_failure(msg)
+        elif msg.status_code == 3:  # ABORTED
+            self._handle_goal_abort(msg)
+    
+    def _is_valid_goal_status(self, msg: ControllerGoalStatus) -> bool:
+        """Check if goal status message is valid for current state"""
+        if not self.path_nodes or self.current_target_node_index >= len(self.path_nodes):
+            return False
             
         current_target_id = self.path_nodes[self.current_target_node_index]['id']
-        
-        # 현재 목표와 일치하는지 확인
-        if msg.goal_id != current_target_id:
-            self.get_logger().debug(f'Received goal_status for {msg.goal_id}, but current target is {current_target_id}. Ignoring.')
-            return
+        if msg.goal_id != current_target_id or self.last_completed_goal_id == msg.goal_id:
+            return False
             
-        # 이미 처리된 goal인지 확인 (중복 방지)
-        if self.last_completed_goal_id == msg.goal_id:
-            self.get_logger().debug(f'Goal {msg.goal_id} already processed. Ignoring duplicate status.')
-            return
-        
-        if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
-            # self.get_logger().info(f'Goal {msg.goal_id} reached! Distance: {msg.distance_to_goal:.3f}m. Moving to next target node.')
-            self.last_completed_goal_id = msg.goal_id  # 완료된 goal_id 기록
-            self.advance_to_next_node()
-            self.subgoal_published = False  # 다음 서브골 발행 준비
-        elif msg.status_code == 2:  # FAILED
-            self.get_logger().warn(f'Goal {msg.goal_id} failed! Distance: {msg.distance_to_goal:.3f}m')
-            self.subgoal_published = False  # 재시도 준비
-        elif msg.status_code == 3:  # ABORTED
-            self.get_logger().warn(f'Goal {msg.goal_id} aborted! Distance: {msg.distance_to_goal:.3f}m')
-            self.request_emergency_stop()
+        return True
+    
+    def _handle_goal_success(self, msg: ControllerGoalStatus):
+        """Handle successful goal completion"""
+        self.last_completed_goal_id = msg.goal_id
+        self.advance_to_next_node()
+        self.subgoal_published = False
+    
+    def _handle_goal_failure(self, msg: ControllerGoalStatus):
+        """Handle goal failure"""
+        self.get_logger().warn(f'Goal {msg.goal_id} failed! Distance: {msg.distance_to_goal:.3f}m')
+        self.subgoal_published = False
+    
+    def _handle_goal_abort(self, msg: ControllerGoalStatus):
+        """Handle goal abort"""
+        self.get_logger().warn(f'Goal {msg.goal_id} aborted! Distance: {msg.distance_to_goal:.3f}m')
+        self.request_emergency_stop()
     
     def planning_callback(self):
         """메인 행동 계획 루프"""
@@ -383,90 +384,73 @@ class SimpleBehaviorPlannerNode(Node):
             self.get_logger().info('All path nodes completed!')
             return None
     
+    def _create_map_pose(self, target_node: dict) -> PoseStamped:
+        """Create pose in map frame from target node"""
+        map_pose = PoseStamped()
+        map_pose.header = Header()
+        map_pose.header.stamp = self.get_clock().now().to_msg()
+        map_pose.header.frame_id = 'map'
+        
+        map_pose.pose.position.x = target_node['x']
+        map_pose.pose.position.y = target_node['y'] 
+        map_pose.pose.position.z = target_node['z']
+        map_pose.pose.orientation.w = 1.0
+        
+        return map_pose
+    
+    def _set_pose_orientation(self, pose: PoseStamped, target_node: dict):
+        """Set pose orientation based on node heading or current position"""
+        if 'heading' in target_node and target_node['heading'] is not None:
+            odom_heading_rad = self._convert_geographic_to_odom_heading(target_node['heading'])
+            pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
+            pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+        elif self.current_pose:
+            dx = pose.pose.position.x - self.current_pose.pose.position.x
+            dy = pose.pose.position.y - self.current_pose.pose.position.y
+            yaw = math.atan2(dy, dx)
+            pose.pose.orientation.z = math.sin(yaw / 2.0)
+            pose.pose.orientation.w = math.cos(yaw / 2.0)
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+
     def publish_subgoal(self, target_node: dict):
-        """서브골 발행 - map 좌표를 odom 좌표로 변환하여 발행"""
+        """Publish subgoal with coordinate transformation"""
         try:
-            # Create pose in map frame
-            map_pose = PoseStamped()
-            map_pose.header = Header()
-            map_pose.header.stamp = self.get_clock().now().to_msg()
-            map_pose.header.frame_id = 'map'
-            
-            # Set position in map frame (absolute UTM coordinates)
-            map_pose.pose.position.x = target_node['x']
-            map_pose.pose.position.y = target_node['y'] 
-            map_pose.pose.position.z = target_node['z']
-            map_pose.pose.orientation.w = 1.0  # Default orientation
-            
-            # Transform from map to odom frame  
+            map_pose = self._create_map_pose(target_node)
             transform = self.tf_buffer.lookup_transform('odom', 'map', rclpy.time.Time())
             odom_pose = tf2_geometry_msgs.do_transform_pose_stamped(map_pose, transform)
             
-            # Set frame_id and goal_id
-            odom_pose.header.frame_id = target_node['id']  # goal_id를 frame_id에 설정
-            
-            # 노드의 지리학적 heading을 odom 좌표계 heading으로 변환하여 orientation 설정
-            if 'heading' in target_node and target_node['heading'] is not None:
-                odom_heading_rad = self._convert_geographic_to_odom_heading(target_node['heading'])
-                
-                # Quaternion 변환 (yaw만 적용)
-                odom_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
-                odom_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
-                odom_pose.pose.orientation.x = 0.0
-                odom_pose.pose.orientation.y = 0.0
-            else:
-                # Fallback: 현재 위치에서 목표점으로의 방향으로 설정 (odom 좌표계에서)
-                if self.current_pose:
-                    dx = odom_pose.pose.position.x - self.current_pose.pose.position.x
-                    dy = odom_pose.pose.position.y - self.current_pose.pose.position.y
-                    yaw = math.atan2(dy, dx)
-                    
-                    # Quaternion 변환
-                    odom_pose.pose.orientation.z = math.sin(yaw / 2.0)
-                    odom_pose.pose.orientation.w = math.cos(yaw / 2.0)
-                    odom_pose.pose.orientation.x = 0.0
-                    odom_pose.pose.orientation.y = 0.0
+            odom_pose.header.frame_id = target_node['id']
+            self._set_pose_orientation(odom_pose, target_node)
             
             self.subgoal_pub.publish(odom_pose)
-            
-            # 서브골 발행 시마다 로그 출력
-            self.get_logger().info(f'Published NEW subgoal: Node {target_node["id"]} '
-                                 f'map({target_node["x"]:.2f}, {target_node["y"]:.2f}) -> '
-                                 f'odom({odom_pose.pose.position.x:.2f}, {odom_pose.pose.position.y:.2f})')
+            self.get_logger().info(f'Published subgoal: Node {target_node["id"]} at odom({odom_pose.pose.position.x:.2f}, {odom_pose.pose.position.y:.2f})')
         
         except Exception as e:
-            self.get_logger().warn(f'Failed to transform subgoal from map to odom: {str(e)}')
-            self.get_logger().warn(f'Error details: {type(e).__name__}')
-            
-            # Check what transforms are available
-            all_frames = self.tf_buffer.all_frames_as_string()
-            self.get_logger().warn(f'Available frames: {all_frames}')
-            
-            # Fallback: publish without transformation (assumes map==odom for now)
-            subgoal_msg = PoseStamped()
-            subgoal_msg.header = Header()
-            subgoal_msg.header.stamp = self.get_clock().now().to_msg()
-            subgoal_msg.header.frame_id = target_node['id']
-            
-            subgoal_msg.pose.position.x = target_node['x']
-            subgoal_msg.pose.position.y = target_node['y']
-            subgoal_msg.pose.position.z = target_node['z']
-            
-            # Fallback에서도 heading 적용
-            if 'heading' in target_node and target_node['heading'] is not None:
-                odom_heading_rad = self._convert_geographic_to_odom_heading(target_node['heading'])
-                subgoal_msg.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
-                subgoal_msg.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
-                subgoal_msg.pose.orientation.x = 0.0
-                subgoal_msg.pose.orientation.y = 0.0
-            else:
-                subgoal_msg.pose.orientation.w = 1.0
-            
-            if hasattr(self, 'subgoal_pub') and self.subgoal_pub is not None:
-                self.subgoal_pub.publish(subgoal_msg)
-                self.get_logger().warn(f'Published subgoal without TF transformation: Node {target_node["id"]} at absolute coords')
-            else:
-                self.get_logger().warn(f'Subgoal publisher not available in {self.waypoint_mode} mode')
+            self._publish_fallback_subgoal(target_node, str(e))
+    
+    def _publish_fallback_subgoal(self, target_node: dict, error_msg: str):
+        """Publish subgoal without TF transformation as fallback"""
+        self.get_logger().warn(f'TF transformation failed: {error_msg}')
+        
+        subgoal_msg = PoseStamped()
+        subgoal_msg.header = Header()
+        subgoal_msg.header.stamp = self.get_clock().now().to_msg()
+        subgoal_msg.header.frame_id = target_node['id']
+        
+        subgoal_msg.pose.position.x = target_node['x']
+        subgoal_msg.pose.position.y = target_node['y']
+        subgoal_msg.pose.position.z = target_node['z']
+        
+        self._set_pose_orientation(subgoal_msg, target_node)
+        
+        if hasattr(self, 'subgoal_pub') and self.subgoal_pub is not None:
+            self.subgoal_pub.publish(subgoal_msg)
+            self.get_logger().warn(f'Published fallback subgoal: Node {target_node["id"]}')
+        else:
+            self.get_logger().warn(f'Subgoal publisher not available in {self.waypoint_mode} mode')
     
     def advance_to_next_node(self):
         """다음 노드로 이동"""
@@ -540,14 +524,17 @@ class SimpleBehaviorPlannerNode(Node):
             # 현재 목표의 reverse heading 정보
             current_behavior_type = current_node.get('node_type', 1)
             waypoints_msg.current_goal_reverse_heading = self._is_reverse_behavior(current_behavior_type)
+            waypoints_msg.current_goal_node_type = current_behavior_type
             
             # 다음 목표들 설정
             waypoints_msg.next_waypoints = []
             waypoints_msg.next_waypoints_reverse_heading = []
+            waypoints_msg.next_waypoints_node_types = []
             for node in next_nodes:
                 waypoints_msg.next_waypoints.append(self.create_pose_stamped(node))
                 next_behavior_type = node.get('node_type', 1)
                 waypoints_msg.next_waypoints_reverse_heading.append(self._is_reverse_behavior(next_behavior_type))
+                waypoints_msg.next_waypoints_node_types.append(next_behavior_type)
             
             # 경로 정보 설정
             waypoints_msg.path_id = self.planned_path.path_id if self.planned_path else ""
@@ -572,47 +559,26 @@ class SimpleBehaviorPlannerNode(Node):
             return False
         
         try:
-            behavior_params = self.behavior_param_manager.get_parameters(behavior_type)
+            behavior_params = self.behavior_param_manager.get_behavior_params(behavior_type)
             return behavior_params.get('respect_reverse_heading', False)
         except Exception as e:
             self.get_logger().warn(f"Could not check reverse behavior for type {behavior_type}: {e}")
             return False
     
     def create_pose_stamped(self, node: dict) -> PoseStamped:
-        """노드에서 PoseStamped 메시지 생성 (odom 좌표로 변환)"""
+        """Create PoseStamped message from node with coordinate transformation"""
         try:
-            # Create pose in map frame
-            map_pose = PoseStamped()
-            map_pose.header.stamp = self.get_clock().now().to_msg()
-            map_pose.header.frame_id = 'map'
-            map_pose.pose.position.x = node['x']
-            map_pose.pose.position.y = node['y'] 
-            map_pose.pose.position.z = node['z']
+            map_pose = self._create_map_pose(node)
+            self._set_pose_orientation(map_pose, node)
             
-            # 노드의 지리학적 heading을 odom 좌표계 heading으로 변환하여 orientation 설정
-            if 'heading' in node and node['heading'] is not None:
-                odom_heading_rad = self._convert_geographic_to_odom_heading(node['heading'])
-                
-                # Quaternion 변환 (yaw만 적용)
-                map_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
-                map_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
-                map_pose.pose.orientation.x = 0.0
-                map_pose.pose.orientation.y = 0.0
-            else:
-                map_pose.pose.orientation.w = 1.0
-            
-            # Transform to odom frame
             transform = self.tf_buffer.lookup_transform('odom', 'map', rclpy.time.Time())
             odom_pose = tf2_geometry_msgs.do_transform_pose_stamped(map_pose, transform)
-            
-            # Set goal ID in frame_id for compatibility
             odom_pose.header.frame_id = node['id']
             
             return odom_pose
             
         except Exception as e:
             self.get_logger().warn(f'TF transform failed, using fallback: {str(e)}')
-            # Fallback without transformation
             fallback_pose = PoseStamped()
             fallback_pose.header.stamp = self.get_clock().now().to_msg()
             fallback_pose.header.frame_id = node['id']
@@ -620,15 +586,7 @@ class SimpleBehaviorPlannerNode(Node):
             fallback_pose.pose.position.y = node['y']
             fallback_pose.pose.position.z = node['z']
             
-            # Fallback에서도 heading 적용
-            if 'heading' in node and node['heading'] is not None:
-                odom_heading_rad = self._convert_geographic_to_odom_heading(node['heading'])
-                fallback_pose.pose.orientation.z = math.sin(odom_heading_rad / 2.0)
-                fallback_pose.pose.orientation.w = math.cos(odom_heading_rad / 2.0)
-                fallback_pose.pose.orientation.x = 0.0
-                fallback_pose.pose.orientation.y = 0.0
-            else:
-                fallback_pose.pose.orientation.w = 1.0
+            self._set_pose_orientation(fallback_pose, node)
             return fallback_pose
     
     def _update_behavior_parameters(self, node_type: int):
@@ -637,11 +595,6 @@ class SimpleBehaviorPlannerNode(Node):
             return
         
         try:
-            # DEBUG: Log behavior transition
-            self.get_logger().info(f"=== BEHAVIOR TRANSITION DEBUG ===")
-            self.get_logger().info(f"Previous behavior: {self.previous_node_type}")
-            self.get_logger().info(f"Current behavior: {self.current_node_type}")  
-            self.get_logger().info(f"Requested behavior: {node_type}")
             
             # Handle pause behaviors
             if self.behavior_param_manager.is_pause_behavior(node_type):
@@ -733,7 +686,6 @@ class SimpleBehaviorPlannerNode(Node):
             # Publish the parameter update
             self.mppi_param_pub.publish(msg)
             
-            self.get_logger().debug(f"Sent MPPI parameters for behavior {behavior_params.get('behavior_type', 1)}")
             
         except Exception as e:
             self.get_logger().error(f"Failed to send MPPI parameters: {e}")
@@ -786,7 +738,6 @@ class SimpleBehaviorPlannerNode(Node):
                 msg.current_behavior_desc = "Pause behavior"
             
             self.mppi_param_pub.publish(msg)
-            self.get_logger().debug(f"Sent pause (force_stop=True) parameters to MPPI, behavior_type: {msg.current_behavior_type}")
             
         except Exception as e:
             self.get_logger().error(f"Failed to send pause parameters: {e}")

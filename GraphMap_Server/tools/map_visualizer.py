@@ -362,7 +362,7 @@ class NodeGraphicsItem(QGraphicsEllipseItem):
         
         # Larger radius for special node types
         if node_type in [7, 8, 9, 10]:  # Pause, End, Traffic Light
-            new_radius = self.radius * 1.5
+            new_radius = self.radius * 0.5
             self.setRect(-new_radius, -new_radius, new_radius * 2, new_radius * 2)
     
     def hoverEnterEvent(self, event):

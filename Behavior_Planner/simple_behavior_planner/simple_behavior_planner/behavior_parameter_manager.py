@@ -36,8 +36,6 @@ class BehaviorParameterManager:
         self.logger.info(f"Loaded baseline params from: {smppi_config_path}")
         self.logger.info(f"Loaded {len(self.behavior_modifiers)} behavior modifiers")
         
-        # Log baseline values for debugging
-        self._log_baseline_params()
     
     def _load_smppi_baseline(self, config_path: str) -> Dict[str, Any]:
         """Load baseline parameters from SMPPI config file"""
@@ -180,11 +178,6 @@ class BehaviorParameterManager:
             'yaw_goal_tolerance': 0.25
         }
     
-    def _log_baseline_params(self):
-        """Log baseline parameters for debugging"""
-        self.logger.info("=== Baseline Parameters ===")
-        for key, value in self.baseline_params.items():
-            self.logger.info(f"  {key}: {value}")
     
     def get_behavior_params(self, node_type: int) -> Dict[str, Any]:
         """
@@ -204,18 +197,10 @@ class BehaviorParameterManager:
         multipliers = modifier.get('multipliers', {})
         overrides = modifier.get('overrides', {})
         
-        # DEBUG: Log loaded behavior modifier for the requested type
-        self.logger.info(f"=== DEBUG: Loaded behavior modifier for type {node_type} ===")
-        self.logger.info(f"  Description: {modifier.get('description', 'No description')}")
-        self.logger.info(f"  Multipliers: {multipliers}")
-        self.logger.info(f"  Overrides: {overrides}")
         
         # Start with baseline parameters
         calculated_params = self.baseline_params.copy()
         
-        # DEBUG: Log baseline velocity values
-        self.logger.info(f"  Baseline max_linear_velocity: {self.baseline_params.get('max_linear_velocity', 'NOT_FOUND')}")
-        self.logger.info(f"  Baseline min_linear_velocity: {self.baseline_params.get('min_linear_velocity', 'NOT_FOUND')}")
         
         # Apply multipliers
         for param_name, multiplier in multipliers.items():
@@ -223,18 +208,12 @@ class BehaviorParameterManager:
                 baseline_value = self.baseline_params[param_name]
                 calculated_params[param_name] = baseline_value * multiplier
                 
-                self.logger.info(f"  Applied multiplier {param_name}: {baseline_value} * {multiplier} = {calculated_params[param_name]}")
         
         # Apply overrides (absolute values)
         for param_name, override_value in overrides.items():
             old_value = calculated_params.get(param_name, 'NOT_FOUND')
             calculated_params[param_name] = override_value
-            self.logger.info(f"  Applied override {param_name}: {old_value} -> {override_value}")
         
-        # DEBUG: Log final velocity values  
-        self.logger.info(f"=== FINAL CALCULATED VALUES ===")
-        self.logger.info(f"  Final max_linear_velocity: {calculated_params.get('max_linear_velocity', 'NOT_FOUND')}")
-        self.logger.info(f"  Final min_linear_velocity: {calculated_params.get('min_linear_velocity', 'NOT_FOUND')}")
         
         # Add behavior-specific metadata
         calculated_params['behavior_type'] = node_type

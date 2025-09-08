@@ -42,6 +42,7 @@ class GoalCritic(BaseCritic):
         self.debug_level = params.get('debug_level', 1)
 
         self.multiple_waypoints = None
+        self.previous_node_type = None  # Track previous node type for behavior change detection
         print(f"[GoalCritic] xy_tol={self.xy_goal_tolerance}, yaw_tol={self.yaw_goal_tolerance}")
         print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}, vel_fac={self.lookahead_velocity_factor}, "
               f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
@@ -102,6 +103,7 @@ class GoalCritic(BaseCritic):
         self.last_target_direction = target_direction.detach().cpu()
 
         # Near-goal: blend target yaw towards desired final yaw to avoid flipping
+        # 이거 파라미터 때문에 안쓰고있을수도
         goal_vec = goal_pos - current_pos
         dist_to_goal = torch.norm(goal_vec)
         if (dist_to_goal < self.yaw_blend_distance):
@@ -121,16 +123,19 @@ class GoalCritic(BaseCritic):
         distances_to_lookahead = torch.norm(traj_positions - lookahead_point.view(1, 1, 2), dim=2)  # [K, T+1]
 
         # hinge on tolerance -> inside tol => 0
+        # xy_goal 점검 가까우면 0으로 줌
         hinge_d = self._relu(distances_to_lookahead - self.xy_goal_tolerance)
         lookahead_cost = (hinge_d * weights.view(1, -1)).sum(dim=1)  # [K]
 
         # 2) Heading alignment (final yaw vs target_yaw), hinge on yaw tolerance
+        # self.yaw_goal_tolerance도 체크해봐야될듯
         final_yaws = traj_yaws[:, -1]  # [K]
         yaw_errors = torch.abs(self.normalize_angle(final_yaws - target_yaw))
         hinge_yaw = self._relu(yaw_errors - self.yaw_goal_tolerance)
         heading_cost = self._huber(hinge_yaw, delta=0.5)  # smoother than square
 
         # 3) Path alignment cost (step-wise cosine alignment to target direction)
+        # 필요한지 체크
         if T_plus_1 > 1:
             steps = traj_positions[:, 1:, :] - traj_positions[:, :-1, :]  # [K, T, 2]
             step_norms = torch.norm(steps, dim=2, keepdim=True).clamp_min(1e-6)
@@ -142,6 +147,7 @@ class GoalCritic(BaseCritic):
             alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
 
         # 4) (옵션) Progress reward: 가까워질수록 비용을 깎음
+        # 필요한지 체크
         progress_term = torch.zeros(K, device=self.device, dtype=self.dtype)
         if self.use_progress_reward:
             init_d = torch.norm(traj_positions[:, 0, :] - goal_pos.view(1, 2), dim=1)
@@ -204,6 +210,18 @@ class GoalCritic(BaseCritic):
             wp.current_goal.pose.position.y
         ], device=self.device, dtype=self.dtype)
 
+        # Check for behavior change (node_type change)
+        current_node_type = getattr(wp, "current_goal_node_type", 1)
+        behavior_changed = (self.previous_node_type is not None and 
+                           current_node_type != self.previous_node_type)
+        
+        # Update previous node type
+        self.previous_node_type = current_node_type
+
+        # If behavior changed, use goal tracking only (no lookahead extension)
+        if behavior_changed:
+            return current_goal_pos
+
         total_lookahead = torch.clamp(
             self.lookahead_base_distance + self.lookahead_velocity_factor * current_vel_abs,
             self.lookahead_min_distance,
@@ -216,16 +234,16 @@ class GoalCritic(BaseCritic):
             direction = (current_goal_pos - current_pos) / (d_cur + 1e-9)
             return current_pos + direction * total_lookahead
 
-        # 가까우면 next_waypoints로 연장 (단, 다음이 후진 모드가 아닐 때만)
+        # 가까우면 next_waypoints로 연장
         next_wps = getattr(wp, "next_waypoints", None) or []
-        next_reverse_flags = getattr(wp, "next_waypoints_reverse_heading", None) or []
+        next_node_types = getattr(wp, "next_waypoints_node_types", None) or []
         
         if len(next_wps) == 0:
             return current_goal_pos
         
-        # 다음 waypoint가 후진 모드이면 lookahead를 현재 goal에 고정
-        if len(next_reverse_flags) > 0 and next_reverse_flags[0]:
-            # Next waypoint requires reverse heading - keep lookahead at current goal
+        # Check if next waypoint has different node_type (behavior change)
+        if len(next_node_types) > 0 and next_node_types[0] != current_node_type:
+            # Next waypoint has different behavior - keep lookahead at current goal
             return current_goal_pos
 
         remaining = float((total_lookahead - d_cur).item())

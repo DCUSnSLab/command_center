@@ -16,9 +16,11 @@ def _entropy(p: torch.Tensor) -> float:
     return float(-(p * (p + 1e-12).log()).sum().detach().cpu().item())
 
 def _omega_to_delta(v, omega, wheelbase, v_eps=1e-3):
+    """각속도 -> 조향각"""
     if abs(v) < v_eps:
         return 0.0
-    return math.atan((omega * wheelbase) / max(1e-6, v))
+    safe_v = max(1e-6, abs(v)) if v >= 0 else min(-1e-6, v)
+    return math.atan((omega * wheelbase) / safe_v) # 이 식에서 알아서 부호 반대
 
 class SMPPIOptimizer:
     def __init__(self, params: dict):
@@ -107,7 +109,7 @@ class SMPPIOptimizer:
             U_samples, A_samples, eps = self._sample_U_and_build_A()
             traj = self._simulate_from_A(A_samples)  # [K,T+1,3]
             traj_costs = self._evaluate_trajectories(traj, A_samples)  # [K]
-            action_costs = self._compute_action_sequence_cost(A_samples)  # [K]
+            action_costs = self._compute_action_sequence_cost(A_samples)  # 제어값 변화량에 대한 cost
             total_costs = traj_costs + self.lambda_action * action_costs
 
             # importance weights
@@ -117,6 +119,7 @@ class SMPPIOptimizer:
 
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
+            
             self.control_sequence = self.control_sequence + dU
 
             # ====== DEBUG METRICS ======
@@ -172,6 +175,12 @@ class SMPPIOptimizer:
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
         if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
             a0 = self.last_cmd_applied.clone()
+        
+        # Debug: last_cmd_applied 출력
+        # print(f"[SMPPI] last_cmd_applied: v={float(self.last_cmd_applied[0]):.3f}, δ={float(self.last_cmd_applied[1]):.3f}")
+        # print(f"[SMPPI] a0_odom: v={float(a0_odom[0]):.3f}, δ={float(a0_odom[1]):.3f}")
+        # print(f"[SMPPI] a0_final: v={float(a0[0]):.3f}, δ={float(a0[1]):.3f}")
+        
         a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         A_samples = self._integrate_U_to_A(a0, U_samples)
@@ -199,6 +208,7 @@ class SMPPIOptimizer:
         x0 = self.robot_state[:3].unsqueeze(0).repeat(K, 1)
         if hasattr(self.motion_model, 'rollout_batch'):
             return self.motion_model.rollout_batch(x0, A_samples, self.dt)
+        # 아래는 안씀
         traj = torch.zeros(K, self.T + 1, 3, device=self.device, dtype=self.dtype)
         traj[:, 0, :] = x0
         cur = x0
@@ -267,34 +277,28 @@ class SMPPIOptimizer:
         v_next, delta_next = float(A[0,0]), float(A[0,1])
         
 
-        # δ -> ω 변환 (Twist 규약 준수, 후진 시 조향 방향 반전)
+        # δ -> ω 변환 (Ackermann Model 공식 사용 - 후진/전진 자동 처리)
         if abs(v_next) < 1e-3:
             omega_next = 0.0
         else:
-            # 후진 시 조향 방향 반전: 물리적으로 정확한 조향-회전 관계
-            if v_next < 0:  # 후진
-                omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
-            else:  # 전진
-                omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
-
+            omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
+        
         # Twist publish
         cmd = Twist()
         cmd.linear.x  = v_next
-        cmd.angular.z = omega_next
         
-
-        # Convert omega back to delta for verification
+        # 흠 왜 됨?
+        if v_next > 0:
+            cmd.angular.z = omega_next
+        else:
+            cmd.angular.z = -omega_next
+        
+        # Steering angle verification (for internal consistency)
         if abs(v_next) < 1e-3:
             delta_recovered = 0.0
         else:
-            # 후진 시 역변환에도 동일한 물리 모델 적용
-            if v_next < 0:  # 후진
-                delta_recovered = math.atan(-(omega_next * self.wheelbase) / v_next)
-            else:  # 전진
-                delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
-        
-        # Debug log - show steering angle in radians (not rad/s)
-        # print(f"[SMPPI] Control: v={v_next:.3f} m/s, δ={delta_next:.3f} rad, ω={omega_next:.3f} rad/s, δ_recovered={delta_recovered:.3f} rad")
+            # Standard Ackermann conversion: δ = atan(ω * L / v)
+            delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
 
         # 반드시 last_cmd_applied는 [v, δ]로 저장 (내부 일관성)
         self.last_cmd_applied = torch.tensor([v_next, delta_next],

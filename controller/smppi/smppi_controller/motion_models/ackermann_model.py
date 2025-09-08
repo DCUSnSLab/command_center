@@ -57,6 +57,14 @@ class AckermannModel:
         y_next = y + v * torch.sin(theta) * dt
         theta_next = theta + w * dt
         
+        # Debug: 후진 상태에서 차량 동작 확인
+        # reverse_mask = v < -0.1  # 후진 중인 차량 확인
+        # if torch.any(reverse_mask):
+        #     reverse_indices = torch.where(reverse_mask)[0]
+        #     for idx in reverse_indices[:3]:  # 처음 3개만 출력
+        #         print(f"[AckermannModel] Reverse motion - idx:{idx} v:{v[idx]:.3f} w:{w[idx]:.3f} δ:{steering_angles[idx]:.3f}")
+        #         print(f"  State: x:{x[idx]:.3f} y:{y[idx]:.3f} θ:{theta[idx]:.3f} → x_next:{x_next[idx]:.3f} y_next:{y_next[idx]:.3f} θ_next:{theta_next[idx]:.3f}")
+        
         # Normalize angles
         theta_next = self.normalize_angle(theta_next)
         
@@ -84,7 +92,8 @@ class AckermannModel:
             velocity
         )
         
-        # Compute steering angle: delta = atan(w * L / v)
+        # Ackermann 조향각 계산: δ = atan(ω * L / v)
+        # 후진 시 (v < 0)도 자연스럽게 처리됨 - v와 조향각이 올바른 부호를 가짐
         steering_angles = torch.atan(angular_velocity * self.wheelbase / safe_velocity)
         
         # Clamp to maximum steering angle
@@ -108,7 +117,7 @@ class AckermannModel:
         Returns:
             angular_velocity: [K] angular velocities
         """
-        # w = v * tan(delta) / L
+        # Ackermann 각속도 계산: ω = v * tan(δ) / L
         angular_velocity = velocity * torch.tan(steering_angle) / self.wheelbase
         
         return angular_velocity
@@ -149,10 +158,11 @@ class AckermannModel:
         v = controls[:, 0]
         w = controls[:, 1]
         
-        # Convert to steering angle and validate
+        # Ackermann Model에서 조향각 변환 및 검증 (단일 처리)
+        # ω -> δ 변환하여 조향각 한계 적용
         steering_angles = self.angular_to_steering(v, w)
         
-        # Convert back to angular velocity (this applies steering limits)
+        # δ -> ω 역변환으로 한계가 적용된 각속도 획득
         w_validated = self.steering_to_angular(v, steering_angles)
         
         # Check turning radius constraint

@@ -14,7 +14,7 @@ def generate_launch_description():
     # Launch arguments
     current_position_topic_arg = DeclareLaunchArgument(
         'current_position_topic',
-        default_value='/odometry/local',
+        default_value='/odom',
         description='Current vehicle position topic (Odometry)'
     )
     
