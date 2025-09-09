@@ -293,13 +293,15 @@ class SMPPIOptimizer:
         else:
             cmd.angular.z = -omega_next
         
-        # Steering angle verification (for internal consistency)
-        if abs(v_next) < 1e-3:
-            delta_recovered = 0.0
+        # Goal 관련 코스트 시각화 (매 10회마다)
+        if hasattr(self, '_goal_debug_counter'):
+            self._goal_debug_counter += 1
         else:
-            # Standard Ackermann conversion: δ = atan(ω * L / v)
-            delta_recovered = math.atan((omega_next * self.wheelbase) / v_next)
-
+            self._goal_debug_counter = 0
+            
+        if self._goal_debug_counter % 10 == 0:
+            self._print_goal_cost_status()
+        
         # 반드시 last_cmd_applied는 [v, δ]로 저장 (내부 일관성)
         self.last_cmd_applied = torch.tensor([v_next, delta_next],
                                             device=self.device, dtype=self.dtype)
@@ -318,7 +320,9 @@ class SMPPIOptimizer:
 
     def reset(self):
         self.control_sequence.zero_()
-        print("[SMPPI] Optimizer reset (U cleared)")
+        # Also reset last_cmd_applied to prevent inconsistency after parameter changes
+        self.last_cmd_applied = torch.zeros(2, device=self.device, dtype=self.dtype)
+        print("[SMPPI] Optimizer reset (U and last_cmd_applied cleared)")
 
     # ---------- dynamic parameter updates ----------
     def update_velocity_limits(self, min_v: float = None, max_v: float = None, 
@@ -352,3 +356,58 @@ class SMPPIOptimizer:
         최근 optimize()에서 모은 디버그 값 반환
         """
         return dict(self.debug)
+    
+    def normalize_angle(self, angle):
+        """Normalize angle to [-π, π]"""
+        if isinstance(angle, torch.Tensor):
+            return torch.atan2(torch.sin(angle), torch.cos(angle))
+        else:
+            return math.atan2(math.sin(angle), math.cos(angle))
+    
+    def _print_goal_cost_status(self):
+        """Goal 관련 코스트 상세 시각화"""
+        print("=" * 80)
+        print("[GOAL COST ANALYSIS]")
+        
+        # 로봇과 골 상태
+        if hasattr(self, 'robot_state') and self.robot_state is not None:
+            x, y, yaw, v_odom, w_odom = [float(x) for x in self.robot_state[:5]]
+            print(f"🚗  Robot: pos=({x:.2f},{y:.2f}) | yaw={yaw:.3f} | v={v_odom:.3f} | ω={w_odom:.3f}")
+        
+        if hasattr(self, 'goal_state') and self.goal_state is not None:
+            gx, gy, gyaw = [float(x) for x in self.goal_state[:3]]
+            print(f"🎯  Goal: pos=({gx:.2f},{gy:.2f}) | yaw={gyaw:.3f}")
+            
+            # 거리 계산
+            if hasattr(self, 'robot_state') and self.robot_state is not None:
+                robot_pos = self.robot_state[:2]
+                goal_pos = self.goal_state[:2]
+                distance = float(torch.norm(goal_pos - robot_pos))
+                direction = goal_pos - robot_pos
+                direction = direction / (torch.norm(direction) + 1e-9)
+                target_yaw = float(torch.atan2(direction[1], direction[0]))
+                yaw_error = abs(self.normalize_angle(yaw - target_yaw))
+                print(f"📏  Distance: {distance:.3f}m | Target yaw: {target_yaw:.3f} | Yaw error: {yaw_error:.3f}")
+        
+        # Goal critic 정보 (critics에서 goal critic 찾기)
+        for critic in self.critics:
+            if hasattr(critic, '__class__') and 'Goal' in critic.__class__.__name__:
+                print(f"⚖️   Goal Critic: weight={critic.weight:.1f}")
+                if hasattr(critic, 'xy_goal_tolerance'):
+                    print(f"      xy_tol={critic.xy_goal_tolerance:.3f} | yaw_tol={critic.yaw_goal_tolerance:.3f}")
+                if hasattr(critic, 'lookahead_base_distance'):
+                    print(f"      lookahead: base={critic.lookahead_base_distance:.1f} | "
+                          f"vel_fac={critic.lookahead_velocity_factor:.1f} | "
+                          f"range=[{critic.lookahead_min_distance:.1f}-{critic.lookahead_max_distance:.1f}]")
+                if hasattr(critic, 'respect_reverse_heading'):
+                    print(f"      reverse_heading={critic.respect_reverse_heading} | "
+                          f"use_multi_wp={critic.use_multiple_waypoints}")
+                
+                # Lookahead point 정보
+                if hasattr(critic, 'last_lookahead_point') and critic.last_lookahead_point is not None:
+                    lp = critic.last_lookahead_point
+                    ly = critic.last_lookahead_yaw if hasattr(critic, 'last_lookahead_yaw') else 0.0
+                    print(f"👀  Lookahead: pos=({float(lp[0]):.2f},{float(lp[1]):.2f}) | yaw={float(ly):.3f}")
+                break
+        
+        print("=" * 80)

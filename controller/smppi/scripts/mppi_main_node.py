@@ -695,6 +695,11 @@ class MPPIMainNode(Node):
                     w_bounds=[self.vehicle_params.get('min_angular_velocity', -1.16), 
                              self.vehicle_params.get('max_angular_velocity', 1.16)]
                 )
+            
+            # Reset control sequence to prevent oscillation after parameter changes
+            if hasattr(self.optimizer, 'reset'):
+                self.optimizer.reset()
+                self.get_logger().info("SMPPI control sequence reset after parameter update")
         
         # self.get_logger().info(f"Vehicle parameters updated: "
         #                      f"max_v={self.vehicle_params['max_linear_velocity']:.1f}m/s, "

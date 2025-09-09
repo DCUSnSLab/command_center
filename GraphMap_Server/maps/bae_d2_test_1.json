@@ -532,7 +532,7 @@
         {
             "ID": "N0024",
             "AdminCode": "110",
-            "NodeType": 3,
+            "NodeType": 7,
             "ITSNodeID": "ITS_N1005",
             "Maker": "한국도로공사",
             "UpdateDate": "20250822",
