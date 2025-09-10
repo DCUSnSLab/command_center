@@ -3,7 +3,7 @@ import math
 import torch
 from typing import Optional, Any
 from .base_critic import BaseCritic
-
+import numpy as np
 
 class GoalCritic(BaseCritic):
     """
@@ -86,32 +86,50 @@ class GoalCritic(BaseCritic):
         # --- Lookahead point (multi-waypoints aware)
         lookahead_point = self._compute_multiple_waypoints_lookahead(current_pos, v_abs, goal_pos)
         
-        # --- Target direction / yaw (with reverse-aware option)
+        # === DIAGNOSTIC LOGGING: Track lookahead changes ===
+        prev_lookahead = getattr(self, '_prev_lookahead_point', None)
+        if prev_lookahead is not None:
+            prev_lookahead_tensor = torch.tensor(prev_lookahead, device=self.device, dtype=self.dtype)
+            lookahead_jump = float(torch.norm(lookahead_point - prev_lookahead_tensor).detach().cpu().item())
+            if lookahead_jump > 0.5:  # Significant jump > 0.5m
+                print(f"🚨 [LOOKAHEAD JUMP] {lookahead_jump:.3f}m")
+                print(f"   From: {prev_lookahead}")
+                print(f"   To:   {lookahead_point.detach().cpu().numpy()}")
+        
+        # Store current lookahead for next iteration
+        self._prev_lookahead_point = lookahead_point.detach().cpu().numpy()
+        
+        # --- SIMPLIFIED: Distance-only tracking (target_yaw disabled for stability) ---
         lookahead_vec = lookahead_point - current_pos
         lookahead_dist = torch.norm(lookahead_vec) + 1e-9
         target_direction = lookahead_vec / lookahead_dist
-        target_yaw = torch.atan2(target_direction[1], target_direction[0])
         
-        # waypoint Pose 관련 lookahead 디버깅 블록  
-        # Apply reverse heading when respect_reverse_heading is True (reverse mode)
-        if self.respect_reverse_heading:
-            target_yaw = self.normalize_angle(target_yaw + math.pi)
+        # === COMMENTED OUT: Target yaw calculation (causing oscillation) ===
+        # target_yaw = torch.atan2(target_direction[1], target_direction[0])
+        # 
+        # # waypoint Pose 관련 lookahead 디버깅 블록  
+        # # Apply reverse heading when respect_reverse_heading is True (reverse mode)
+        # if self.respect_reverse_heading:
+        #     target_yaw = self.normalize_angle(target_yaw + math.pi)
+        #
+        # # Near-goal: blend target yaw towards desired final yaw to avoid flipping
+        # # 이거 파라미터 때문에 안쓰고있을수도
+        # goal_vec = goal_pos - current_pos
+        # dist_to_goal = torch.norm(goal_vec)
+        # if (dist_to_goal < self.yaw_blend_distance):
+        #     alpha = (self.yaw_blend_distance - dist_to_goal) / self.yaw_blend_distance  # 0..1
+        #     blended = self.normalize_angle(goal_state[2])
+        #     # slerp-like in angle space
+        #     dyaw = self.normalize_angle(blended - target_yaw)
+        #     target_yaw = self.normalize_angle(target_yaw + alpha * dyaw)
+        
+        # Dummy target_yaw for visualization (current robot yaw)
+        target_yaw = robot_state[2] if robot_state is not None else torch.zeros(1, device=self.device, dtype=self.dtype)
 
         # store lookahead point, yaw and target direction for viz without holding the graph
         self.last_lookahead_point = lookahead_point.detach().cpu()
         self.last_lookahead_yaw = target_yaw.detach().cpu()
         self.last_target_direction = target_direction.detach().cpu()
-
-        # Near-goal: blend target yaw towards desired final yaw to avoid flipping
-        # 이거 파라미터 때문에 안쓰고있을수도
-        goal_vec = goal_pos - current_pos
-        dist_to_goal = torch.norm(goal_vec)
-        if (dist_to_goal < self.yaw_blend_distance):
-            alpha = (self.yaw_blend_distance - dist_to_goal) / self.yaw_blend_distance  # 0..1
-            blended = self.normalize_angle(goal_state[2])
-            # slerp-like in angle space
-            dyaw = self.normalize_angle(blended - target_yaw)
-            target_yaw = self.normalize_angle(target_yaw + alpha * dyaw)
 
         # --- Trajectory slices
         traj_positions = trajectories[:, :, :2]  # [K, T+1, 2]
@@ -127,24 +145,32 @@ class GoalCritic(BaseCritic):
         hinge_d = self._relu(distances_to_lookahead - self.xy_goal_tolerance)
         lookahead_cost = (hinge_d * weights.view(1, -1)).sum(dim=1)  # [K]
 
+        # === COMMENTED OUT: Heading alignment cost (causing oscillation) ===
         # 2) Heading alignment (final yaw vs target_yaw), hinge on yaw tolerance
-        # self.yaw_goal_tolerance도 체크해봐야될듯
-        final_yaws = traj_yaws[:, -1]  # [K]
-        yaw_errors = torch.abs(self.normalize_angle(final_yaws - target_yaw))
-        hinge_yaw = self._relu(yaw_errors - self.yaw_goal_tolerance)
-        heading_cost = self._huber(hinge_yaw, delta=0.5)  # smoother than square
+        # # self.yaw_goal_tolerance도 체크해봐야될듯
+        # final_yaws = traj_yaws[:, -1]  # [K]
+        # yaw_errors = torch.abs(self.normalize_angle(final_yaws - target_yaw))
+        # hinge_yaw = self._relu(yaw_errors - self.yaw_goal_tolerance)
+        # heading_cost = self._huber(hinge_yaw, delta=0.5)  # smoother than square
+        
+        # DISABLED: Set heading cost to zero for pure distance tracking
+        heading_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
 
+        # === COMMENTED OUT: Path alignment cost (causing oscillation) ===
         # 3) Path alignment cost (step-wise cosine alignment to target direction)
-        # 필요한지 체크
-        if T_plus_1 > 1:
-            steps = traj_positions[:, 1:, :] - traj_positions[:, :-1, :]  # [K, T, 2]
-            step_norms = torch.norm(steps, dim=2, keepdim=True).clamp_min(1e-6)
-            step_dirs = steps / step_norms
-            alignment = torch.sum(step_dirs * target_direction.view(1, 1, 2), dim=2)  # cos in [-1,1]
-            # 1 - cos -> [0,2], use huber for smoothness
-            alignment_cost = self._huber(1.0 - alignment).mean(dim=1)
-        else:
-            alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
+        # # 필요한지 체크
+        # if T_plus_1 > 1:
+        #     steps = traj_positions[:, 1:, :] - traj_positions[:, :-1, :]  # [K, T, 2]
+        #     step_norms = torch.norm(steps, dim=2, keepdim=True).clamp_min(1e-6)
+        #     step_dirs = steps / step_norms
+        #     alignment = torch.sum(step_dirs * target_direction.view(1, 1, 2), dim=2)  # cos in [-1,1]
+        #     # 1 - cos -> [0,2], use huber for smoothness
+        #     alignment_cost = self._huber(1.0 - alignment).mean(dim=1)
+        # else:
+        #     alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
+        
+        # DISABLED: Set alignment cost to zero for pure distance tracking
+        alignment_cost = torch.zeros(K, device=self.device, dtype=self.dtype)
 
         # 4) (옵션) Progress reward: 가까워질수록 비용을 깎음
         # 필요한지 체크
@@ -155,14 +181,43 @@ class GoalCritic(BaseCritic):
             progress = init_d - final_d  # >0 이면 진전
             progress_term = -progress  # 비용에 더하므로, 진전이 크면 더 작은 비용
 
-        # --- Combine with scales
+        # --- Combine with scales (SIMPLIFIED: distance-only) ---
         distance_term = self.distance_scale * lookahead_cost
-        angle_term = self.angle_scale * heading_cost
-        alignment_term = self.alignment_scale * alignment_cost
+        # angle_term = self.angle_scale * heading_cost  # DISABLED
+        # alignment_term = self.alignment_scale * alignment_cost  # DISABLED
         progress_term_scaled = self.progress_scale * progress_term
         
-        total_cost = distance_term + angle_term + alignment_term + progress_term_scaled
+        # === DIAGNOSTIC LOGGING: Track distance cost changes ===
+        current_distance_cost = float(distance_term.mean().detach().cpu().item())
+        prev_distance_cost = getattr(self, '_prev_distance_cost', current_distance_cost)
+        distance_cost_change = abs(current_distance_cost - prev_distance_cost)
         
+        if distance_cost_change > 10.0:  # Significant cost change
+            print(f"💥 [DISTANCE COST JUMP] {distance_cost_change:.3f}")
+            print(f"   From: {prev_distance_cost:.3f} -> To: {current_distance_cost:.3f}")
+            print(f"   Min distance to lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
+        
+        # Store for next iteration
+        self._prev_distance_cost = current_distance_cost
+        
+        # SIMPLIFIED: Only distance and progress terms active
+        total_cost = distance_term + progress_term_scaled
+        
+        # === DEBUG OUTPUT (simplified for distance-only tracking) ===
+        lookahead_cpu = lookahead_point.detach().cpu().numpy()
+        robot_pos_cpu = current_pos.detach().cpu().numpy()
+        robot_to_lookahead_dist = float(torch.norm(lookahead_point - current_pos).detach().cpu().item())
+        
+        # Regular debug output (reduced frequency)
+        debug_counter = getattr(self, '_debug_counter', 0) + 1
+        self._debug_counter = debug_counter
+        
+        if debug_counter % 10 == 0:  # Every 10th call
+            print(f"[DISTANCE-ONLY] robot: {np.round(robot_pos_cpu, 3)}")
+            print(f"[DISTANCE-ONLY] lookahead: {np.round(lookahead_cpu, 3)} (dist: {robot_to_lookahead_dist:.3f}m)")
+            print(f"[DISTANCE-ONLY] distance_cost: {current_distance_cost:.3f}")
+            print(f"[DISTANCE-ONLY] min_traj_dist_to_lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
+
         return self.apply_weight(total_cost)
 
     def _compute_nav2_lookahead(self, current_pos: torch.Tensor, current_vel_abs: torch.Tensor,
@@ -214,6 +269,13 @@ class GoalCritic(BaseCritic):
         current_node_type = getattr(wp, "current_goal_node_type", 1)
         behavior_changed = (self.previous_node_type is not None and 
                            current_node_type != self.previous_node_type)
+        
+        # === DIAGNOSTIC LOGGING: Track behavior changes ===
+        if behavior_changed:
+            print(f"🔄 [BEHAVIOR CHANGE] {self.previous_node_type} -> {current_node_type}")
+            print(f"   Current pos: {current_pos.detach().cpu().numpy()}")
+            print(f"   Goal pos: {current_goal_pos.detach().cpu().numpy()}")
+            print(f"   Forcing lookahead to goal (no extension)")
         
         # Update previous node type
         self.previous_node_type = current_node_type

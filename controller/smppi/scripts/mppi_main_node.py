@@ -119,8 +119,8 @@ class MPPIMainNode(Node):
         self.declare_parameter('vehicle.min_turning_radius', 1.54)
         self.declare_parameter('vehicle.max_linear_velocity', 2.0)
         self.declare_parameter('vehicle.min_linear_velocity', 0.0)
-        self.declare_parameter('vehicle.max_angular_velocity', 1.0)
-        self.declare_parameter('vehicle.min_angular_velocity', -1.0)
+        self.declare_parameter('vehicle.max_angular_velocity', 0.5)
+        self.declare_parameter('vehicle.min_angular_velocity', -0.5)
         
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
@@ -364,7 +364,25 @@ class MPPIMainNode(Node):
     
     def params_update_callback(self, msg: MPPIParams):
         """Handle dynamic parameter updates"""
-        self.get_logger().info("Received MPPI parameter update request")
+        # === DIAGNOSTIC LOGGING: Track parameter updates ===
+        update_types = []
+        if msg.update_optimizer: update_types.append('optimizer')
+        if msg.update_vehicle: update_types.append('vehicle')
+        if msg.update_costs: update_types.append('costs')
+        if msg.update_lookahead: update_types.append('lookahead')
+        if msg.update_goal_critic: update_types.append('goal_critic')
+        if msg.update_obstacle_critic: update_types.append('obstacle_critic')
+        if msg.update_control: update_types.append('control')
+        
+        self.get_logger().info(f"📨 [MPPI PARAM UPDATE] Types: {update_types}")
+        self.get_logger().info(f"   Behavior: {msg.current_behavior_type} - {msg.current_behavior_desc}")
+        
+        if msg.update_vehicle:
+            self.get_logger().info(f"   Vehicle: max_v={msg.max_linear_velocity}, min_v={msg.min_linear_velocity}")
+        if msg.update_goal_critic:
+            self.get_logger().info(f"   Goal: respect_reverse={msg.respect_reverse_heading}")
+        if msg.update_lookahead:
+            self.get_logger().info(f"   Lookahead: base={msg.lookahead_base_distance}, vel_factor={msg.lookahead_velocity_factor}")
         
         try:
             # Validate and update optimizer parameters
@@ -405,10 +423,14 @@ class MPPIMainNode(Node):
             
             # Update current behavior mode information
             if msg.current_behavior_type > 0:  # Valid behavior type
+                prev_behavior = self.current_behavior_type
                 self.current_behavior_type = msg.current_behavior_type
                 self.current_behavior_desc = msg.current_behavior_desc if msg.current_behavior_desc else f"Behavior {msg.current_behavior_type}"
                 
-            self.get_logger().info("MPPI parameters updated successfully")
+                if prev_behavior != self.current_behavior_type:
+                    self.get_logger().info(f"🎨 [BEHAVIOR MODE CHANGE] {prev_behavior} -> {self.current_behavior_type}")
+                
+            self.get_logger().info("✅ MPPI parameters updated successfully")
             
         except Exception as e:
             self.get_logger().error(f"Failed to update MPPI parameters: {e}")

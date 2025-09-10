@@ -24,8 +24,10 @@
       wheelbase: 0.65                     # 휠베이스 길이 [m]
       max_linear_velocity: 2.0            # 최대 선속도 [m/s]
       min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
-      max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
-      min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      # max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
+      # min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      max_angular_velocity: 1.2          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)  
+      min_angular_velocity: -1.2         # 최소 각속도 [rad/s]
       max_steering_angle: 0.3665          # 최대 조향각 [rad] (21도)
       min_turning_radius: 1.70            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
       

@@ -120,7 +120,22 @@ class SMPPIOptimizer:
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
             
+            # DEBUG: Control sequence 변화량 추적
+            old_U = self.control_sequence.clone()
             self.control_sequence = self.control_sequence + dU
+            dU_norm = torch.norm(dU).item()
+            max_dU_delta = torch.max(torch.abs(dU[:, 1])).item()  # 조향각 변화량
+            
+            # 매 5회마다 출력
+            if hasattr(self, '_control_debug_counter'):
+                self._control_debug_counter += 1
+            else:
+                self._control_debug_counter = 0
+                
+            # if self._control_debug_counter % 5 == 0 and dU_norm > 0.01:
+            #     print(f"[CONTROL UPDATE] dU_norm: {dU_norm:.4f} | max_delta_change: {max_dU_delta:.4f}")
+            #     print(f"  U[0:3] before: [{old_U[0,0]:.3f}, {old_U[0,1]:.3f}], [{old_U[1,0]:.3f}, {old_U[1,1]:.3f}], [{old_U[2,0]:.3f}, {old_U[2,1]:.3f}]")
+            #     print(f"  U[0:3] after:  [{self.control_sequence[0,0]:.3f}, {self.control_sequence[0,1]:.3f}], [{self.control_sequence[1,0]:.3f}, {self.control_sequence[1,1]:.3f}], [{self.control_sequence[2,0]:.3f}, {self.control_sequence[2,1]:.3f}]")
 
             # ====== DEBUG METRICS ======
             with torch.no_grad():
@@ -161,26 +176,27 @@ class SMPPIOptimizer:
             v_odom = float(self.robot_state[3])
             w_odom = float(self.robot_state[4])      # yaw rate
             delta_odom = _omega_to_delta(v_odom, w_odom, self.wheelbase)  # <<< 변환
-            a0_odom = torch.tensor([v_odom, delta_odom],
+            a0_odom = torch.tensor([abs(v_odom), delta_odom],
                                 device=self.device, dtype=self.dtype)
         else:
             a0_odom = torch.zeros(2, device=self.device, dtype=self.dtype)
-        alpha = 0.0
+        
         noise = torch.randn(self.K, self.T, 2, device=self.device, dtype=self.dtype) * self.noise_std
         U_nom = self.control_sequence.unsqueeze(0).repeat(self.K, 1, 1)
         U_samples = U_nom + noise
         eps = U_samples - U_nom
         # a0 = self.robot_state[3:5] if self.robot_state is not None \
         #      else torch.zeros(2, device=self.device, dtype=self.dtype)
+        alpha = 0.3
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
         if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
             a0 = self.last_cmd_applied.clone()
         
         # Debug: last_cmd_applied 출력
         # print(f"[SMPPI] last_cmd_applied: v={float(self.last_cmd_applied[0]):.3f}, δ={float(self.last_cmd_applied[1]):.3f}")
-        # print(f"[SMPPI] a0_odom: v={float(a0_odom[0]):.3f}, δ={float(a0_odom[1]):.3f}")
+        # print(f"[SMPPI] a0_odom: v={float(abs(a0_odom[0])):.3f}, δ={float(a0_odom[1]):.3f}")
         # print(f"[SMPPI] a0_final: v={float(a0[0]):.3f}, δ={float(a0[1]):.3f}")
-        
+        # print(f"[SMPPI] w_min: {self.w_min}, w_max: {self.w_max}")
         a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         A_samples = self._integrate_U_to_A(a0, U_samples)
@@ -261,8 +277,23 @@ class SMPPIOptimizer:
 
     # ---------- horizon shift ----------
     def shift_control_sequence(self):
+        # DEBUG: Tail value 변화 추적
+        old_tail = self.control_sequence[-1].clone()
+        old_second_last = self.control_sequence[-2].clone()
+        
         self.control_sequence = torch.roll(self.control_sequence, -1, dims=0)
         self.control_sequence[-1] = 0.0  # derivative control의 일반적 꼬리값
+        
+        # Tail discontinuity 추적
+        if hasattr(self, '_tail_debug_counter'):
+            self._tail_debug_counter += 1
+        else:
+            self._tail_debug_counter = 0
+            
+        tail_change = torch.norm(old_second_last - self.control_sequence[-1]).item()
+        if self._tail_debug_counter % 20 == 0 and tail_change > 0.1:
+            print(f"[TAIL SHIFT] old_tail: [{old_tail[0]:.3f}, {old_tail[1]:.3f}] -> new_tail: [0.0, 0.0]")
+            print(f"  tail_discontinuity: {tail_change:.4f} (old_second_last vs new_tail)")
 
     def get_control_command(self) -> Twist:
         if self.robot_state is None:
@@ -272,9 +303,25 @@ class SMPPIOptimizer:
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)[0]   # [T,2] = [v, δ]
         A_unclamped = A[0].clone()  # Store unclamped values for debugging
+        
+        # DEBUG: Clipping 전후 비교
+        v_before, delta_before = float(A[0,0]), float(A[0,1])
         A[:, 0] = torch.clamp(A[:, 0], self.v_min, self.v_max)
         A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)
         v_next, delta_next = float(A[0,0]), float(A[0,1])
+        
+        # Clipping 발생 추적
+        if hasattr(self, '_clipping_debug_counter'):
+            self._clipping_debug_counter += 1
+        else:
+            self._clipping_debug_counter = 0
+            
+        delta_clipped = abs(delta_before - delta_next) > 1e-6
+        if self._clipping_debug_counter % 10 == 0 and delta_clipped:
+            print(f"[CLIPPING] delta: {delta_before:.4f} -> {delta_next:.4f} (limits: [{self.w_min:.3f}, {self.w_max:.3f}])")
+            omega_before = (v_next / self.wheelbase) * math.tan(delta_before) if abs(v_next) > 1e-3 else 0.0
+            omega_after = (v_next / self.wheelbase) * math.tan(delta_next) if abs(v_next) > 1e-3 else 0.0
+            print(f"  omega: {omega_before:.4f} -> {omega_after:.4f}")
         
 
         # δ -> ω 변환 (Ackermann Model 공식 사용 - 후진/전진 자동 처리)
@@ -283,6 +330,16 @@ class SMPPIOptimizer:
         else:
             omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
         
+        # === DIAGNOSTIC LOGGING: Track command changes ===
+        prev_cmd = getattr(self, '_prev_cmd', [0.0, 0.0])
+        cmd_v_change = abs(v_next - prev_cmd[0])
+        cmd_w_change = abs(omega_next - prev_cmd[1]) if v_next > 0 else abs(-omega_next - prev_cmd[1])
+        
+        # Log significant command changes
+        if cmd_w_change > 0.5:  # Angular velocity change > 0.5 rad/s
+            print(f"🎮 [CMD CHANGE] v: {prev_cmd[0]:.3f}->{v_next:.3f} ({cmd_v_change:.3f}), ω: {prev_cmd[1]:.3f}->{omega_next if v_next > 0 else -omega_next:.3f} ({cmd_w_change:.3f})")
+            print(f"   δ: {float(self.last_cmd_applied[1]):.4f} -> {delta_next:.4f}")
+        
         # Twist publish
         cmd = Twist()
         cmd.linear.x  = v_next
@@ -290,8 +347,10 @@ class SMPPIOptimizer:
         # 흠 왜 됨?
         if v_next > 0:
             cmd.angular.z = omega_next
+            self._prev_cmd = [v_next, omega_next]
         else:
             cmd.angular.z = -omega_next
+            self._prev_cmd = [v_next, -omega_next]
         
         # Goal 관련 코스트 시각화 (매 10회마다)
         if hasattr(self, '_goal_debug_counter'):
@@ -365,49 +424,50 @@ class SMPPIOptimizer:
             return math.atan2(math.sin(angle), math.cos(angle))
     
     def _print_goal_cost_status(self):
-        """Goal 관련 코스트 상세 시각화"""
-        print("=" * 80)
-        print("[GOAL COST ANALYSIS]")
+        # """Goal 관련 코스트 상세 시각화"""
+        # print("=" * 80)
+        # print("[GOAL COST ANALYSIS]")
         
-        # 로봇과 골 상태
-        if hasattr(self, 'robot_state') and self.robot_state is not None:
-            x, y, yaw, v_odom, w_odom = [float(x) for x in self.robot_state[:5]]
-            print(f"🚗  Robot: pos=({x:.2f},{y:.2f}) | yaw={yaw:.3f} | v={v_odom:.3f} | ω={w_odom:.3f}")
+        # # 로봇과 골 상태
+        # if hasattr(self, 'robot_state') and self.robot_state is not None:
+        #     x, y, yaw, v_odom, w_odom = [float(x) for x in self.robot_state[:5]]
+        #     print(f"🚗  Robot: pos=({x:.2f},{y:.2f}) | yaw={yaw:.3f} | v={v_odom:.3f} | ω={w_odom:.3f}")
         
-        if hasattr(self, 'goal_state') and self.goal_state is not None:
-            gx, gy, gyaw = [float(x) for x in self.goal_state[:3]]
-            print(f"🎯  Goal: pos=({gx:.2f},{gy:.2f}) | yaw={gyaw:.3f}")
+        # if hasattr(self, 'goal_state') and self.goal_state is not None:
+        #     gx, gy, gyaw = [float(x) for x in self.goal_state[:3]]
+        #     print(f"🎯  Goal: pos=({gx:.2f},{gy:.2f}) | yaw={gyaw:.3f}")
             
-            # 거리 계산
-            if hasattr(self, 'robot_state') and self.robot_state is not None:
-                robot_pos = self.robot_state[:2]
-                goal_pos = self.goal_state[:2]
-                distance = float(torch.norm(goal_pos - robot_pos))
-                direction = goal_pos - robot_pos
-                direction = direction / (torch.norm(direction) + 1e-9)
-                target_yaw = float(torch.atan2(direction[1], direction[0]))
-                yaw_error = abs(self.normalize_angle(yaw - target_yaw))
-                print(f"📏  Distance: {distance:.3f}m | Target yaw: {target_yaw:.3f} | Yaw error: {yaw_error:.3f}")
+        #     # 거리 계산
+        #     if hasattr(self, 'robot_state') and self.robot_state is not None:
+        #         robot_pos = self.robot_state[:2]
+        #         goal_pos = self.goal_state[:2]
+        #         distance = float(torch.norm(goal_pos - robot_pos))
+        #         direction = goal_pos - robot_pos
+        #         direction = direction / (torch.norm(direction) + 1e-9)
+        #         target_yaw = float(torch.atan2(direction[1], direction[0]))
+        #         yaw_error = abs(self.normalize_angle(yaw - target_yaw))
+        #         print(f"📏  Distance: {distance:.3f}m | Target yaw: {target_yaw:.3f} | Yaw error: {yaw_error:.3f}")
         
-        # Goal critic 정보 (critics에서 goal critic 찾기)
-        for critic in self.critics:
-            if hasattr(critic, '__class__') and 'Goal' in critic.__class__.__name__:
-                print(f"⚖️   Goal Critic: weight={critic.weight:.1f}")
-                if hasattr(critic, 'xy_goal_tolerance'):
-                    print(f"      xy_tol={critic.xy_goal_tolerance:.3f} | yaw_tol={critic.yaw_goal_tolerance:.3f}")
-                if hasattr(critic, 'lookahead_base_distance'):
-                    print(f"      lookahead: base={critic.lookahead_base_distance:.1f} | "
-                          f"vel_fac={critic.lookahead_velocity_factor:.1f} | "
-                          f"range=[{critic.lookahead_min_distance:.1f}-{critic.lookahead_max_distance:.1f}]")
-                if hasattr(critic, 'respect_reverse_heading'):
-                    print(f"      reverse_heading={critic.respect_reverse_heading} | "
-                          f"use_multi_wp={critic.use_multiple_waypoints}")
+        # # Goal critic 정보 (critics에서 goal critic 찾기)
+        # for critic in self.critics:
+        #     if hasattr(critic, '__class__') and 'Goal' in critic.__class__.__name__:
+        #         print(f"⚖️   Goal Critic: weight={critic.weight:.1f}")
+        #         if hasattr(critic, 'xy_goal_tolerance'):
+        #             print(f"      xy_tol={critic.xy_goal_tolerance:.3f} | yaw_tol={critic.yaw_goal_tolerance:.3f}")
+        #         if hasattr(critic, 'lookahead_base_distance'):
+        #             print(f"      lookahead: base={critic.lookahead_base_distance:.1f} | "
+        #                   f"vel_fac={critic.lookahead_velocity_factor:.1f} | "
+        #                   f"range=[{critic.lookahead_min_distance:.1f}-{critic.lookahead_max_distance:.1f}]")
+        #         if hasattr(critic, 'respect_reverse_heading'):
+        #             print(f"      reverse_heading={critic.respect_reverse_heading} | "
+        #                   f"use_multi_wp={critic.use_multiple_waypoints}")
                 
-                # Lookahead point 정보
-                if hasattr(critic, 'last_lookahead_point') and critic.last_lookahead_point is not None:
-                    lp = critic.last_lookahead_point
-                    ly = critic.last_lookahead_yaw if hasattr(critic, 'last_lookahead_yaw') else 0.0
-                    print(f"👀  Lookahead: pos=({float(lp[0]):.2f},{float(lp[1]):.2f}) | yaw={float(ly):.3f}")
-                break
+        #         # Lookahead point 정보
+        #         if hasattr(critic, 'last_lookahead_point') and critic.last_lookahead_point is not None:
+        #             lp = critic.last_lookahead_point
+        #             ly = critic.last_lookahead_yaw if hasattr(critic, 'last_lookahead_yaw') else 0.0
+        #             print(f"👀  Lookahead: pos=({float(lp[0]):.2f},{float(lp[1]):.2f}) | yaw={float(ly):.3f}")
+        #         break
         
-        print("=" * 80)
+        # print("=" * 80)
+        pass

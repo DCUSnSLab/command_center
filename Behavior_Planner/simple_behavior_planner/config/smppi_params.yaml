@@ -4,7 +4,7 @@
     control_frequency: 20.0               # 제어 주기 [Hz]
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
-    goal_reached_threshold: 2.0           # 목표 도달 거리 임계값 [m]
+    goal_reached_threshold: 1.5           # 목표 도달 거리 임계값 [m]
     waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
 
     # SMPPI 최적화 파라미터
@@ -24,8 +24,10 @@
       wheelbase: 0.65                     # 휠베이스 길이 [m]
       max_linear_velocity: 2.0            # 최대 선속도 [m/s]
       min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
-      max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
-      min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      # max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
+      # min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      max_angular_velocity: 1.2          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)  
+      min_angular_velocity: -1.2         # 최소 각속도 [rad/s]
       max_steering_angle: 0.3665          # 최대 조향각 [rad] (21도)
       min_turning_radius: 1.70            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
       
@@ -46,7 +48,7 @@
       lookahead:
         base_distance: 3.0                # 기본 lookahead 거리 [m]
         velocity_factor: 1.2              # 속도 비례 팩터 [s] (거리 = 속도 × 팩터)
-        min_distance: 1.0                 # 최소 lookahead 거리 [m]
+        min_distance: 3.0                 # 최소 lookahead 거리 [m]
         max_distance: 6.0                 # 최대 lookahead 거리 [m]
       
       # 디버깅 설정

@@ -610,15 +610,30 @@ class SimpleBehaviorPlannerNode(Node):
                 self.get_logger().error(f"Invalid parameters for behavior {node_type}, skipping update")
                 return
             
+            # === DIAGNOSTIC LOGGING: Track parameter changes ===
+            prev_type = self.current_node_type
+            behavior_desc = self.behavior_param_manager.get_behavior_description(node_type)
+            
+            # Log key parameter changes
+            key_params = {
+                'max_linear_velocity': behavior_params.get('max_linear_velocity', 'N/A'),
+                'min_linear_velocity': behavior_params.get('min_linear_velocity', 'N/A'),
+                'respect_reverse_heading': behavior_params.get('respect_reverse_heading', False),
+                'lookahead_base_distance': behavior_params.get('lookahead_base_distance', 'N/A'),
+                'goal_weight': behavior_params.get('goal_weight', 'N/A')
+            }
+            
+            self.get_logger().info(f"🔄 [PARAM UPDATE] {prev_type}->{node_type}: {behavior_desc}")
+            for param, value in key_params.items():
+                if value != 'N/A':
+                    self.get_logger().info(f"   {param}: {value}")
+            
             # Send parameters to MPPI
             self._send_mppi_parameters(behavior_params)
             
             # Update current behavior state
             self.previous_node_type = self.current_node_type
             self.current_node_type = node_type
-            
-            behavior_desc = self.behavior_param_manager.get_behavior_description(node_type)
-            self.get_logger().info(f"Updated to behavior {node_type}: {behavior_desc}")
             
         except Exception as e:
             self.get_logger().error(f"Failed to update behavior parameters: {e}")
