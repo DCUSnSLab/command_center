@@ -176,6 +176,7 @@ class GoalCritic(BaseCritic):
         # 필요한지 체크
         progress_term = torch.zeros(K, device=self.device, dtype=self.dtype)
         if self.use_progress_reward:
+            print("이거씀??????????????????????????????????")
             init_d = torch.norm(traj_positions[:, 0, :] - goal_pos.view(1, 2), dim=1)
             final_d = torch.norm(traj_positions[:, -1, :] - goal_pos.view(1, 2), dim=1)
             progress = init_d - final_d  # >0 이면 진전

@@ -372,8 +372,6 @@ class SMPPIOptimizer:
         a0 = self.last_cmd_applied
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)
-        A[..., 0] = torch.clamp(A[..., 0], self.v_min, self.v_max)
-        A[..., 1] = torch.clamp(A[..., 1], self.w_min, self.w_max)
         traj = self._simulate_from_A(A)
         return traj[0]
 
