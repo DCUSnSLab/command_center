@@ -125,7 +125,7 @@ class SMPPIOptimizer:
             self.control_sequence = self.control_sequence + dU
             dU_norm = torch.norm(dU).item()
             max_dU_delta = torch.max(torch.abs(dU[:, 1])).item()  # 조향각 변화량
-            
+            print(f"max_dU : {max_dU_delta}~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
             # 매 5회마다 출력
             if hasattr(self, '_control_debug_counter'):
                 self._control_debug_counter += 1
