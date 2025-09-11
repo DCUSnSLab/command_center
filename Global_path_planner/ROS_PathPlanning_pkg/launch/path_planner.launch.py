@@ -12,17 +12,11 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='true') # 시뮬레이션 환경인 경우 true, 밖이면 false
 
-    map_file = PathJoinSubstitution([
-                    FindPackageShare('gmserver'),
-                    'maps',
-                    'new_path.json'
-                ])
-
     # Declare launch argument for map file path
     map_file_arg = DeclareLaunchArgument(
         'map_file_path',
         # default_value='/home/d2-521-30/repo/local_ws/src/GraphMap_Server/maps/3x3_map.json',
-        default_value=map_file,
+        default_value='',
         description='Path to the JSON map file'
     )
     
