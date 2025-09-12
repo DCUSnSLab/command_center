@@ -187,7 +187,7 @@ class SMPPIOptimizer:
         eps = U_samples - U_nom
         # a0 = self.robot_state[3:5] if self.robot_state is not None \
         #      else torch.zeros(2, device=self.device, dtype=self.dtype)
-        alpha = 0.3
+        alpha = 0.0
         a0 = alpha * a0_odom + (1 - alpha) * self.last_cmd_applied
         if abs(float(self.robot_state[3])) < 0.05:  # v_odom < 5 cm/s
             a0 = self.last_cmd_applied.clone()
