@@ -213,11 +213,11 @@ class GoalCritic(BaseCritic):
         debug_counter = getattr(self, '_debug_counter', 0) + 1
         self._debug_counter = debug_counter
         
-        if debug_counter % 10 == 0:  # Every 10th call
-            print(f"[DISTANCE-ONLY] robot: {np.round(robot_pos_cpu, 3)}")
-            print(f"[DISTANCE-ONLY] lookahead: {np.round(lookahead_cpu, 3)} (dist: {robot_to_lookahead_dist:.3f}m)")
-            print(f"[DISTANCE-ONLY] distance_cost: {current_distance_cost:.3f}")
-            print(f"[DISTANCE-ONLY] min_traj_dist_to_lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
+        # if debug_counter % 10 == 0:  # Every 10th call
+        #     print(f"[DISTANCE-ONLY] robot: {np.round(robot_pos_cpu, 3)}")
+        #     print(f"[DISTANCE-ONLY] lookahead: {np.round(lookahead_cpu, 3)} (dist: {robot_to_lookahead_dist:.3f}m)")
+        #     print(f"[DISTANCE-ONLY] distance_cost: {current_distance_cost:.3f}")
+        #     print(f"[DISTANCE-ONLY] min_traj_dist_to_lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
 
         return self.apply_weight(total_cost)
 
@@ -265,19 +265,10 @@ class GoalCritic(BaseCritic):
             wp.current_goal.pose.position.x,
             wp.current_goal.pose.position.y
         ], device=self.device, dtype=self.dtype)
-
-        # Check for behavior change (node_type change)
+        
         current_node_type = getattr(wp, "current_goal_node_type", 1)
         behavior_changed = (self.previous_node_type is not None and 
                            current_node_type != self.previous_node_type)
-        
-        # === DIAGNOSTIC LOGGING: Track behavior changes ===
-        if behavior_changed:
-            print(f"🔄 [BEHAVIOR CHANGE] {self.previous_node_type} -> {current_node_type}")
-            print(f"   Current pos: {current_pos.detach().cpu().numpy()}")
-            print(f"   Goal pos: {current_goal_pos.detach().cpu().numpy()}")
-            print(f"   Forcing lookahead to goal (no extension)")
-        
         # Update previous node type
         self.previous_node_type = current_node_type
 
@@ -310,13 +301,25 @@ class GoalCritic(BaseCritic):
             return current_goal_pos
 
         remaining = float((total_lookahead - d_cur).item())
-        return self._extend_lookahead_through_waypoints(current_goal_pos, remaining, next_wps)
+        return self._extend_lookahead_through_waypoints(current_goal_pos, remaining, next_wps, next_node_types, current_node_type)
 
-    def _extend_lookahead_through_waypoints(self, start_pos: torch.Tensor, remaining_distance: float, next_waypoints: list) -> torch.Tensor:
+    def _extend_lookahead_through_waypoints(self, start_pos: torch.Tensor, remaining_distance: float, 
+                                          next_waypoints: list, next_node_types: list, current_node_type: int) -> torch.Tensor:
         current = start_pos
         remaining = float(remaining_distance)
 
-        for waypoint in next_waypoints:
+        for i, waypoint in enumerate(next_waypoints):
+            # Check if this waypoint has different node_type
+            # If next_node_types is shorter than next_waypoints, assume same type as current for remaining waypoints
+            if i < len(next_node_types):
+                waypoint_node_type = next_node_types[i]
+                
+                if waypoint_node_type != current_node_type:
+                    # Different behavior type - stop lookahead extension here
+                    # Return current position (don't extend lookahead beyond behavior boundary)
+                    return current
+            # If no node_type info available, assume same as current (continue extending)
+            
             next_pos = torch.tensor(
                 [waypoint.pose.position.x, waypoint.pose.position.y],
                 device=self.device, dtype=self.dtype

@@ -125,7 +125,7 @@ class SMPPIOptimizer:
             self.control_sequence = self.control_sequence + dU
             dU_norm = torch.norm(dU).item()
             max_dU_delta = torch.max(torch.abs(dU[:, 1])).item()  # 조향각 변화량
-            print(f"max_dU : {max_dU_delta}~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+            # print(f"max_dU : {max_dU_delta}~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
             # 매 5회마다 출력
             if hasattr(self, '_control_debug_counter'):
                 self._control_debug_counter += 1
@@ -291,9 +291,9 @@ class SMPPIOptimizer:
             self._tail_debug_counter = 0
             
         tail_change = torch.norm(old_second_last - self.control_sequence[-1]).item()
-        if self._tail_debug_counter % 20 == 0 and tail_change > 0.1:
-            print(f"[TAIL SHIFT] old_tail: [{old_tail[0]:.3f}, {old_tail[1]:.3f}] -> new_tail: [0.0, 0.0]")
-            print(f"  tail_discontinuity: {tail_change:.4f} (old_second_last vs new_tail)")
+        # if self._tail_debug_counter % 20 == 0 and tail_change > 0.1:
+            # print(f"[TAIL SHIFT] old_tail: [{old_tail[0]:.3f}, {old_tail[1]:.3f}] -> new_tail: [0.0, 0.0]")
+            # print(f"  tail_discontinuity: {tail_change:.4f} (old_second_last vs new_tail)")
 
     def get_control_command(self) -> Twist:
         if self.robot_state is None:
@@ -394,8 +394,8 @@ class SMPPIOptimizer:
         if max_w is not None:
             self.w_max = max_w
         
-        print(f"[SMPPI] Velocity limits updated: v_min={self.v_min:.2f}, v_max={self.v_max:.2f}, "
-              f"w_min={self.w_min:.3f}, w_max={self.w_max:.3f}")
+        # print(f"[SMPPI] Velocity limits updated: v_min={self.v_min:.2f}, v_max={self.v_max:.2f}, "
+        #       f"w_min={self.w_min:.3f}, w_max={self.w_max:.3f}")
     
     def set_action_bounds(self, v_bounds: list = None, w_bounds: list = None):
         """Alternative method for setting action bounds"""
@@ -404,8 +404,8 @@ class SMPPIOptimizer:
         if w_bounds and len(w_bounds) == 2:
             self.w_min, self.w_max = w_bounds[0], w_bounds[1]
         
-        print(f"[SMPPI] Action bounds updated: v=[{self.v_min:.2f}, {self.v_max:.2f}], "
-              f"w=[{self.w_min:.3f}, {self.w_max:.3f}]")
+        # print(f"[SMPPI] Action bounds updated: v=[{self.v_min:.2f}, {self.v_max:.2f}], "
+        #       f"w=[{self.w_min:.3f}, {self.w_max:.3f}]")
 
     # ---------- expose debug ----------
     def get_debug(self) -> Dict[str, Any]:

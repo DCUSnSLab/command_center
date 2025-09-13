@@ -27,7 +27,7 @@
           goal_weight: 2.5              # 250% (매우 정확하게)
           lookahead_base_distance: 0.6  # 60% (짧게)
           xy_goal_tolerance: 0.4        # 40% (엄격하게)
-          goal_reached_threshold: 0.6   # 50% (더 정밀한 도달 판정)
+          goal_reached_threshold: 0.5   # 50% (더 정밀한 도달 판정)
         overrides:
           min_linear_velocity: 0.0
           
@@ -37,7 +37,7 @@
           goal_weight: 3.0              # 300% (매우 정확하게)
           xy_goal_tolerance: 0.3        # 30% (매우 엄격하게)
           lookahead_base_distance: 0.5  # 50% (매우 짧게)
-          goal_reached_threshold: 0.2   # 40% (매우 정밀한 도달 판정)
+          goal_reached_threshold: 0.5   # 40% (매우 정밀한 도달 판정)
         overrides:
           max_linear_velocity: 0.0      # 전진 속도 0
           min_linear_velocity: -0.8     # 느린 후진 속도
