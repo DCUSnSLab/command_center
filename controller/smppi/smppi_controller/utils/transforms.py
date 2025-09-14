@@ -225,3 +225,15 @@ class Transforms:
         min_distance = distances[min_index]
         
         return int(min_index), float(min_distance)
+
+    def omega_cap_from_v(v: float, L: float, delta_max: float, ay_max: float, v_min: float=0.1) -> float:
+        v = max(abs(v), v_min)
+        omega_geom = (v / L) * math.tan(delta_max)
+        omega_fric = ay_max / v
+        return min(omega_geom, omega_fric)
+
+    def delta_cap_from_v(v: float, L: float, delta_max: float, ay_max: float, v_min: float=0.1) -> float:
+        v = max(abs(v), v_min)
+        # tan(δ) ≤ L*ay_max / v^2  →  δ ≤ atan(L*ay_max / v^2)
+        dyn = math.atan((L * ay_max) / (v * v))
+        return min(delta_max, dyn)

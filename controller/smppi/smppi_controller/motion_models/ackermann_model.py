@@ -19,7 +19,8 @@ class AckermannModel:
         self.wheelbase = params.get('wheelbase', 1.0)
         self.max_steering_angle = params.get('max_steering_angle', math.pi / 4)
         self.min_turning_radius = params.get('min_turning_radius', 0.5)
-        
+        self.max_lateral_acc = params.get('max_lateral_acc', 4.0)
+        self.min_speed_for_cap = params.get('min_speed_for_cap', 0.1)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
         
@@ -28,49 +29,35 @@ class AckermannModel:
     def forward(self, states: torch.Tensor, controls: torch.Tensor, dt: float) -> torch.Tensor:
         """
         Forward integrate Ackermann dynamics
-        
+
         Args:
-            states: [K, 3] current states (x, y, theta)
-            controls: [K, 2] control inputs (v, w)
-            dt: Time step
-            
+            states:   [K, 3] current states (x, y, theta)
+            controls: [K, 2] control inputs (v, delta)   # ← 여기 명확히!
+            dt:       Time step
+
         Returns:
             next_states: [K, 3] next states
         """
-        batch_size = states.shape[0]
-        
-        # Current state
-        x = states[:, 0]      # [K]
-        y = states[:, 1]      # [K]  
-        theta = states[:, 2]  # [K]
-        
-        # Control inputs
-        v = controls[:, 0]    # [K] linear velocity
-        w = controls[:, 1]    # [K] angular velocity
-        
-        # Convert angular velocity to steering angle
-        # w = v * tan(delta) / L  =>  delta = atan(w * L / v)
-        steering_angles = self.angular_to_steering(v, w)
-        
-        # Ackermann kinematics
-        x_next = x + v * torch.cos(theta) * dt
-        y_next = y + v * torch.sin(theta) * dt
+        # State
+        x     = states[:, 0]
+        y     = states[:, 1]
+        theta = states[:, 2]
+
+        # Controls (v, δ)
+        v     = controls[:, 0]
+        delta = controls[:, 1]
+
+        # yaw rate from (v, δ): ω = v * tan(δ) / L
+        w = v * torch.tan(delta) / self.wheelbase
+
+        # Kinematics
+        x_next     = x     + v * torch.cos(theta) * dt
+        y_next     = y     + v * torch.sin(theta) * dt
         theta_next = theta + w * dt
-        
-        # Debug: 후진 상태에서 차량 동작 확인
-        # reverse_mask = v < -0.1  # 후진 중인 차량 확인
-        # if torch.any(reverse_mask):
-        #     reverse_indices = torch.where(reverse_mask)[0]
-        #     for idx in reverse_indices[:3]:  # 처음 3개만 출력
-        #         print(f"[AckermannModel] Reverse motion - idx:{idx} v:{v[idx]:.3f} w:{w[idx]:.3f} δ:{steering_angles[idx]:.3f}")
-        #         print(f"  State: x:{x[idx]:.3f} y:{y[idx]:.3f} θ:{theta[idx]:.3f} → x_next:{x_next[idx]:.3f} y_next:{y_next[idx]:.3f} θ_next:{theta_next[idx]:.3f}")
-        
-        # Normalize angles
+
+        # Normalize
         theta_next = self.normalize_angle(theta_next)
-        
-        # Stack results
         next_states = torch.stack([x_next, y_next, theta_next], dim=1)
-        
         return next_states
     
     def angular_to_steering(self, velocity: torch.Tensor, 
@@ -145,37 +132,41 @@ class AckermannModel:
         
         return radius
     
-    def validate_controls(self, controls: torch.Tensor) -> torch.Tensor:
+    # def validate_controls(self, controls: torch.Tensor) -> torch.Tensor:
+    #     v = controls[:, 0]
+    #     w = controls[:, 1]
+    #     steering_angles = self.angular_to_steering(v, w)
+    #     w_validated = self.steering_to_angular(v, steering_angles)
+    #     turning_radii = self.get_turning_radius(v, w_validated)
+    #     invalid_mask = turning_radii < self.min_turning_radius
+    #     if torch.any(invalid_mask):
+    #         w_validated[invalid_mask] = v[invalid_mask] / self.min_turning_radius * torch.sign(w_validated[invalid_mask])
+    #     return torch.stack([v, w_validated], dim=1)
+
+    def validate_controls(self, controls: torch.Tensor, maybe_velocity: torch.Tensor=None) -> torch.Tensor:
         """
-        Validate and constrain control inputs based on vehicle limits
-        
-        Args:
-            controls: [K, 2] control inputs (v, w)
-            
-        Returns:
-            valid_controls: [K, 2] validated controls
+        controls: [K, 2]  -> [:,0]=v, [:,1]=delta
+        maybe_velocity: [K] (옵션) 상태에서 꺼낸 현재 속도
         """
-        v = controls[:, 0]
-        w = controls[:, 1]
+        v = controls[:, 0] if maybe_velocity is None else maybe_velocity
+        v = torch.clamp(torch.abs(v), min=self.min_speed_for_cap)
+
+        delta = controls[:, 1]
+        # 정적 δ 한계
+        delta = torch.clamp(delta, -self.max_steering_angle, self.max_steering_angle)
+
+        # 동적 δ 한계: δ ≤ atan(L*ay_max / v^2)
+        delta_static = torch.tensor(self.max_steering_angle, device=controls.device, dtype=controls.dtype)
+        if self.min_turning_radius is not None and self.min_turning_radius > 0.0:
+            delta_rmin = math.atan(self.wheelbase / self.min_turning_radius)
+            delta_static = torch.minimum(delta_static, torch.tensor(delta_rmin, device=controls.device, dtype=controls.dtype))
+
+        delta = torch.clamp(delta, -delta_static, +delta_static)
         
-        # Ackermann Model에서 조향각 변환 및 검증 (단일 처리)
-        # ω -> δ 변환하여 조향각 한계 적용
-        steering_angles = self.angular_to_steering(v, w)
-        
-        # δ -> ω 역변환으로 한계가 적용된 각속도 획득
-        w_validated = self.steering_to_angular(v, steering_angles)
-        
-        # Check turning radius constraint
-        turning_radii = self.get_turning_radius(v, w_validated)
-        
-        # Apply minimum turning radius constraint
-        invalid_mask = turning_radii < self.min_turning_radius
-        if torch.any(invalid_mask):
-            # Reduce angular velocity for trajectories violating min radius
-            w_validated[invalid_mask] = v[invalid_mask] / self.min_turning_radius * torch.sign(w_validated[invalid_mask])
-        
-        return torch.stack([v, w_validated], dim=1)
-    
+        out = controls.clone()
+        out[:, 1] = delta
+        return out
+
     def normalize_angle(self, angle: torch.Tensor) -> torch.Tensor:
         """Normalize angle to [-pi, pi]"""
         return torch.atan2(torch.sin(angle), torch.cos(angle))

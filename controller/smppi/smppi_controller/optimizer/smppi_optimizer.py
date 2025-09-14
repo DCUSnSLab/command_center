@@ -49,6 +49,8 @@ class SMPPIOptimizer:
         self.wheelbase = params.get('wheelbase', 0.65)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
+        self.min_speed_for_cap = params.get('min_speed_for_cap', 0.10)
+        self.max_lateral_acc = params.get('max_lateral_acc', 3.9)
 
         # U (derivative control)
         self.control_sequence = torch.zeros(self.T, 2, device=self.device, dtype=self.dtype)
@@ -307,29 +309,58 @@ class SMPPIOptimizer:
         # DEBUG: Clipping 전후 비교
         v_before, delta_before = float(A[0,0]), float(A[0,1])
         A[:, 0] = torch.clamp(A[:, 0], self.v_min, self.v_max)
-        A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)
+        A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)  # 주: 현 구조상 w_min/w_max는 δ 한계로 쓰이는 중
         v_next, delta_next = float(A[0,0]), float(A[0,1])
-        
+
+        # === NEW: speed-dependent steering cap (δ_dyn) ============================
+        # 파라미터 준비 (없으면 안전 기본값 사용)
+        L      = float(getattr(self, 'wheelbase', 2.8))
+        dmax   = float(getattr(self, 'max_steering_angle', 0.52))   # ≈ 30°
+        ay_max = float(getattr(self, 'max_lateral_acc',  3.9))      # ≈ 0.4 g
+        v_min  = float(getattr(self, 'min_speed_for_cap', 0.10))    # 0으로 나눔 방지
+
+        v_abs = max(abs(v_next), v_min)
+        # δ ≤ min(δ_max, atan(L*ay_max / v^2))
+        delta_dyn_max = min(dmax, math.atan((L * ay_max) / (v_abs * v_abs)))
+        delta_before_dyn = delta_next
+        delta_next = max(-delta_dyn_max, min(delta_dyn_max, delta_next))
+        # ==========================================================================
+
         # Clipping 발생 추적
         if hasattr(self, '_clipping_debug_counter'):
             self._clipping_debug_counter += 1
         else:
             self._clipping_debug_counter = 0
             
-        delta_clipped = abs(delta_before - delta_next) > 1e-6
+        delta_clipped = abs(delta_before - delta_next) > 1e-6 or abs(delta_before_dyn - delta_next) > 1e-6
         if self._clipping_debug_counter % 10 == 0 and delta_clipped:
-            print(f"[CLIPPING] delta: {delta_before:.4f} -> {delta_next:.4f} (limits: [{self.w_min:.3f}, {self.w_max:.3f}])")
-            omega_before = (v_next / self.wheelbase) * math.tan(delta_before) if abs(v_next) > 1e-3 else 0.0
-            omega_after = (v_next / self.wheelbase) * math.tan(delta_next) if abs(v_next) > 1e-3 else 0.0
-            print(f"  omega: {omega_before:.4f} -> {omega_after:.4f}")
+            print(f"[CLIPPING] delta: {delta_before:.4f} -> {delta_next:.4f} (static:[{self.w_min:.3f},{self.w_max:.3f}], dyn_max:{delta_dyn_max:.4f})")
+            omega_tmp_before = (v_abs / L) * math.tan(delta_before) if v_abs > 1e-3 else 0.0
+            omega_tmp_after  = (v_abs / L) * math.tan(delta_next)   if v_abs > 1e-3 else 0.0
+            print(f"  omega_est(v-abs): {omega_tmp_before:.4f} -> {omega_tmp_after:.4f}")
         
 
         # δ -> ω 변환 (Ackermann Model 공식 사용 - 후진/전진 자동 처리)
-        if abs(v_next) < 1e-3:
+        if v_abs < 1e-3:
             omega_next = 0.0
         else:
-            omega_next = (v_next / self.wheelbase) * math.tan(delta_next)
+            omega_next = (v_next / L) * math.tan(delta_next)
         
+        # === NEW: speed-dependent yaw cap (ω_cap) + δ 재동기화 ====================
+        # ω_max(v) = min( (v/L)*tan(δ_max), ay_max / v )
+        omega_geom = (v_abs / L) * math.tan(dmax)
+        omega_fric = ay_max / v_abs
+        omega_cap  = min(omega_geom, omega_fric)
+
+        omega_before_cap = omega_next
+        omega_next = max(-omega_cap, min(omega_cap, omega_next))
+
+        if abs(omega_before_cap - omega_next) > 1e-6 and v_abs > 1e-3:
+            # ω가 잘렸으면 δ도 일치되게 재계산 (크기 동기화, 방향은 기존 δ 부호 유지)
+            delta_mag = math.atan((L * abs(omega_next)) / v_abs)
+            delta_next = math.copysign(delta_mag, delta_next)
+        # ==========================================================================
+
         # === DIAGNOSTIC LOGGING: Track command changes ===
         prev_cmd = getattr(self, '_prev_cmd', [0.0, 0.0])
         cmd_v_change = abs(v_next - prev_cmd[0])
@@ -344,14 +375,15 @@ class SMPPIOptimizer:
         cmd = Twist()
         cmd.linear.x  = v_next
         
-        # 흠 왜 됨?
-        if v_next > 0:
-            cmd.angular.z = omega_next
-            self._prev_cmd = [v_next, omega_next]
-        else:
-            cmd.angular.z = -omega_next
-            self._prev_cmd = [v_next, -omega_next]
-        
+        # 흠 왜 되지? --- 왜 쓰지말라지
+        # if v_next > 0:
+        #     cmd.angular.z = omega_next
+        #     self._prev_cmd = [v_next, omega_next]
+        # else:
+        #     cmd.angular.z = -omega_next
+        #     self._prev_cmd = [v_next, -omega_next]
+        cmd.angular.z = omega_next
+        self._prev_cmd = [v_next, omega_next]
         # Goal 관련 코스트 시각화 (매 10회마다)
         if hasattr(self, '_goal_debug_counter'):
             self._goal_debug_counter += 1
