@@ -64,21 +64,17 @@
         overrides:
           min_linear_velocity: 0.0
           
-      7:  # 일시 정지(1초)
-        description: "Pause for 1 second"
-        pause_duration: 1.0
-        multipliers: {}
-        overrides:
-          max_linear_velocity: 0.0
-          min_linear_velocity: 0.0
+      7:  # 일시 정지(2초) - 이제 일반 전진과 동일한 파라미터 사용, pause는 SMPPI에서 처리
+        description: "Normal forward movement (2s pause handled by SMPPI)"
+        multipliers:
+          goal_reached_threshold: 0.3
+        overrides: {}
           
-      8:  # 일시 정지(4초)
-        description: "Pause for 4 seconds"  
-        pause_duration: 4.0
-        multipliers: {}
-        overrides:
-          max_linear_velocity: 0.0
-          min_linear_velocity: 0.0
+      8:  # 일시 정지(4초) - 이제 일반 전진과 동일한 파라미터 사용, pause는 SMPPI에서 처리
+        description: "Normal forward movement (4s pause handled by SMPPI)"  
+        multipliers:
+          goal_reached_threshold: 0.3
+        overrides: {}
           
       9:  # 끝 지점
         description: "Final destination"

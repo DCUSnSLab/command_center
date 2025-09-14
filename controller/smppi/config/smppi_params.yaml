@@ -72,7 +72,7 @@
         processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
         robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
-        cmd_vel: '/cmd_vel'  # 속도 명령 출력 토픽
+        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
         optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
         markers: '/smppi_visualization'                # 시각화 마커 출력 토픽

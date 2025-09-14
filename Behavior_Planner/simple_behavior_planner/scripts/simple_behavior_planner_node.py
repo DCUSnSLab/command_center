@@ -19,7 +19,7 @@ import tf2_ros
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs.tf2_geometry_msgs as tf2_geometry_msgs
 
-from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints, MPPIParams
+from command_center_interfaces.msg import PlannedPath, ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
 
 import yaml
 from simple_behavior_planner.behavior_parameter_manager import BehaviorParameterManager
@@ -41,6 +41,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('emergency_stop_topic', '/emergency_stop')
         self.declare_parameter('lookahead_distance', 10.0)  # meters
         self.declare_parameter('goal_tolerance', 2.0)  # meters
+        self.declare_parameter('pause_trigger_distance', 0.8)  # meters - distance to trigger pause command
         self.declare_parameter('waypoint_mode', 'multiple')  # 'single' or 'multiple'
         self.declare_parameter('behavior_config_path', 'behavior_modifiers.yaml')  # behavior config file
         self.declare_parameter('enable_behavior_control', True)  # enable behavior-based parameter control
@@ -55,6 +56,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.emergency_stop_topic = self.get_parameter('emergency_stop_topic').get_parameter_value().string_value
         self.lookahead_distance = self.get_parameter('lookahead_distance').get_parameter_value().double_value
         self.goal_tolerance = self.get_parameter('goal_tolerance').get_parameter_value().double_value
+        self.pause_trigger_distance = self.get_parameter('pause_trigger_distance').get_parameter_value().double_value
         self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
         self.behavior_config_path = self.get_parameter('behavior_config_path').get_parameter_value().string_value
         self.enable_behavior_control = self.get_parameter('enable_behavior_control').get_parameter_value().bool_value
@@ -79,6 +81,9 @@ class SimpleBehaviorPlannerNode(Node):
         self.is_paused = False
         self.pause_timer = None
         self.pause_start_time = None
+        
+        # Pause command state tracking
+        self.pause_signal_sent = False
         
         # Initialize behavior parameter manager
         self.behavior_param_manager = None
@@ -145,6 +150,13 @@ class SimpleBehaviorPlannerNode(Node):
                 '/mppi_update_params',
                 reliable_qos
             )
+        
+        # Pause command publisher
+        self.pause_command_pub = self.create_publisher(
+            PauseCommand,
+            '/pause_command',
+            reliable_qos
+        )
         
         if self.waypoint_mode == 'single':
             self.subgoal_pub = self.create_publisher(
@@ -290,6 +302,9 @@ class SimpleBehaviorPlannerNode(Node):
         """Handle goal status updates from controller"""
         if not self._is_valid_goal_status(msg):
             return
+        
+        # Check for pause command trigger (before goal reached)
+        self._check_pause_trigger(msg)
             
         if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
             self._handle_goal_success(msg)
@@ -309,9 +324,43 @@ class SimpleBehaviorPlannerNode(Node):
             
         return True
     
+    def _check_pause_trigger(self, msg: ControllerGoalStatus):
+        #self.get_logger().info(f"@@@@@@@@@@@@@{msg.distance_to_goal} < {self.pause_trigger_distance}@@@@@@@@@{self.path_nodes[self.current_target_node_index]}@@@@")
+        """Check if we should send pause command based on distance and node type"""
+        if (self.current_target_node_index < len(self.path_nodes) and
+            not self.pause_signal_sent and
+            msg.distance_to_goal <= self.pause_trigger_distance):
+            
+            current_node = self.path_nodes[self.current_target_node_index]
+            node_type = current_node.get('node_type', 1)
+
+    
+            # Check if current node is a pause node (type 7 or 8)
+            if node_type in [7, 8]:
+                pause_duration = 2.0 if node_type == 7 else 4.0
+                
+                # Send pause command
+                pause_msg = PauseCommand()
+                pause_msg.header.stamp = self.get_clock().now().to_msg()
+                pause_msg.header.frame_id = 'behavior_planner'
+                pause_msg.pause_duration = pause_duration
+                pause_msg.node_id = msg.goal_id
+                pause_msg.reason = f"Node type {node_type} pause ({pause_duration}s)"
+                
+                self.pause_command_pub.publish(pause_msg)
+                self.pause_signal_sent = True
+                
+                # Also update behavior parameters at pause trigger point
+                if self.enable_behavior_control and node_type != self.current_node_type:
+                    self._update_behavior_parameters(node_type)
+                
+                self.get_logger().info(f"Pause command sent: {pause_duration}s for node {msg.goal_id} (distance: {msg.distance_to_goal:.2f}m)")
+                self.get_logger().info(f"Behavior parameters updated to type {node_type} at pause trigger")
+    
     def _handle_goal_success(self, msg: ControllerGoalStatus):
         """Handle successful goal completion"""
         self.last_completed_goal_id = msg.goal_id
+        self.pause_signal_sent = False  # Reset for next goal
         self.advance_to_next_node()
         self.subgoal_published = False
     
@@ -334,9 +383,7 @@ class SimpleBehaviorPlannerNode(Node):
             self.publish_emergency_stop()
             return
         
-        # Check if we need to handle pause behavior
-        if self.is_paused:
-            return  # Skip normal processing during pause
+        # Removed pause behavior handling - now handled by SMPPI controller
         
         # Check current node behavior and update parameters if needed
         if self.enable_behavior_control and self.path_nodes and self.current_target_node_index < len(self.path_nodes):
@@ -596,11 +643,8 @@ class SimpleBehaviorPlannerNode(Node):
         
         try:
             
-            # Handle pause behaviors
-            if self.behavior_param_manager.is_pause_behavior(node_type):
-                pause_duration = self.behavior_param_manager.get_pause_duration(node_type)
-                self._handle_pause_behavior(pause_duration)
-                return
+            # Pause behaviors (7, 8) are now handled by SMPPI controller via pause commands
+            # They use normal forward movement parameters
             
             # Get behavior-specific parameters
             behavior_params = self.behavior_param_manager.get_behavior_params(node_type)
@@ -705,85 +749,7 @@ class SimpleBehaviorPlannerNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to send MPPI parameters: {e}")
     
-    def _handle_pause_behavior(self, pause_duration: float):
-        """Handle pause behaviors (node_type 7, 8)"""
-        if self.is_paused:
-            self.get_logger().debug("Already in pause state, ignoring new pause request")
-            return
-        
-        self.is_paused = True
-        self.pause_start_time = self.get_clock().now().nanoseconds / 1e9
-        
-        # Send zero velocity to MPPI
-        self._send_pause_parameters()
-        
-        # Create timer for resume
-        if self.pause_timer is not None:
-            self.pause_timer.cancel()
-        
-        self.pause_timer = self.create_timer(pause_duration, self._resume_from_pause)
-        
-        self.get_logger().info(f"Started pause behavior for {pause_duration} seconds")
-    
-    def _send_pause_parameters(self):
-        """Send pause parameters to MPPI (force stop flag)"""
-        try:
-            msg = MPPIParams()
-            msg.header = Header()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "pause_behavior"
-            
-            # Set force stop flag
-            msg.update_control = True
-            msg.force_stop = True
-            msg.control_frequency = 20.0
-            msg.goal_reached_threshold = 2.0
-            
-            # Get current node type for pause behavior info
-            current_node_type = self.current_node_type
-            if current_node_type == 7:
-                msg.current_behavior_type = 7
-                msg.current_behavior_desc = "Pause for 1 second"
-            elif current_node_type == 8:
-                msg.current_behavior_type = 8
-                msg.current_behavior_desc = "Pause for 4 seconds"
-            else:
-                # Fallback - should not happen
-                msg.current_behavior_type = 7
-                msg.current_behavior_desc = "Pause behavior"
-            
-            self.mppi_param_pub.publish(msg)
-            
-        except Exception as e:
-            self.get_logger().error(f"Failed to send pause parameters: {e}")
-    
-    def _resume_from_pause(self):
-        """Resume from pause behavior"""
-        if not self.is_paused:
-            return
-        
-        self.is_paused = False
-        self.pause_start_time = None
-        
-        # Cancel pause timer
-        if self.pause_timer is not None:
-            self.pause_timer.cancel()
-            self.pause_timer = None
-        
-        # Restore previous behavior parameters if available
-        if self.enable_behavior_control and self.path_nodes and self.current_target_node_index < len(self.path_nodes):
-            current_node = self.path_nodes[self.current_target_node_index]
-            current_node_type = current_node.get('node_type', 1)
-            
-            # If current node is still a pause node, move to next
-            if self.behavior_param_manager.is_pause_behavior(current_node_type):
-                self.advance_to_next_node()
-                self.subgoal_published = False
-            else:
-                # Restore normal behavior parameters
-                self._update_behavior_parameters(current_node_type)
-        
-        self.get_logger().info("Resumed from pause behavior")
+    # Removed pause behavior handling functions - now handled by SMPPI controller
 
 
 def main(args=None):

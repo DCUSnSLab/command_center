@@ -226,16 +226,18 @@ class BehaviorParameterManager:
         return calculated_params
     
     def is_pause_behavior(self, node_type: int) -> bool:
-        """Check if behavior type is a pause behavior"""
-        return node_type in [7, 8]
+        """Check if behavior type is a pause behavior
+        NOTE: Pause behaviors (7, 8) are now handled by SMPPI controller via PauseCommand,
+        not through behavior parameters. They use normal forward movement parameters.
+        """
+        return False  # No longer handled by behavior parameter system
     
     def get_pause_duration(self, node_type: int) -> float:
-        """Get pause duration for pause behaviors"""
-        if not self.is_pause_behavior(node_type):
-            return 0.0
-        
-        modifier = self.behavior_modifiers.get(node_type, {})
-        return modifier.get('pause_duration', 1.0)
+        """Get pause duration for pause behaviors
+        NOTE: Pause durations are now handled by Simple Behavior Planner
+        which sends PauseCommand to SMPPI controller.
+        """
+        return 0.0  # No longer handled by behavior parameter system
     
     def get_behavior_description(self, node_type: int) -> str:
         """Get human-readable description of behavior"""

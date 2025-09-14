@@ -20,7 +20,7 @@ from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Path
 from std_msgs.msg import Header
 from smppi.msg import ProcessedObstacles, MPPIState, OptimalPath
-from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams
+from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
 
 # SMPPI modules
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
@@ -66,6 +66,12 @@ class MPPIMainNode(Node):
         # Current behavior mode tracking
         self.current_behavior_type = 1
         self.current_behavior_desc = "Normal forward movement"
+        
+        # Pause state management
+        self.is_paused = False
+        self.pause_start_time = 0.0
+        self.pause_duration = 0.0
+        self.pause_node_id = ""
         
         # Control loop
         self.control_timer = self.create_timer(
@@ -299,6 +305,10 @@ class MPPIMainNode(Node):
         self.params_update_sub = self.create_subscription(
             MPPIParams, '/mppi_update_params', self.params_update_callback, reliable_qos)
         
+        # Pause command subscriber
+        self.pause_command_sub = self.create_subscription(
+            PauseCommand, '/pause_command', self.pause_command_callback, reliable_qos)
+        
         # Visualization publishers - publish lookahead point for visualization node
         from geometry_msgs.msg import PoseStamped, PointStamped
         self.lookahead_pub = self.create_publisher(
@@ -435,10 +445,47 @@ class MPPIMainNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to update MPPI parameters: {e}")
     
+    def pause_command_callback(self, msg: PauseCommand):
+        """Handle pause commands from behavior planner"""
+        try:
+            self.is_paused = True
+            self.pause_start_time = time.time()
+            self.pause_duration = msg.pause_duration
+            self.pause_node_id = msg.node_id
+            
+            self.get_logger().info(f"Pause activated: {msg.pause_duration}s for node {msg.node_id} ({msg.reason})@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to process pause command: {e}")
+    
     def control_callback(self):
         """Main control loop callback"""
         if not self.is_ready():
             return
+        
+        # Check pause state first (highest priority)
+        if self.is_paused:
+            current_time = time.time()
+            elapsed_time = current_time - self.pause_start_time
+            
+            if elapsed_time < self.pause_duration:
+                # Still paused - publish zero command
+                cmd_vel = Twist()
+                self.cmd_pub.publish(cmd_vel)
+                
+                # Optionally publish goal status to indicate we're still working
+                if self.goal_state is not None:
+                    robot_pos = torch.tensor([self.robot_state.state_vector[0], self.robot_state.state_vector[1]], 
+                                           device=self.optimizer.device, dtype=self.optimizer.dtype)
+                    goal_distance = torch.norm(robot_pos - self.goal_state[:2])
+                    goal_distance_float = float(goal_distance)
+                    self.publish_goal_status(goal_distance_float)
+                
+                return  # Skip normal MPPI processing
+            else:
+                # Pause completed
+                self.is_paused = False
+                self.get_logger().info(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
         
         start_time = time.perf_counter()
         
