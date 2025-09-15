@@ -1,15 +1,15 @@
 import os
 import time
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     # Declare use_sim_time parameter
-    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
 
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
@@ -86,33 +86,33 @@ def generate_launch_description():
         #     ]
         # ),
         
-        # Launch 5: Localization (after 12 seconds)
+        # Launch 5: New Localization (after 12 seconds)
         TimerAction(
-            period=6.0,
+            period=4.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
                         os.path.join(
-                            FindPackageShare('tiny_localization').find('tiny_localization'),
+                            FindPackageShare('robot_localization').find('robot_localization'),
                             'launch',
-                            'tiny_localization.launch.py'
+                            'scv_dual_ekf_navsat_nomap.launch.py'
                         )
                     ]),
                     launch_arguments={'use_sim_time': use_sim_time}.items()
                 )
             ]
         ),
-        
-        # Launch 6: Behavior planner (after 15 seconds)
+
+        # pointcloud to laserscan
         TimerAction(
-            period=8.0,
+            period=6.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
                         os.path.join(
-                            FindPackageShare('simple_behavior_planner').find('simple_behavior_planner'),
+                            FindPackageShare('pointcloud_to_laserscan').find('pointcloud_to_laserscan'),
                             'launch',
-                            'simple_behavior_planner.launch.py'
+                            'velodyne_to_scan.launch.py'
                         )
                     ]),
                     launch_arguments={'use_sim_time': use_sim_time}.items()

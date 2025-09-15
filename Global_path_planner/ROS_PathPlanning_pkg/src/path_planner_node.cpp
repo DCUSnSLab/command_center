@@ -4,6 +4,7 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -109,6 +110,7 @@ public:
         nodes_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_nodes_viz", 10);
         links_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_links_viz", 10);
         map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
+        odom_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("odometry/gps", 10);
         
         // Create TF broadcaster for map->odom transform
         tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
@@ -503,6 +505,9 @@ private:
             publishMapToOdomTransform(*msg);
             map_tf_initialized_ = true;
         }
+        
+        // Publish GPS-based odometry
+        publishGpsOdometry(*msg);
         
         RCLCPP_DEBUG(this->get_logger(), "GPS received: lat=%.6f, lon=%.6f", 
                     msg->latitude, msg->longitude);
@@ -1279,6 +1284,89 @@ private:
                     transform_stamped.transform.translation.x, transform_stamped.transform.translation.y,
                     current_imu_received_ ? "available" : "not available");
     }
+    
+    void publishGpsOdometry(const sensor_msgs::msg::NavSatFix& gps)
+    {
+        // Convert GPS to UTM coordinates
+        double utm_easting, utm_northing;
+        gpsToUTM(gps.latitude, gps.longitude, utm_easting, utm_northing);
+        
+        // Create odometry message
+        nav_msgs::msg::Odometry odom_msg;
+        odom_msg.header.stamp = this->get_clock()->now();
+        odom_msg.header.frame_id = "odom";
+        odom_msg.child_frame_id = "base_link";
+        
+        // Set position relative to map origin
+        odom_msg.pose.pose.position.x = utm_easting - map_utm_easting_;
+        odom_msg.pose.pose.position.y = utm_northing - map_utm_northing_;
+        odom_msg.pose.pose.position.z = gps.altitude - gps_ref_alt_;
+        
+        // Set orientation from IMU if available, otherwise use default
+        if (current_imu_received_) {
+            odom_msg.pose.pose.orientation = current_imu_.orientation;
+        } else {
+            odom_msg.pose.pose.orientation.x = 0.0;
+            odom_msg.pose.pose.orientation.y = 0.0;
+            odom_msg.pose.pose.orientation.z = 0.0;
+            odom_msg.pose.pose.orientation.w = 1.0;
+        }
+        
+        // Set pose covariance based on GPS accuracy
+        // Initialize all to zero
+        std::fill(odom_msg.pose.covariance.begin(), odom_msg.pose.covariance.end(), 0.0);
+        
+        // Set position covariance (diagonal elements)
+        if (gps.position_covariance_type != sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN) {
+            // Use GPS covariance if available
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    odom_msg.pose.covariance[i * 6 + j] = gps.position_covariance[i * 3 + j];
+                }
+            }
+        } else {
+            // Set default covariance values
+            odom_msg.pose.covariance[0] = 2.0;  // x variance
+            odom_msg.pose.covariance[7] = 2.0;  // y variance  
+            odom_msg.pose.covariance[14] = 4.0; // z variance
+        }
+        
+        // Set orientation covariance
+        if (current_imu_received_) {
+            // Use IMU covariance for orientation if available
+            for (int i = 3; i < 6; ++i) {
+                for (int j = 3; j < 6; ++j) {
+                    odom_msg.pose.covariance[i * 6 + j] = current_imu_.orientation_covariance[(i-3) * 3 + (j-3)];
+                }
+            }
+        } else {
+            // Set default orientation covariance
+            odom_msg.pose.covariance[21] = 0.1; // roll variance
+            odom_msg.pose.covariance[28] = 0.1; // pitch variance
+            odom_msg.pose.covariance[35] = 0.5; // yaw variance (higher uncertainty without IMU)
+        }
+        
+        // Velocity is not available from GPS alone, set to zero with high uncertainty
+        odom_msg.twist.twist.linear.x = 0.0;
+        odom_msg.twist.twist.linear.y = 0.0;
+        odom_msg.twist.twist.linear.z = 0.0;
+        odom_msg.twist.twist.angular.x = 0.0;
+        odom_msg.twist.twist.angular.y = 0.0;
+        odom_msg.twist.twist.angular.z = 0.0;
+        
+        // Set twist covariance (high uncertainty for velocity)
+        std::fill(odom_msg.twist.covariance.begin(), odom_msg.twist.covariance.end(), 0.0);
+        for (int i = 0; i < 6; ++i) {
+            odom_msg.twist.covariance[i * 6 + i] = 1000.0; // High uncertainty on diagonal
+        }
+        
+        // Publish odometry
+        odom_publisher_->publish(odom_msg);
+        
+        RCLCPP_DEBUG(this->get_logger(), 
+                    "Published GPS odometry: pos(%.2f, %.2f, %.2f)",
+                    odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y, odom_msg.pose.pose.position.z);
+    }
 
     // 현재 ROS 버전에서 특정 메시지형의 doTransform 미지원으로 인한 변환 함수 구현.
     // 다른 코드에서도 쓸 수 있게 향후 tools 같은 디렉토리에 별도 클래스로 작성하는게 좋긴함
@@ -1341,6 +1429,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr links_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
     // std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
