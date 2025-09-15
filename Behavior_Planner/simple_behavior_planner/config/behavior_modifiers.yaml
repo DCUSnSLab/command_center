@@ -46,7 +46,7 @@
       5:  # 가속(빠르게 전진)
         description: "Fast forward movement"
         multipliers:
-          max_linear_velocity: 1.3      # 130% (빠르게)
+          max_linear_velocity: 1.25      # 130% (빠르게)
           goal_weight: 0.7              # 70% (덜 엄격하게)
           lookahead_base_distance: 1.0  # 100% (기본값 - 급격한 방향전환 방지)
           xy_goal_tolerance: 1.2        # 120% (관대하게)

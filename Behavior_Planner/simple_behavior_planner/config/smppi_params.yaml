@@ -22,7 +22,7 @@
     # 차량 파라미터
     vehicle:
       wheelbase: 0.65                     # 휠베이스 길이 [m]
-      max_linear_velocity: 1.35            # 최대 선속도 [m/s]
+      max_linear_velocity: 2.0            # 최대 선속도 [m/s]
       min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
       # max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
       # min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
