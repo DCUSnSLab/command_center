@@ -46,7 +46,7 @@
       goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
       
       lookahead:
-        base_distance: 3.0                # 기본 lookahead 거리 [m]
+        base_distance: 1.0                # 기본 lookahead 거리 [m]
         velocity_factor: 1.2              # 속도 비례 팩터 [s] (거리 = 속도 × 팩터)
         min_distance: 3.0                 # 최소 lookahead 거리 [m]
         max_distance: 6.0                 # 최대 lookahead 거리 [m]
