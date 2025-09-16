@@ -13,7 +13,7 @@ from typing import Optional
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, String, Header
+from std_msgs.msg import Bool, String, Header, Int32
 
 import tf2_ros
 from tf2_ros import Buffer, TransformListener
@@ -39,6 +39,8 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('subgoal_topic', '/subgoal')
         self.declare_parameter('multiple_waypoints_topic', '/multiple_waypoints')
         self.declare_parameter('emergency_stop_topic', '/emergency_stop')
+        self.declare_parameter('stop_flag_topic', '/stop_flag')
+        self.declare_parameter('traffic_light_topic', '/tl/state_id')
         self.declare_parameter('lookahead_distance', 10.0)  # meters
         self.declare_parameter('goal_tolerance', 2.0)  # meters
         self.declare_parameter('pause_trigger_distance', 0.8)  # meters - distance to trigger pause command
@@ -54,6 +56,8 @@ class SimpleBehaviorPlannerNode(Node):
         self.subgoal_topic = self.get_parameter('subgoal_topic').get_parameter_value().string_value
         self.multiple_waypoints_topic = self.get_parameter('multiple_waypoints_topic').get_parameter_value().string_value
         self.emergency_stop_topic = self.get_parameter('emergency_stop_topic').get_parameter_value().string_value
+        self.stop_flag_topic = self.get_parameter('stop_flag_topic').get_parameter_value().string_value
+        self.traffic_light_topic = self.get_parameter('traffic_light_topic').get_parameter_value().string_value
         self.lookahead_distance = self.get_parameter('lookahead_distance').get_parameter_value().double_value
         self.goal_tolerance = self.get_parameter('goal_tolerance').get_parameter_value().double_value
         self.pause_trigger_distance = self.get_parameter('pause_trigger_distance').get_parameter_value().double_value
@@ -84,6 +88,11 @@ class SimpleBehaviorPlannerNode(Node):
         
         # Pause command state tracking
         self.pause_signal_sent = False
+
+        # Safety stop state variables (default to 0 - safe states)
+        self.current_stop_flag = False  # False = no obstacle detected
+        self.current_traffic_light_state = 0  # 0 = none/unknown
+        self.safety_pause_sent = False  # Track if safety pause already sent
         
         # Initialize behavior parameter manager
         self.behavior_param_manager = None
@@ -131,8 +140,23 @@ class SimpleBehaviorPlannerNode(Node):
         
         self.goal_status_sub = self.create_subscription(
             ControllerGoalStatus,  # 실제 목표 상태 메시지 타입 사용
-            self.goal_status_topic, 
-            self.goal_status_callback, 
+            self.goal_status_topic,
+            self.goal_status_callback,
+            reliable_qos
+        )
+
+        # Safety stop subscribers
+        self.stop_flag_sub = self.create_subscription(
+            Bool,
+            self.stop_flag_topic,
+            self.stop_flag_callback,
+            reliable_qos
+        )
+
+        self.traffic_light_sub = self.create_subscription(
+            Int32,
+            self.traffic_light_topic,
+            self.traffic_light_callback,
             reliable_qos
         )
         
@@ -192,6 +216,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.get_logger().info('Simple Behavior Planner Node initialized')
         self.get_logger().info(f'Subscribed to: {self.planned_path_topic}')
         self.get_logger().info(f'Publishing subgoals to: {self.subgoal_topic}')
+        self.get_logger().info(f'Safety stop topics: {self.stop_flag_topic}, {self.traffic_light_topic}')
         if self.enable_behavior_control:
             self.get_logger().info('Behavior-based parameter control enabled')
         else:
@@ -302,16 +327,34 @@ class SimpleBehaviorPlannerNode(Node):
         """Handle goal status updates from controller"""
         if not self._is_valid_goal_status(msg):
             return
-        
+
         # Check for pause command trigger (before goal reached)
         self._check_pause_trigger(msg)
-            
+
         if msg.goal_reached and msg.status_code == 1:  # SUCCEEDED
             self._handle_goal_success(msg)
         elif msg.status_code == 2:  # FAILED
             self._handle_goal_failure(msg)
         elif msg.status_code == 3:  # ABORTED
             self._handle_goal_abort(msg)
+
+    def stop_flag_callback(self, msg: Bool):
+        """Handle obstacle detection stop flag"""
+        self.current_stop_flag = msg.data
+        self.get_logger().debug(f'Stop flag received: {self.current_stop_flag}')
+
+        # Reset safety pause flag when obstacle is cleared
+        if not self.current_stop_flag:
+            self.safety_pause_sent = False
+
+    def traffic_light_callback(self, msg: Int32):
+        """Handle traffic light state updates"""
+        self.current_traffic_light_state = msg.data
+        self.get_logger().debug(f'Traffic light state received: {self.current_traffic_light_state}')
+
+        # Reset safety pause flag when traffic light changes away from green/left
+        if self.current_traffic_light_state not in [3, 4]:
+            self.safety_pause_sent = False
     
     def _is_valid_goal_status(self, msg: ControllerGoalStatus) -> bool:
         """Check if goal status message is valid for current state"""
@@ -378,22 +421,25 @@ class SimpleBehaviorPlannerNode(Node):
         """메인 행동 계획 루프"""
         if not self.is_path_following or not self.current_pose or not self.path_nodes:
             return
-        
+
         if self.emergency_stop_requested:
             self.publish_emergency_stop()
             return
-        
+
+        # Check safety stop conditions first
+        self._check_safety_stop_conditions()
+
         # Removed pause behavior handling - now handled by SMPPI controller
-        
+
         # Check current node behavior and update parameters if needed
         if self.enable_behavior_control and self.path_nodes and self.current_target_node_index < len(self.path_nodes):
             current_node = self.path_nodes[self.current_target_node_index]
             current_node_type = current_node.get('node_type', 1)
-            
+
             # Update behavior parameters if node type changed
             if current_node_type != self.current_node_type:
                 self._update_behavior_parameters(current_node_type)
-        
+
         # Find and publish next subgoal (only if not already published)
         if not self.subgoal_published:
             next_subgoal = self.find_next_subgoal()
@@ -407,7 +453,7 @@ class SimpleBehaviorPlannerNode(Node):
                     # Fallback - publish both (multiple waypoints takes priority)
                     self.publish_multiple_waypoints()
                     self.publish_subgoal(next_subgoal)
-                
+
                 self.subgoal_published = True  # 서브골 발행 완료 표시
     
     def find_next_subgoal(self) -> Optional[dict]:
@@ -689,7 +735,7 @@ class SimpleBehaviorPlannerNode(Node):
             msg.header = Header()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = f"behavior_{behavior_params.get('behavior_type', 1)}"
-            
+
             # Vehicle parameters
             if 'max_linear_velocity' in behavior_params:
                 msg.update_vehicle = True
@@ -701,13 +747,13 @@ class SimpleBehaviorPlannerNode(Node):
                 msg.max_steering_angle = behavior_params.get('max_steering_angle', 0.3665)
                 msg.radius = behavior_params.get('radius', 0.6)
                 msg.footprint_padding = behavior_params.get('footprint_padding', 0.15)
-            
+
             # Cost weights
             if 'goal_weight' in behavior_params or 'obstacle_weight' in behavior_params:
                 msg.update_costs = True
                 msg.goal_weight = behavior_params.get('goal_weight', 30.0)
                 msg.obstacle_weight = behavior_params.get('obstacle_weight', 100.0)
-            
+
             # Lookahead parameters
             lookahead_updated = False
             if 'lookahead_base_distance' in behavior_params:
@@ -726,28 +772,67 @@ class SimpleBehaviorPlannerNode(Node):
                 msg.update_lookahead = True
                 msg.lookahead_max_distance = behavior_params['lookahead_max_distance']
                 lookahead_updated = True
-            
+
             # Goal critic parameters - always reset to ensure proper mode switching
             msg.update_goal_critic = True
             # Default to False, only True for reverse behaviors
             msg.respect_reverse_heading = behavior_params.get('respect_reverse_heading', False)
-            
+
             # Control parameters - always set to ensure force_stop is properly managed
             msg.update_control = True
             msg.goal_reached_threshold = behavior_params.get('goal_reached_threshold', 2.0)
             msg.control_frequency = behavior_params.get('control_frequency', 20.0)
             msg.force_stop = False  # Resume normal operation (override any previous stop)
-            
+
             # Current behavior mode information
             msg.current_behavior_type = behavior_params.get('behavior_type', 1)
             msg.current_behavior_desc = behavior_params.get('behavior_description', 'Normal forward movement')
-            
+
             # Publish the parameter update
             self.mppi_param_pub.publish(msg)
-            
-            
+
         except Exception as e:
             self.get_logger().error(f"Failed to send MPPI parameters: {e}")
+
+    def _check_safety_stop_conditions(self):
+        """Check safety stop conditions and send pause command if needed"""
+        # Safety stop conditions:
+        # 1. Obstacle detected (stop_flag == True)
+        # 2. Traffic light green (state_id == 3) or left turn (state_id == 4)
+        should_stop = (
+            self.current_stop_flag or  # Obstacle detected
+            self.current_traffic_light_state in [3, 4]  # Green light or left turn
+        )
+
+        if should_stop and not self.safety_pause_sent:
+            self._send_safety_pause_command()
+            self.safety_pause_sent = True
+
+    def _send_safety_pause_command(self):
+        """Send 1-second pause command for safety stop"""
+        try:
+            pause_msg = PauseCommand()
+            pause_msg.header.stamp = self.get_clock().now().to_msg()
+            pause_msg.header.frame_id = 'safety_stop'
+            pause_msg.pause_duration = 1.0  # 1 second pause
+            pause_msg.node_id = "safety_stop"
+
+            # Determine reason for pause
+            reasons = []
+            if self.current_stop_flag:
+                reasons.append("obstacle detected")
+            if self.current_traffic_light_state == 3:
+                reasons.append("green light")
+            if self.current_traffic_light_state == 4:
+                reasons.append("left turn signal")
+
+            pause_msg.reason = f"Safety stop: {', '.join(reasons)}"
+
+            self.pause_command_pub.publish(pause_msg)
+            self.get_logger().info(f"Safety pause command sent: {pause_msg.reason}")
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to send safety pause command: {e}")
     
     # Removed pause behavior handling functions - now handled by SMPPI controller
 

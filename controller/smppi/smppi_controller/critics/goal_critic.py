@@ -32,6 +32,13 @@ class GoalCritic(BaseCritic):
         self.lookahead_min_distance = params.get('lookahead_min_distance', 1.0)
         self.lookahead_max_distance = params.get('lookahead_max_distance', 6.0)
 
+        # Curve-based lookahead parameters
+        self.curve_detection_enabled = params.get('curve_detection_enabled', True)
+        self.curve_angle_threshold = params.get('curve_angle_threshold', 30.0)  # degrees
+        self.curve_lookahead_reduction_factor = params.get('curve_lookahead_reduction_factor', 0.3)  # 30% of normal
+        self.curve_min_lookahead = params.get('curve_min_lookahead', 0.5)  # minimum lookahead in curves
+        self.curve_detection_distance = params.get('curve_detection_distance', 3.0)  # distance to look ahead for curve detection
+
         # Behavior options
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', True)
         self.respect_reverse_heading = params.get('respect_reverse_heading', False)
@@ -47,6 +54,7 @@ class GoalCritic(BaseCritic):
         print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}, vel_fac={self.lookahead_velocity_factor}, "
               f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
         print(f"[GoalCritic] Multi-waypoints: {self.use_multiple_waypoints}, reverse_heading: {self.respect_reverse_heading}")
+        print(f"[GoalCritic] Curve detection: {self.curve_detection_enabled}, angle_threshold: {self.curve_angle_threshold}°, reduction: {self.curve_lookahead_reduction_factor}x")
 
     @staticmethod
     def _relu(x: torch.Tensor) -> torch.Tensor:
@@ -225,9 +233,16 @@ class GoalCritic(BaseCritic):
                                 goal_pos: torch.Tensor) -> torch.Tensor:
         base_offset = self.lookahead_base_distance
         velocity_offset = self.lookahead_velocity_factor * current_vel_abs
-        total_lookahead = torch.clamp(base_offset + velocity_offset,
-                                      self.lookahead_min_distance,
-                                      self.lookahead_max_distance)
+        base_lookahead = torch.clamp(base_offset + velocity_offset,
+                                   self.lookahead_min_distance,
+                                   self.lookahead_max_distance)
+
+        # Apply curve-based lookahead adjustment for single goal case
+        # (For simplicity, we treat single goal as a 2-point path)
+        total_lookahead = self._adjust_lookahead_for_curves(
+            base_lookahead, current_pos, goal_pos, []
+        )
+
         goal_vec = goal_pos - current_pos
         goal_distance = torch.norm(goal_vec) + 1e-9
 
@@ -265,9 +280,9 @@ class GoalCritic(BaseCritic):
             wp.current_goal.pose.position.x,
             wp.current_goal.pose.position.y
         ], device=self.device, dtype=self.dtype)
-        
+
         current_node_type = getattr(wp, "current_goal_node_type", 1)
-        behavior_changed = (self.previous_node_type is not None and 
+        behavior_changed = (self.previous_node_type is not None and
                            current_node_type != self.previous_node_type)
         # Update previous node type
         self.previous_node_type = current_node_type
@@ -276,10 +291,17 @@ class GoalCritic(BaseCritic):
         if behavior_changed:
             return current_goal_pos
 
-        total_lookahead = torch.clamp(
+        # Calculate base lookahead distance
+        base_lookahead = torch.clamp(
             self.lookahead_base_distance + self.lookahead_velocity_factor * current_vel_abs,
             self.lookahead_min_distance,
             self.lookahead_max_distance
+        )
+
+        # Apply curve-based lookahead adjustment
+        total_lookahead = self._adjust_lookahead_for_curves(
+            base_lookahead, current_pos, current_goal_pos,
+            getattr(wp, "next_waypoints", [])[:3]  # Look at next 3 waypoints for curve detection
         )
 
         d_cur = torch.norm(current_pos - current_goal_pos)
@@ -288,13 +310,13 @@ class GoalCritic(BaseCritic):
             direction = (current_goal_pos - current_pos) / (d_cur + 1e-9)
             return current_pos + direction * total_lookahead
 
-        # 가까우면 next_waypoints로 연장
+        # 가까우면 next_waypoints로 연장 (but with curve-adjusted lookahead)
         next_wps = getattr(wp, "next_waypoints", None) or []
         next_node_types = getattr(wp, "next_waypoints_node_types", None) or []
-        
+
         if len(next_wps) == 0:
             return current_goal_pos
-        
+
         # Check if next waypoint has different node_type (behavior change)
         if len(next_node_types) > 0 and next_node_types[0] != current_node_type:
             # Next waypoint has different behavior - keep lookahead at current goal
@@ -340,6 +362,133 @@ class GoalCritic(BaseCritic):
         # 모든 세그먼트를 지나도 남으면 마지막 점
         return current
 
+    def _adjust_lookahead_for_curves(self, base_lookahead: torch.Tensor, current_pos: torch.Tensor,
+                                   current_goal: torch.Tensor, next_waypoints: list) -> torch.Tensor:
+        """Adjust lookahead distance based on upcoming curve detection"""
+        if not self.curve_detection_enabled or len(next_waypoints) == 0:
+            return base_lookahead
+
+        # Create path segments for curve analysis
+        path_points = [current_pos, current_goal]
+
+        # Add next waypoints (up to 3 for curve detection)
+        for wp in next_waypoints[:3]:  # Limit to 3 waypoints to avoid excessive computation
+            next_pos = torch.tensor([
+                wp.pose.position.x,
+                wp.pose.position.y
+            ], device=self.device, dtype=self.dtype)
+            path_points.append(next_pos)
+
+        # Detect curves in the path
+        max_curve_angle = self._detect_path_curvature(path_points)
+
+        # Adjust lookahead based on curve severity
+        if max_curve_angle > self.curve_angle_threshold:
+            # Sharp curve detected - reduce lookahead significantly
+            curve_factor = self._calculate_curve_reduction_factor(max_curve_angle)
+            adjusted_lookahead = base_lookahead * curve_factor
+
+            # Ensure minimum lookahead distance
+            adjusted_lookahead = torch.clamp(
+                adjusted_lookahead,
+                min=self.curve_min_lookahead,
+                max=base_lookahead.item()
+            )
+
+            # Debug logging for significant adjustments
+            if abs(float(adjusted_lookahead) - float(base_lookahead)) > 0.5:
+                print(f"[CURVE ADJUST] angle: {max_curve_angle:.1f}°, factor: {curve_factor:.2f}, "
+                      f"lookahead: {float(base_lookahead):.2f}m -> {float(adjusted_lookahead):.2f}m")
+
+            return adjusted_lookahead
+
+        return base_lookahead
+
+    def _detect_path_curvature(self, path_points: list) -> float:
+        """Detect maximum curvature angle in the given path segments"""
+        if len(path_points) < 3:
+            return 0.0
+
+        max_angle = 0.0
+        debug_info = []
+
+        for i in range(len(path_points) - 2):
+            p1 = path_points[i]
+            p2 = path_points[i + 1]
+            p3 = path_points[i + 2]
+
+            # Calculate vectors
+            v1 = p2 - p1  # Vector from p1 to p2
+            v2 = p3 - p2  # Vector from p2 to p3
+
+            # Calculate angle between vectors
+            angle_rad = self._calculate_angle_between_vectors(v1, v2)
+            angle_deg = float(torch.rad2deg(torch.tensor(angle_rad)).item())
+
+            # Debug information
+            p1_np = p1.detach().cpu().numpy() if hasattr(p1, 'detach') else p1
+            p2_np = p2.detach().cpu().numpy() if hasattr(p2, 'detach') else p2
+            p3_np = p3.detach().cpu().numpy() if hasattr(p3, 'detach') else p3
+            v1_np = v1.detach().cpu().numpy() if hasattr(v1, 'detach') else v1
+            v2_np = v2.detach().cpu().numpy() if hasattr(v2, 'detach') else v2
+
+            debug_info.append({
+                'segment': i,
+                'p1': p1_np, 'p2': p2_np, 'p3': p3_np,
+                'v1': v1_np, 'v2': v2_np,
+                'angle': angle_deg
+            })
+
+            max_angle = max(max_angle, angle_deg)
+
+        # Debug output for the first few calls to understand what's happening
+        debug_counter = getattr(self, '_curve_debug_counter', 0) + 1
+        self._curve_debug_counter = debug_counter
+
+        if debug_counter % 50 == 0:  # Every 50th call
+            print(f"[CURVE DEBUG] max_angle: {max_angle:.1f}°")
+            for info in debug_info:
+                print(f"  Seg{info['segment']}: P1{info['p1']} -> P2{info['p2']} -> P3{info['p3']}")
+                print(f"    V1{info['v1']}, V2{info['v2']}, angle: {info['angle']:.1f}°")
+
+        return max_angle
+
+    def _calculate_angle_between_vectors(self, v1: torch.Tensor, v2: torch.Tensor) -> float:
+        """Calculate angle between two vectors in radians"""
+        # Normalize vectors
+        v1_norm = v1 / (torch.norm(v1) + 1e-9)
+        v2_norm = v2 / (torch.norm(v2) + 1e-9)
+
+        # Calculate dot product
+        dot_product = torch.dot(v1_norm, v2_norm)
+
+        # Clamp to avoid numerical issues
+        dot_product = torch.clamp(dot_product, -1.0, 1.0)
+
+        # Calculate angle between vectors
+        # angle_rad = 0 means vectors are aligned (straight)
+        # angle_rad = π means vectors are opposite (U-turn)
+        angle_rad = torch.acos(dot_product)
+
+        # Return the deflection angle (0 = straight, π = U-turn)
+        return float(angle_rad.item())
+
+    def _calculate_curve_reduction_factor(self, curve_angle_deg: float) -> float:
+        """Calculate lookahead reduction factor based on curve angle"""
+        if curve_angle_deg <= self.curve_angle_threshold:
+            return 1.0  # No reduction for gentle curves
+
+        # Progressive reduction based on curve severity
+        # 30° -> 1.0x, 90° -> 0.3x (curve_lookahead_reduction_factor), 180° -> 0.1x
+        angle_ratio = (curve_angle_deg - self.curve_angle_threshold) / (180.0 - self.curve_angle_threshold)
+        angle_ratio = min(1.0, max(0.0, angle_ratio))  # Clamp to [0, 1]
+
+        # Interpolate between 1.0 and curve_lookahead_reduction_factor
+        min_factor = max(0.1, self.curve_lookahead_reduction_factor)  # Minimum 10% of original
+        reduction_factor = 1.0 - angle_ratio * (1.0 - min_factor)
+
+        return reduction_factor
+
     def is_goal_reached(self, current_pose: torch.Tensor, goal_state: torch.Tensor) -> bool:
         if goal_state is None:
             return False
@@ -363,4 +512,11 @@ class GoalCritic(BaseCritic):
         self.lookahead_min_distance = params.get('lookahead_min_distance', self.lookahead_min_distance)
         self.lookahead_max_distance = params.get('lookahead_max_distance', self.lookahead_max_distance)
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', self.use_multiple_waypoints)
+
+        # Update curve-based parameters
+        self.curve_detection_enabled = params.get('curve_detection_enabled', self.curve_detection_enabled)
+        self.curve_angle_threshold = params.get('curve_angle_threshold', self.curve_angle_threshold)
+        self.curve_lookahead_reduction_factor = params.get('curve_lookahead_reduction_factor', self.curve_lookahead_reduction_factor)
+        self.curve_min_lookahead = params.get('curve_min_lookahead', self.curve_min_lookahead)
+        self.curve_detection_distance = params.get('curve_detection_distance', self.curve_detection_distance)
         print("[GoalCritic] Parameters updated")

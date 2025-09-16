@@ -20,7 +20,7 @@ def generate_launch_description():
         # Launch arguments
         DeclareLaunchArgument(
             'map_file',
-            default_value='20250807_v3.json',
+            default_value='d2_v1.json',
             description='JSON map file for sequential planner'
         ),
         

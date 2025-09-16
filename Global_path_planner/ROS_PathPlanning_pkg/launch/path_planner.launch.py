@@ -16,7 +16,7 @@ def generate_launch_description():
     map_file_arg = DeclareLaunchArgument(
         'map_file_path',
         # default_value='/home/d2-521-30/repo/local_ws/src/GraphMap_Server/maps/3x3_map.json',
-        default_value='',
+        default_value='d2_v1.json',
         description='Path to the JSON map file'
     )
     

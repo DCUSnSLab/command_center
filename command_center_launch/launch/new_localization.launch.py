@@ -14,7 +14,7 @@ def generate_launch_description():
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
-                    'mando2.json'
+                    'DCU_playground_v2.json'
                 ])
 
     return LaunchDescription([
@@ -103,20 +103,20 @@ def generate_launch_description():
             ]
         ),
 
-        # pointcloud to laserscan
-        TimerAction(
-            period=6.0,
-            actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource([
-                        os.path.join(
-                            FindPackageShare('pointcloud_to_laserscan').find('pointcloud_to_laserscan'),
-                            'launch',
-                            'velodyne_to_scan.launch.py'
-                        )
-                    ]),
-                    launch_arguments={'use_sim_time': use_sim_time}.items()
-                )
-            ]
-        )
+        # # pointcloud to laserscan
+        # TimerAction(
+        #     period=6.0,
+        #     actions=[
+        #         IncludeLaunchDescription(
+        #             PythonLaunchDescriptionSource([
+        #                 os.path.join(
+        #                     FindPackageShare('pointcloud_to_laserscan').find('pointcloud_to_laserscan'),
+        #                     'launch',
+        #                     'velodyne_to_scan.launch.py'
+        #                 )
+        #             ]),
+        #             launch_arguments={'use_sim_time': use_sim_time}.items()
+        #         )
+        #     ]
+        # )
     ])
