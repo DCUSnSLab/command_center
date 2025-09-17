@@ -39,10 +39,6 @@ class GoalCritic(BaseCritic):
         self.curve_min_lookahead = params.get('curve_min_lookahead', 0.5)  # minimum lookahead in curves
         self.curve_detection_distance = params.get('curve_detection_distance', 3.0)  # distance to look ahead for curve detection
 
-        # Phase 1: Basic lookahead extension parameters
-        self.lookahead_extension_enabled = params.get('lookahead_extension_enabled', True)
-        self.lookahead_extension_distance = params.get('lookahead_extension_distance', 1.0)  # 1m extension
-
         # Behavior options
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', True)
         self.respect_reverse_heading = params.get('respect_reverse_heading', False)
@@ -59,7 +55,6 @@ class GoalCritic(BaseCritic):
               f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
         print(f"[GoalCritic] Multi-waypoints: {self.use_multiple_waypoints}, reverse_heading: {self.respect_reverse_heading}")
         print(f"[GoalCritic] Curve detection: {self.curve_detection_enabled}, angle_threshold: {self.curve_angle_threshold}°, reduction: {self.curve_lookahead_reduction_factor}x")
-        print(f"[GoalCritic] Lookahead extension: {self.lookahead_extension_enabled}, distance: {self.lookahead_extension_distance}m")
 
     @staticmethod
     def _relu(x: torch.Tensor) -> torch.Tensor:
@@ -89,9 +84,6 @@ class GoalCritic(BaseCritic):
         trajectories = trajectories.to(self.device, self.dtype)
         robot_state = robot_state.to(self.device, self.dtype)
         goal_state = goal_state.to(self.device, self.dtype)
-
-        # Store robot_state for lookahead extension functions
-        self.current_robot_state = robot_state
 
         K, T_plus_1, _ = trajectories.shape
         current_pos = robot_state[:2]                      # [2]
@@ -142,16 +134,10 @@ class GoalCritic(BaseCritic):
         # Dummy target_yaw for visualization (current robot yaw)
         target_yaw = robot_state[2] if robot_state is not None else torch.zeros(1, device=self.device, dtype=self.dtype)
 
-        # Phase 1: Apply lookahead extension
-        extended_lookahead_point = self._extend_lookahead_by_vehicle_heading(lookahead_point, robot_state)
-
-        # store extended lookahead point, yaw and target direction for viz without holding the graph
-        self.last_lookahead_point = extended_lookahead_point.detach().cpu()
+        # store lookahead point, yaw and target direction for viz without holding the graph
+        self.last_lookahead_point = lookahead_point.detach().cpu()
         self.last_lookahead_yaw = target_yaw.detach().cpu()
         self.last_target_direction = target_direction.detach().cpu()
-
-        # Update lookahead_point for cost calculation to use extended version
-        lookahead_point = extended_lookahead_point
 
         # --- Trajectory slices
         traj_positions = trajectories[:, :, :2]  # [K, T+1, 2]
@@ -261,16 +247,9 @@ class GoalCritic(BaseCritic):
         goal_distance = torch.norm(goal_vec) + 1e-9
 
         if (goal_distance <= total_lookahead).item():
-            lookahead_point = goal_pos
-        else:
-            goal_dir = goal_vec / goal_distance
-            lookahead_point = current_pos + goal_dir * total_lookahead
-
-        # Phase 1: Apply lookahead extension (assuming robot_state available in context)
-        if hasattr(self, 'current_robot_state') and self.current_robot_state is not None:
-            lookahead_point = self._extend_lookahead_by_vehicle_heading(lookahead_point, self.current_robot_state)
-
-        return lookahead_point
+            return goal_pos
+        goal_dir = goal_vec / goal_distance
+        return current_pos + goal_dir * total_lookahead
 
     def get_lookahead_point(self) -> Optional[torch.Tensor]:
         return getattr(self, 'last_lookahead_point', None)
@@ -344,13 +323,7 @@ class GoalCritic(BaseCritic):
             return current_goal_pos
 
         remaining = float((total_lookahead - d_cur).item())
-        lookahead_point = self._extend_lookahead_through_waypoints(current_goal_pos, remaining, next_wps, next_node_types, current_node_type)
-
-        # Phase 1: Apply lookahead extension (robot_state should be available in compute_cost context)
-        if hasattr(self, 'current_robot_state') and self.current_robot_state is not None:
-            lookahead_point = self._extend_lookahead_by_vehicle_heading(lookahead_point, self.current_robot_state)
-
-        return lookahead_point
+        return self._extend_lookahead_through_waypoints(current_goal_pos, remaining, next_wps, next_node_types, current_node_type)
 
     def _extend_lookahead_through_waypoints(self, start_pos: torch.Tensor, remaining_distance: float, 
                                           next_waypoints: list, next_node_types: list, current_node_type: int) -> torch.Tensor:
@@ -516,35 +489,6 @@ class GoalCritic(BaseCritic):
 
         return reduction_factor
 
-    def _get_vehicle_heading_direction(self, robot_state: torch.Tensor) -> torch.Tensor:
-        """Get current vehicle heading direction as unit vector"""
-        if robot_state is None or len(robot_state) < 3:
-            # Fallback: return forward direction
-            return torch.tensor([1.0, 0.0], device=self.device, dtype=self.dtype)
-
-        vehicle_yaw = robot_state[2]  # Assuming robot_state = [x, y, yaw, ...]
-        heading_direction = torch.tensor([
-            torch.cos(vehicle_yaw),
-            torch.sin(vehicle_yaw)
-        ], device=self.device, dtype=self.dtype)
-
-        return heading_direction
-
-    def _extend_lookahead_by_vehicle_heading(self, original_lookahead: torch.Tensor,
-                                           robot_state: torch.Tensor) -> torch.Tensor:
-        """Phase 1: Extend lookahead by 1m in vehicle heading direction"""
-        if not self.lookahead_extension_enabled:
-            return original_lookahead
-
-        # Get current vehicle heading direction
-        heading_direction = self._get_vehicle_heading_direction(robot_state)
-
-        # Extend lookahead by specified distance in heading direction
-        extension_vector = heading_direction * self.lookahead_extension_distance
-        extended_lookahead = original_lookahead + extension_vector
-
-        return extended_lookahead
-
     def is_goal_reached(self, current_pose: torch.Tensor, goal_state: torch.Tensor) -> bool:
         if goal_state is None:
             return False
@@ -575,8 +519,4 @@ class GoalCritic(BaseCritic):
         self.curve_lookahead_reduction_factor = params.get('curve_lookahead_reduction_factor', self.curve_lookahead_reduction_factor)
         self.curve_min_lookahead = params.get('curve_min_lookahead', self.curve_min_lookahead)
         self.curve_detection_distance = params.get('curve_detection_distance', self.curve_detection_distance)
-
-        # Update lookahead extension parameters
-        self.lookahead_extension_enabled = params.get('lookahead_extension_enabled', self.lookahead_extension_enabled)
-        self.lookahead_extension_distance = params.get('lookahead_extension_distance', self.lookahead_extension_distance)
         print("[GoalCritic] Parameters updated")
