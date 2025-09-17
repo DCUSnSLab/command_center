@@ -9,6 +9,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 import math
 import os
+import time
 from typing import Optional
 
 from geometry_msgs.msg import PoseStamped
@@ -93,6 +94,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.current_stop_flag = False  # False = no obstacle detected
         self.current_traffic_light_state = 0  # 0 = none/unknown
         self.safety_pause_sent = False  # Track if safety pause already sent
+        self.last_safety_pause_time = 0.0  # Track last pause command time
         
         # Initialize behavior parameter manager
         self.behavior_param_manager = None
@@ -341,7 +343,7 @@ class SimpleBehaviorPlannerNode(Node):
     def stop_flag_callback(self, msg: Bool):
         """Handle obstacle detection stop flag"""
         self.current_stop_flag = msg.data
-        self.get_logger().debug(f'Stop flag received: {self.current_stop_flag}')
+        self.get_logger().info(f'Stop flag received: {self.current_stop_flag}')
 
         # Reset safety pause flag when obstacle is cleared
         if not self.current_stop_flag:
@@ -804,9 +806,19 @@ class SimpleBehaviorPlannerNode(Node):
             self.current_traffic_light_state in [3, 4]  # Green light or left turn
         )
 
-        if should_stop and not self.safety_pause_sent:
-            self._send_safety_pause_command()
-            self.safety_pause_sent = True
+        # Debug logging
+        if should_stop:
+            self.get_logger().info(f"[DEBUG] Safety stop condition: stop_flag={self.current_stop_flag}, "
+                                 f"traffic_light={self.current_traffic_light_state}, "
+                                 f"safety_pause_sent={self.safety_pause_sent}")
+
+        if should_stop:
+            # Send pause command every 0.5 seconds to maintain continuous pause
+            current_time = time.time()
+            if current_time - self.last_safety_pause_time >= 0.5:
+                self.get_logger().info("[DEBUG] Sending safety pause command...")
+                self._send_safety_pause_command()
+                self.last_safety_pause_time = current_time
 
     def _send_safety_pause_command(self):
         """Send 1-second pause command for safety stop"""
@@ -814,7 +826,7 @@ class SimpleBehaviorPlannerNode(Node):
             pause_msg = PauseCommand()
             pause_msg.header.stamp = self.get_clock().now().to_msg()
             pause_msg.header.frame_id = 'safety_stop'
-            pause_msg.pause_duration = 1.0  # 1 second pause
+            pause_msg.pause_duration = 2.0  # 2 second pause
             pause_msg.node_id = "safety_stop"
 
             # Determine reason for pause
