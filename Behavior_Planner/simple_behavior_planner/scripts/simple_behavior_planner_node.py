@@ -343,7 +343,7 @@ class SimpleBehaviorPlannerNode(Node):
     def stop_flag_callback(self, msg: Bool):
         """Handle obstacle detection stop flag"""
         self.current_stop_flag = msg.data
-        self.get_logger().info(f'Stop flag received: {self.current_stop_flag}')
+        self.get_logger().debug(f'Stop flag received: {self.current_stop_flag}')
 
         # Reset safety pause flag when obstacle is cleared
         if not self.current_stop_flag:
@@ -798,48 +798,53 @@ class SimpleBehaviorPlannerNode(Node):
 
     def _check_safety_stop_conditions(self):
         """Check safety stop conditions and send pause command if needed"""
-        # Safety stop conditions:
-        # 1. Obstacle detected (stop_flag == True)
-        # 2. Traffic light green (state_id == 3) or left turn (state_id == 4)
-        should_stop = (
-            self.current_stop_flag or  # Obstacle detected
-            self.current_traffic_light_state in [3, 4]  # Green light or left turn
-        )
+        should_stop = False
+
+        # Check node type specific conditions
+        if self.current_node_type == 9:
+            # Node type 9: Only check obstacle detection
+            should_stop = self.current_stop_flag
+
+        elif self.current_node_type == 10:
+            # Node type 10: Only check traffic light conditions
+            should_stop = self.current_traffic_light_state in [1]  # Green light or left turn
+
+        else:
+            # Other node types: No safety stop conditions
+            return
 
         # Debug logging
         if should_stop:
-            self.get_logger().info(f"[DEBUG] Safety stop condition: stop_flag={self.current_stop_flag}, "
-                                 f"traffic_light={self.current_traffic_light_state}, "
-                                 f"safety_pause_sent={self.safety_pause_sent}")
+            self.get_logger().info(f"[DEBUG] Safety stop condition (node_type={self.current_node_type}): "
+                                 f"stop_flag={self.current_stop_flag}, "
+                                 f"traffic_light={self.current_traffic_light_state}")
 
         if should_stop:
             # Send pause command every 0.5 seconds to maintain continuous pause
             current_time = time.time()
             if current_time - self.last_safety_pause_time >= 0.5:
-                self.get_logger().info("[DEBUG] Sending safety pause command...")
+                self.get_logger().info(f"[DEBUG] Sending safety pause command for node_type {self.current_node_type}...")
                 self._send_safety_pause_command()
                 self.last_safety_pause_time = current_time
 
     def _send_safety_pause_command(self):
-        """Send 1-second pause command for safety stop"""
+        """Send pause command for safety stop based on node type"""
         try:
             pause_msg = PauseCommand()
             pause_msg.header.stamp = self.get_clock().now().to_msg()
             pause_msg.header.frame_id = 'safety_stop'
             pause_msg.pause_duration = 2.0  # 2 second pause
-            pause_msg.node_id = "safety_stop"
+            pause_msg.node_id = f"safety_stop_type_{self.current_node_type}"
 
-            # Determine reason for pause
+            # Determine reason for pause based on node type
             reasons = []
-            if self.current_stop_flag:
-                reasons.append("obstacle detected")
-            if self.current_traffic_light_state == 3:
-                reasons.append("green light")
-            if self.current_traffic_light_state == 4:
-                reasons.append("left turn signal")
+            if self.current_node_type == 9 and self.current_stop_flag:
+                reasons.append("obstacle detected (node_type 9)")
+            elif self.current_node_type == 10:
+                if self.current_traffic_light_state == 1:
+                    reasons.append("RED (node_type 10)")
 
-            pause_msg.reason = f"Safety stop: {', '.join(reasons)}"
-
+            pause_msg.reason = f"Safety stop: {', '.join(reasons)}" if reasons else f"Safety stop (node_type {self.current_node_type})"
             self.pause_command_pub.publish(pause_msg)
             self.get_logger().info(f"Safety pause command sent: {pause_msg.reason}")
 
