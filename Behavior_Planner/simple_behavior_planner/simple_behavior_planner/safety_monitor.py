@@ -23,7 +23,7 @@ class SafetyMonitor:
 
         # Timing control
         self.last_safety_pause_time = 0.0
-        self.safety_pause_interval = 0.5  # seconds
+        self.safety_pause_interval = 0.1  # seconds
 
         # Current behavior type (set by main node)
         self.current_behavior_type = 1

@@ -60,7 +60,7 @@ class SimpleBehaviorPlannerNode(Node):
         self._link_module_publishers()
 
         # Main planning timer
-        self.create_timer(0.1, self.planning_callback)  # 10Hz
+        self.create_timer(0.05, self.planning_callback)  # 20Hz
 
         self.get_logger().info('Simple Behavior Planner Node (Refactored) initialized')
         self._log_configuration()
