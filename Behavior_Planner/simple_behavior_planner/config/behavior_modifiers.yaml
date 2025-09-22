@@ -17,7 +17,7 @@
           lookahead_base_distance: 0.6  # 60% (짧게)
         overrides:
           max_linear_velocity: 0.0      # 전진 속도 0
-          min_linear_velocity: -1.5     # 후진 속도 -1.5 m/s
+          min_linear_velocity: -1.0     # 후진 속도 -1.5 m/s
           respect_reverse_heading: true
           
       3:  # 전진 정밀 pose tracking  
@@ -40,7 +40,7 @@
           goal_reached_threshold: 0.5   # 40% (매우 정밀한 도달 판정)
         overrides:
           max_linear_velocity: 0.0      # 전진 속도 0
-          min_linear_velocity: -0.8     # 느린 후진 속도
+          min_linear_velocity: -0.5     # 느린 후진 속도
           respect_reverse_heading: true
           
       5:  # 가속(빠르게 전진)

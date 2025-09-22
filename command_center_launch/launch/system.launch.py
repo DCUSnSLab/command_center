@@ -1,10 +1,11 @@
 import os
 import time
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
+
 
 
 def generate_launch_description():
@@ -14,7 +15,7 @@ def generate_launch_description():
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
-                    'mando2.json'
+                    'pal_right.json'
                 ])
 
     return LaunchDescription([
