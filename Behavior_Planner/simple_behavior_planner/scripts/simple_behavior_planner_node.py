@@ -16,7 +16,7 @@ from std_msgs.msg import Bool, String, Header, Int32
 
 from command_center_interfaces.msg import (
     PlannedPath, ControllerGoalStatus, MultipleWaypoints,
-    MPPIParams, PauseCommand
+    MPPIParams, PauseCommand, RequestReplan
 )
 
 # Local modules
@@ -49,6 +49,16 @@ class SimpleBehaviorPlannerNode(Node):
         self.emergency_stop_requested = False
         self.pause_signal_sent = False
 
+        # Dynamic replanning state
+        self.current_route_type = "A"  # Default to route A
+        self.path_availability = True  # Assume path is available initially
+        self.last_goal_node_id = ""   # Track last goal for replanning
+
+        # One-time trigger flags
+        self.path_query_sent = False  # Flag to prevent multiple queries for same node
+        self.current_trigger_node_id = ""  # Track which node triggered the query
+        self.replan_request_sent = False  # Flag to prevent multiple replan requests
+
         # Setup QoS profiles
         self._setup_qos_profiles()
 
@@ -77,6 +87,11 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('stop_flag_topic', '/stop_flag')
         self.declare_parameter('traffic_light_topic', '/tl/state_id')
 
+        # Dynamic replanning parameters
+        self.declare_parameter('path_availability_topic', '/path_availability')
+        self.declare_parameter('request_replan_topic', '/request_replan')
+        self.declare_parameter('node_type_triggers', [12, 13])  # node types that trigger path check
+
         # Behavior parameters
         self.declare_parameter('pause_trigger_distance', 0.8)
         self.declare_parameter('waypoint_mode', 'multiple')
@@ -93,6 +108,11 @@ class SimpleBehaviorPlannerNode(Node):
         self.emergency_stop_topic = self.get_parameter('emergency_stop_topic').value
         self.stop_flag_topic = self.get_parameter('stop_flag_topic').value
         self.traffic_light_topic = self.get_parameter('traffic_light_topic').value
+
+        # Dynamic replanning parameters
+        self.path_availability_topic = self.get_parameter('path_availability_topic').value
+        self.request_replan_topic = self.get_parameter('request_replan_topic').value
+        self.node_type_triggers = self.get_parameter('node_type_triggers').value
 
         self.pause_trigger_distance = self.get_parameter('pause_trigger_distance').value
         self.waypoint_mode = self.get_parameter('waypoint_mode').value
@@ -140,6 +160,11 @@ class SimpleBehaviorPlannerNode(Node):
             Int32, self.traffic_light_topic,
             self.traffic_light_callback, self.reliable_qos)
 
+        # Dynamic replanning subscribers
+        self.path_availability_sub = self.create_subscription(
+            Bool, self.path_availability_topic,
+            self.path_availability_callback, self.reliable_qos)
+
     def _setup_publishers(self):
         """발행자 설정"""
         self.emergency_stop_pub = self.create_publisher(
@@ -163,6 +188,10 @@ class SimpleBehaviorPlannerNode(Node):
             self.mppi_param_pub = self.create_publisher(
                 MPPIParams, '/mppi_update_params', self.reliable_qos)
 
+        # Dynamic replanning publisher
+        self.request_replan_pub = self.create_publisher(
+            RequestReplan, self.request_replan_topic, self.reliable_qos)
+
     def _link_module_publishers(self):
         """모듈에 발행자 연결"""
         # Waypoint publisher
@@ -184,6 +213,10 @@ class SimpleBehaviorPlannerNode(Node):
         self.get_logger().info(f'Behavior control: {"enabled" if self.enable_behavior_control else "disabled"}')
         self.get_logger().info(f'Planned path topic: {self.planned_path_topic}')
         self.get_logger().info(f'Goal status topic: {self.goal_status_topic}')
+        self.get_logger().info(f'Path availability topic: {self.path_availability_topic}')
+        self.get_logger().info(f'Request replan topic: {self.request_replan_topic}')
+        self.get_logger().info(f'Node type triggers: {self.node_type_triggers}')
+        self.get_logger().info(f'Initial route type: {self.current_route_type}')
 
     # ===== Callback Methods =====
 
@@ -199,12 +232,25 @@ class SimpleBehaviorPlannerNode(Node):
         self.path_manager.update_path(msg)
         self.subgoal_published = False
 
+        # Update last goal node ID for replanning
+        self._update_last_goal_node_id(msg)
+
+        # Update route type based on received path (if it was a replan response)
+        if self.replan_request_sent:
+            # Determine route type from path_id or start_node_id
+            new_route_type = self._determine_route_type_from_path(msg)
+            if new_route_type and new_route_type != self.current_route_type:
+                old_route = self.current_route_type
+                self.current_route_type = new_route_type
+                self.get_logger().info(f'Route type updated: {old_route} -> {self.current_route_type}')
+
         # Log path info
         path_info = self.path_manager.get_path_info()
         node_types = self.path_manager.get_node_types()
 
         self.get_logger().info(f'Received path with {path_info["total_nodes"]} nodes')
         self.get_logger().info(f'Path ID: {path_info["path_id"]}')
+        self.get_logger().info(f'Current route type: {self.current_route_type}')
         self.get_logger().info(f'Node types: {list(set(node_types))}')
 
         # Update initial behavior
@@ -241,6 +287,27 @@ class SimpleBehaviorPlannerNode(Node):
         self.safety_monitor.update_traffic_light_state(msg.data)
         self.get_logger().debug(f'Traffic light state received: {msg.data}')
 
+    def path_availability_callback(self, msg: Bool):
+        """경로 가용성 콜백 - 인지 모듈로부터 받는 응답"""
+        # Only process if we're currently at a trigger node and haven't sent replan request yet
+        if not self.path_query_sent or self.replan_request_sent:
+            return
+
+        self.path_availability = msg.data
+        self.get_logger().info(f'Path availability received: {self.path_availability} for node {self.current_trigger_node_id}')
+
+        # Only trigger replanning if path is NOT available (false)
+        if not self.path_availability:
+            self.get_logger().info(f'Current route {self.current_route_type} is NOT available, triggering replanning...')
+            # Get current trigger node type
+            current_target = self.path_manager.get_current_target_node()
+            trigger_node_type = current_target.get('node_type') if current_target else None
+            self._trigger_replanning(trigger_node_type)
+        else:
+            self.get_logger().info(f'Current route {self.current_route_type} is available, continuing with existing path')
+            # Mark as processed but don't trigger replanning
+            self.replan_request_sent = True  # Prevent further processing for this trigger node
+
     # ===== Planning Logic =====
 
     def planning_callback(self):
@@ -254,6 +321,9 @@ class SimpleBehaviorPlannerNode(Node):
 
         # Safety monitoring
         self.safety_monitor.check_safety_conditions()
+
+        # Check for node type trigger (dynamic replanning)
+        self._check_node_type_trigger()
 
         # Behavior control
         self._update_behavior_if_needed()
@@ -362,6 +432,121 @@ class SimpleBehaviorPlannerNode(Node):
         stop_msg.data = True
         self.emergency_stop_pub.publish(stop_msg)
         self.get_logger().warn('Emergency stop published!')
+
+    # ===== Dynamic Replanning Logic =====
+
+    def _check_node_type_trigger(self):
+        """Node type 트리거 확인 - 경로 변경 지점에서 호출"""
+        current_target = self.path_manager.get_current_target_node()
+        if not current_target:
+            return
+
+        current_node_type = current_target.get('node_type')
+        current_node_id = current_target['id']
+
+        # Check if current node type matches any trigger (12 or 13)
+        if current_node_type in self.node_type_triggers:
+            # Check if we already processed this specific node
+            if self.current_trigger_node_id == current_node_id and self.path_query_sent:
+                # Already processed this node, skip
+                return
+
+            # New trigger node detected
+            self.current_trigger_node_id = current_node_id
+            self.path_query_sent = True
+            self.replan_request_sent = False  # Reset replan flag for new trigger
+
+            self.get_logger().info(f'Node type trigger detected: {current_node_type} at node {current_node_id}')
+            self.get_logger().info(f'Querying perception system for route availability...')
+            # Here we would query perception system, but for now we assume it responds via path_availability_callback
+        else:
+            # Not a trigger node, reset flags when moving to different node type
+            if self.current_trigger_node_id != current_node_id:
+                self.path_query_sent = False
+                self.current_trigger_node_id = ""
+                self.replan_request_sent = False
+
+    def _trigger_replanning(self, trigger_node_type=None):
+        """재계획 트리거 - 경로가 사용 불가능할 때 호출"""
+        # Prevent multiple replan requests for same trigger
+        if self.replan_request_sent:
+            self.get_logger().debug('Replan request already sent for this trigger node')
+            return
+
+        if not self.path_manager.path_nodes:
+            self.get_logger().warn('No path available for replanning')
+            return
+
+        # Determine route type based on trigger node type
+        if trigger_node_type == 12:
+            new_route_type = "T"
+        elif trigger_node_type == 13:
+            new_route_type = "P"
+        else:
+            # Fallback for unknown node types
+            new_route_type = "B"
+            self.get_logger().warn(f'Unknown trigger node type: {trigger_node_type}, using fallback route type B')
+
+        # Get current position in path for start_node_id
+        current_target = self.path_manager.get_current_target_node()
+        start_node_id = current_target['id'] if current_target else ""
+
+        # Use the last goal from current path
+        goal_node_id = self.last_goal_node_id or self._get_final_node_id()
+
+        self._send_replan_request(start_node_id, goal_node_id, new_route_type)
+
+    def _send_replan_request(self, start_node_id: str, goal_node_id: str, route_type: str):
+        """재계획 요청 메시지 전송"""
+        try:
+            replan_msg = RequestReplan()
+            replan_msg.header = Header()
+            replan_msg.header.stamp = self.get_clock().now().to_msg()
+            replan_msg.header.frame_id = 'behavior_planner'
+
+            replan_msg.start_node_id = start_node_id
+            replan_msg.goal_node_id = goal_node_id
+            replan_msg.route_type = route_type
+
+            self.request_replan_pub.publish(replan_msg)
+
+            # Mark replan request as sent
+            self.replan_request_sent = True
+
+            # NOTE: Don't update current_route_type here - wait until new path is received
+            # self.current_route_type will be updated when planned_path_callback receives new path
+
+            self.get_logger().info(f'Replan request sent: route_type={route_type}, '
+                                 f'start: {start_node_id}, goal: {goal_node_id}')
+            self.get_logger().info(f'Waiting for new planned path from Global Planner...')
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to send replan request: {e}')
+
+    def _get_final_node_id(self) -> str:
+        """현재 경로의 마지막 노드 ID 반환"""
+        if self.path_manager.path_nodes:
+            return self.path_manager.path_nodes[-2]['id']
+        return ""
+
+    def _update_last_goal_node_id(self, path_msg: PlannedPath):
+        """마지막 목표 노드 ID 업데이트"""
+        self.last_goal_node_id = path_msg.goal_node_id
+
+    def _determine_route_type_from_path(self, path_msg: PlannedPath) -> str:
+        """수신된 경로로부터 route type 결정"""
+        # Path ID나 start_node_id를 기반으로 route type 판단
+        path_id = path_msg.path_id.lower()
+        start_node_id = path_msg.start_node_id
+
+        # Path ID에서 route type 추출 시도
+        if 'route_a' in path_id or '_a_' in path_id or path_id.endswith('_a'):
+            return "A"
+        elif 'route_b' in path_id or '_b_' in path_id or path_id.endswith('_b'):
+            return "B"
+
+        # 현재와 다른 타입으로 추정 (toggle)
+        return "B" if self.current_route_type == "A" else "A"
 
 
 def main(args=None):

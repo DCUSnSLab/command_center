@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MultipleWaypoints.msg"
   "msg/MPPIParams.msg"
   "msg/PauseCommand.msg"
+  "msg/RequestReplan.msg"
   DEPENDENCIES std_msgs geometry_msgs gmserver
 )
 

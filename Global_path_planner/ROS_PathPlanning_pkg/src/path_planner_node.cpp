@@ -428,13 +428,13 @@ private:
     }
     
     std::tuple<int, int, int> getRGBColor(int index) {
-        if (index < 1 || index > 11) {
-            throw std::invalid_argument("Index must be between 1 and 11");
+        if (index < 1 || index > 13) {
+            throw std::invalid_argument("Index must be between 1 and 13");
         }
-        
+
         switch (index) {
             case 1:  return std::make_tuple(255, 0, 0);     // Red
-            case 2:  return std::make_tuple(0, 255, 0);     // Green  
+            case 2:  return std::make_tuple(0, 255, 0);     // Green
             case 3:  return std::make_tuple(0, 0, 255);     // Blue
             case 4:  return std::make_tuple(255, 255, 0);   // Yellow
             case 5:  return std::make_tuple(255, 0, 255);   // Magenta
@@ -444,6 +444,8 @@ private:
             case 9:  return std::make_tuple(255, 192, 203); // Pink
             case 10: return std::make_tuple(165, 42, 42);   // Brown
             case 11: return std::make_tuple(128, 128, 128); // Gray
+            case 12: return std::make_tuple(75, 0, 130);    // Indigo - for dynamic replanning trigger
+            case 13: return std::make_tuple(255, 20, 147);  // Deep Pink - for dynamic replanning trigger
             default: return std::make_tuple(0, 0, 0);       // Black (fallback)
         }
     }
