@@ -625,18 +625,18 @@ private:
         planPathFromGpsToGoal();
     }
 
-    void branchCallback(const command_center_interfaces::msg::RequestReplan::SharedPtr msg) {
-        RCLCPP_INFO(this->get_logger(), "branch called with node name: %s", msg->data.stard_node_id.c_str());
+    void branchCallback(const command_center_interfaces::msg::RequestReplan msg) {
+        RCLCPP_INFO(this->get_logger(), "branch called with node name: %s", msg.start_node_id.c_str());
 
         // Search for node with the given name in the graph
-        auto node_it = node_id_to_index_.find(msg->data.stard_node_id);
+        auto node_it = node_id_to_index_.find(msg.start_node_id);
         if (node_it == node_id_to_index_.end()) {
-            RCLCPP_ERROR(this->get_logger(), "Node with name '%s' not found in graph", msg->data.stard_node_id.c_str());
+            RCLCPP_ERROR(this->get_logger(), "Node with name '%s' not found in graph", msg.start_node_id.c_str());
             return;
         }
 
         int branch_node_index = node_it->second;
-        RCLCPP_INFO(this->get_logger(), "Found branch node '%s' at index %d", msg->data.stard_node_id.c_str(), branch_node_index);
+        RCLCPP_INFO(this->get_logger(), "Found branch node '%s' at index %d", msg.start_node_id.c_str(), branch_node_index);
 
         // Plan path from current position to branch node, then from branch node to goal
         // This ensures the branch node is included in the path
@@ -1551,7 +1551,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscriber_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr branch_subscriber_;
+    rclcpp::Subscription<command_center_interfaces::msg::RequestReplan>::SharedPtr branch_subscriber_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
     rclcpp::Publisher<command_center_interfaces::msg::PlannedPath>::SharedPtr planned_path_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;
