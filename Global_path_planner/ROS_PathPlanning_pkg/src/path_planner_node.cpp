@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -103,6 +104,10 @@ public:
         goal_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "goal_pose", 10,
             std::bind(&PathPlannerNode::goalCallback, this, std::placeholders::_1));
+
+        branch_subscriber_ = this->create_subscription<std_msgs::msg::String>( // 전역 경로 계획 중 분기점 Node에서 향후 경로 선택을 위한 Subscriber
+            "branch_selection", 10,
+            std::bind(&PathPlannerNode::branchCallback, this, std::placeholders::_1));
         
         // Create publishers
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", 10);
@@ -616,6 +621,24 @@ private:
         // Trigger immediate path planning
         planPathFromGpsToGoal();
     }
+
+    void branchCallback(const std_msgs::msg::String::SharedPtr msg) {
+        RCLCPP_INFO(this->get_logger(), "branch called with node name: %s", msg->data.c_str());
+
+        // Search for node with the given name in the graph
+        auto node_it = node_id_to_index_.find(msg->data);
+        if (node_it == node_id_to_index_.end()) {
+            RCLCPP_ERROR(this->get_logger(), "Node with name '%s' not found in graph", msg->data.c_str());
+            return;
+        }
+
+        int branch_node_index = node_it->second;
+        RCLCPP_INFO(this->get_logger(), "Found branch node '%s' at index %d", msg->data.c_str(), branch_node_index);
+
+        // Plan path from current position to branch node, then from branch node to goal
+        // This ensures the branch node is included in the path
+        planPathWithMandatoryNode(branch_node_index);
+    }
     
     void checkAndPlanPath()
     {
@@ -715,7 +738,108 @@ private:
         // Clean up temporary nodes after path planning
         removeTemporaryNodes();
     }
-    
+
+    void planPathWithMandatoryNode(int mandatory_node_index)
+    {
+        if (node_map_.empty()) {
+            RCLCPP_WARN(this->get_logger(), "No map data available for path planning");
+            return;
+        }
+
+        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
+            return;
+        }
+
+        // Clean up any existing temporary nodes first
+        removeTemporaryNodes();
+
+        // Convert GPS to UTM coordinates
+        double start_utm_easting, start_utm_northing;
+        gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
+
+        // Goal has been converted to UTM coordinates in goalCallback
+        double goal_x = goal_pose_.pose.position.x;
+        double goal_y = goal_pose_.pose.position.y;
+
+        // Create temporary start node at GPS position
+        int start_node_id = createTemporaryStartNode(start_utm_easting, start_utm_northing);
+        if (start_node_id == -1) {
+            RCLCPP_ERROR(this->get_logger(), "Could not create temporary start node");
+            return;
+        }
+
+        // Create temporary goal node and connect it to the closest existing node
+        int goal_node_id = createTemporaryGoalNode(goal_x, goal_y);
+        if (goal_node_id == -1) {
+            RCLCPP_ERROR(this->get_logger(), "Could not create temporary goal node");
+            return;
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Planning path from GPS -> temp node %d -> mandatory node %d -> temp goal %d",
+                   start_node_id, mandatory_node_index, goal_node_id);
+
+        // Plan path from start to mandatory node
+        auto path_to_branch = planAStarPath(start_node_id, mandatory_node_index);
+        if (path_to_branch.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "No path found from start to mandatory node %d", mandatory_node_index);
+            removeTemporaryNodes();
+            return;
+        }
+
+        // Plan path from mandatory node to goal
+        auto path_from_branch = planAStarPath(mandatory_node_index, goal_node_id);
+        if (path_from_branch.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "No path found from mandatory node %d to goal", mandatory_node_index);
+            removeTemporaryNodes();
+            return;
+        }
+
+        // Combine paths, avoiding duplication of mandatory node
+        std::vector<std::shared_ptr<AStarNode>> combined_path = path_to_branch;
+        // Skip the first node of path_from_branch since it's the same as the last node of path_to_branch
+        for (size_t i = 1; i < path_from_branch.size(); ++i) {
+            combined_path.push_back(path_from_branch[i]);
+        }
+
+        if (!combined_path.empty()) {
+            // Convert to ROS Path message and adjust for RViz
+            nav_msgs::msg::Path planned_path;
+            planned_path.header.frame_id = "map";
+            planned_path.header.stamp = this->get_clock()->now();
+
+            for (const auto& node : combined_path) {
+                geometry_msgs::msg::PoseStamped pose_stamped;
+                pose_stamped.header.frame_id = "map";
+                pose_stamped.header.stamp = this->get_clock()->now();
+                pose_stamped.pose = node->pose;
+
+                // Adjust position for map origin offset (for RViz visualization)
+                pose_stamped.pose.position.x -= map_utm_easting_;
+                pose_stamped.pose.position.y -= map_utm_northing_;
+
+                planned_path.poses.push_back(pose_stamped);
+            }
+
+            path_publisher_->publish(planned_path);
+
+            // Create detailed path with nodes and links
+            auto detailed_path = createDetailedPlannedPath(combined_path, start_node_id, goal_node_id);
+            planned_path_publisher_->publish(detailed_path);
+
+            RCLCPP_INFO(this->get_logger(), "Published path with mandatory node: %zu poses, %zu detailed nodes, %zu links",
+                       planned_path.poses.size(), detailed_path.path_data.nodes.size(), detailed_path.path_data.links.size());
+
+            // Mark that path has been planned for current goal
+            path_planned_for_current_goal_ = true;
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Combined path is empty");
+        }
+
+        // Clean up temporary nodes after path planning
+        removeTemporaryNodes();
+    }
+
     // A* path planning algorithm implementation
     std::vector<std::shared_ptr<AStarNode>> planAStarPath(int start_id, int goal_id)
     {
@@ -1424,6 +1548,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscriber_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr branch_subscriber_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
     rclcpp::Publisher<command_center_interfaces::msg::PlannedPath>::SharedPtr planned_path_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;

@@ -5,6 +5,13 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:
 
 ## Simulation env(Gazebo)
 
+### dependency
+
+bash
+```
+sudo apt-get install nlohmann-json3-dev
+```
+
 ### commands
 
 bash
