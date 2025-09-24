@@ -626,10 +626,38 @@ private:
     }
 
     void branchCallback(const command_center_interfaces::msg::RequestReplan msg) {
-        RCLCPP_INFO(this->get_logger(), "branch called with node name: %s", msg.start_node_id.c_str());
+        /*
+        아래 코드 블록에서 경로 분기를 위해 하드코딩된 조건식이 다수 존재합니다.
+        각각의 분기 시점은 만도 자율주행 대회에서 T자 주차, 평행 주차 수행을 위한 시점에 해당하며
+        사용한 맵 파일 mando-merge-base.json 기준
+        N136 (T자 주차)
+        -> N0347(A코스)
+        -> N0393(B코스)
+        N0414 (평행 주차)
+        -> N0397(A코스)
+        -> N0415(B코스)
+        에 해당합니다.
+
+        동작 방식
+
+        A 경로를 default로 주행을 시작하며, 주행 중 해당 콜백이 호출되는 경우 분기점에 해당하는 B 경로를 사용
+
+        향후 기능 구현 과정에서 참고 바랍니다.
+         */
 
         // Search for node with the given name in the graph
+
         auto node_it = node_id_to_index_.find(msg.start_node_id);
+        
+        if (msg.route_type == "T") {
+            node_it = node_id_to_index_.find("N0393");
+        }
+
+        else if (msg.route_type == "P") {
+            node_it = node_id_to_index_.find("N0415");
+        }
+
+        // auto node_it = node_id_to_index_.find(msg.start_node_id);
         if (node_it == node_id_to_index_.end()) {
             RCLCPP_ERROR(this->get_logger(), "Node with name '%s' not found in graph", msg.start_node_id.c_str());
             return;
@@ -742,8 +770,7 @@ private:
         removeTemporaryNodes();
     }
 
-    void planPathWithMandatoryNode(int mandatory_node_index)
-    {
+    void planPathWithMandatoryNode(int mandatory_node_index) {
         if (node_map_.empty()) {
             RCLCPP_WARN(this->get_logger(), "No map data available for path planning");
             return;
