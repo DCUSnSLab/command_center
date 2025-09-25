@@ -648,20 +648,68 @@ private:
         // Search for node with the given name in the graph
 
         auto node_it = node_id_to_index_.find(msg.start_node_id);
-        
-        if (msg.route_type == "T") {
-            node_it = node_id_to_index_.find("N0393");
+
+        // Output next nodes' IDs and lengths for the start_node_id
+        if (node_it != node_id_to_index_.end()) {
+            int start_node_index = node_it->second;
+            RCLCPP_INFO(this->get_logger(), "=== Next nodes from start_node_id '%s' (index %d) ===",
+                       msg.start_node_id.c_str(), start_node_index);
+
+            if (adjacency_list_.find(start_node_index) != adjacency_list_.end()) {
+                const auto& links = adjacency_list_[start_node_index];
+                if (links.empty()) {
+                    RCLCPP_INFO(this->get_logger(), "No next nodes found for start_node_id '%s'", msg.start_node_id.c_str());
+                } else {
+                    for (const auto& link : links) {
+                        int next_node_id = (link.from_node_id == start_node_index) ? link.to_node_id : link.from_node_id;
+                        double length = link.length;
+
+                        // Get the string ID for the next node
+                        std::string next_node_string_id = "UNKNOWN";
+                        if (next_node_id >= 0 && next_node_id < static_cast<int>(node_ids_.size())) {
+                            next_node_string_id = node_ids_[next_node_id];
+                        }
+
+                        RCLCPP_INFO(this->get_logger(), "  -> Next Node ID: %s (index: %d), Length: %.2f meters",
+                                   next_node_string_id.c_str(), next_node_id, length);
+                    }
+                }
+            } else {
+                RCLCPP_INFO(this->get_logger(), "Node '%s' not found in adjacency list", msg.start_node_id.c_str());
+            }
+            RCLCPP_INFO(this->get_logger(), "=== End of next nodes list ===");
+        } else {
+            RCLCPP_INFO(this->get_logger(), "start_node_id '%s' not found in node_id_to_index_ map", msg.start_node_id.c_str());
         }
 
-        else if (msg.route_type == "P") {
-            node_it = node_id_to_index_.find("N0415");
+        // Find the node with the bigger cost and store it in bigger_node
+        std::string bigger_node = "";
+        if (node_it != node_id_to_index_.end()) {
+            int start_node_index = node_it->second;
+            if (adjacency_list_.find(start_node_index) != adjacency_list_.end()) {
+                const auto& links = adjacency_list_[start_node_index];
+                double max_length = 0.0;
+                int bigger_node_index = -1;
+
+                for (const auto& link : links) {
+                    int next_node_id = (link.from_node_id == start_node_index) ? link.to_node_id : link.from_node_id;
+                    if (link.length > max_length) {
+                        max_length = link.length;
+                        bigger_node_index = next_node_id;
+                    }
+                }
+
+                // Get the string ID for the bigger cost node
+                if (bigger_node_index >= 0 && bigger_node_index < static_cast<int>(node_ids_.size())) {
+                    bigger_node = node_ids_[bigger_node_index];
+                    RCLCPP_INFO(this->get_logger(), "Bigger cost node found: %s (index: %d), Length: %.2f meters",
+                               bigger_node.c_str(), bigger_node_index, max_length);
+                }
+            }
         }
 
-        // auto node_it = node_id_to_index_.find(msg.start_node_id);
-        if (node_it == node_id_to_index_.end()) {
-            RCLCPP_ERROR(this->get_logger(), "Node with name '%s' not found in graph", msg.start_node_id.c_str());
-            return;
-        }
+        node_it = node_id_to_index_.find(bigger_node);
+        RCLCPP_INFO(this->get_logger(), "Using bigger cost node '%s' for routing", bigger_node.c_str());
 
         int branch_node_index = node_it->second;
         RCLCPP_INFO(this->get_logger(), "Found branch node '%s' at index %d", msg.start_node_id.c_str(), branch_node_index);
