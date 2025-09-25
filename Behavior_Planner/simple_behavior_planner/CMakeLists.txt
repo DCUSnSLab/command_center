@@ -20,6 +20,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/simple_behavior_planner_node.py
   scripts/test_behavior_params.py
+  scripts/test_per.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
