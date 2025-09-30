@@ -12,6 +12,7 @@
   <exec_depend>sequential_global_planner</exec_depend>
   <exec_depend>simple_behavior_planner</exec_depend>
   <exec_depend>bae_mppi</exec_depend>
+  <exec_depend>smppi</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>

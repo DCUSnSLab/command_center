@@ -85,7 +85,7 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('multiple_waypoints_topic', '/multiple_waypoints')
         self.declare_parameter('emergency_stop_topic', '/emergency_stop')
         self.declare_parameter('stop_flag_topic', '/stop_flag')
-        self.declare_parameter('traffic_light_topic', '/tl/state_id')
+        self.declare_parameter('traffic_light_topic', '/tl/state')
 
         # Dynamic replanning parameters
         self.declare_parameter('path_availability_topic', '/path_availability')

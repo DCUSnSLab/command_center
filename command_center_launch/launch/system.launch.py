@@ -15,7 +15,7 @@ def generate_launch_description():
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
-                    'pal_right.json'
+                    'mando_real_final.json'
                 ])
 
     return LaunchDescription([
@@ -52,44 +52,9 @@ def generate_launch_description():
                 )
             ]
         ),
-        
-        # # Launch 3: MPPI controller (after 6 seconds)
-        # TimerAction(
-        #     period=4.0,
-        #     actions=[
-        #         IncludeLaunchDescription(
-        #             PythonLaunchDescriptionSource([
-        #                 os.path.join(
-        #                     FindPackageShare('bae_mppi').find('bae_mppi'),
-        #                     'launch',
-        #                     'mppi_distributed.launch.py'
-        #                 )
-        #             ]),
-        #             launch_arguments={'use_sim_time': use_sim_time}.items()
-        #         )
-        #     ]
-        # ),
-        
-        # Launch 4: Gazebo simulation (after 9 seconds)
-        # TimerAction(
-        #     period=9.0,
-        #     actions=[
-        #         IncludeLaunchDescription(
-        #             PythonLaunchDescriptionSource([
-        #                 os.path.join(
-        #                     FindPackageShare('scv_robot_gazebo').find('scv_robot_gazebo'),
-        #                     'launch',
-        #                     'hunter_test.launch.py'
-        #                 )
-        #             ]),
-        #             launch_arguments={'use_sim_time': use_sim_time}.items()
-        #         )
-        #     ]
-        # ),
-        
         # Launch 5: Localization (after 12 seconds)
         TimerAction(
-            period=6.0,
+            period=4.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
@@ -106,7 +71,7 @@ def generate_launch_description():
         
         # Launch 6: Behavior planner (after 15 seconds)
         TimerAction(
-            period=8.0,
+            period=6.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
