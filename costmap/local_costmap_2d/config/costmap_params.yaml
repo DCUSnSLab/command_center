@@ -5,12 +5,12 @@ local_costmap:
     width: 20.0              # 20m width
     height: 20.0             # 20m height
     publish_frequency: 10.0   # Hz - how often to publish costmap
-    update_frequency: 20.0    # Hz - how often to process sensor data
+    update_frequency: 10.0    # Hz - how often to process sensor data
     
     # Frame settings
     global_frame: "odom"       # Global coordinate frame
     robot_frame: "base_link"  # Robot base frame
-    sensor_frame: "velodyne_base_link"  # PointCloud sensor frame
+    sensor_frame: "velodyne"  # PointCloud sensor frame
     
     # Topic names
     pointcloud_topic: "/velodyne_points"  # Input PointCloud2 topic
