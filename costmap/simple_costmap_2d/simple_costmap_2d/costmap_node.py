@@ -12,6 +12,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 from nav_msgs.msg import Odometry, OccupancyGrid
 from geometry_msgs.msg import Pose
+from matplotlib.path import Path
 
 from .tf_manager import TFManager, quat_to_yaw
 from .costmap_2d import Costmap2D
@@ -36,8 +37,10 @@ class CostmapNode(Node):
         self.declare_parameter('max_obstacle_height', 2.0)
         self.declare_parameter('update_frequency', 10.0)
 
+        # Robot footprint
+        self.declare_parameter('robot_footprint', [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725])
+
         # Inflation parameters
-        self.declare_parameter('robot_radius', 0.5)
         self.declare_parameter('inflation_radius', 1.0)
         self.declare_parameter('cost_scaling_factor', 10.0)
 
@@ -54,7 +57,16 @@ class CostmapNode(Node):
         self.max_obstacle_height = self.get_parameter('max_obstacle_height').get_parameter_value().double_value
         update_freq = self.get_parameter('update_frequency').get_parameter_value().double_value
 
-        self.robot_radius = self.get_parameter('robot_radius').get_parameter_value().double_value
+        # Robot footprint (parse from flat list to (N, 2) array)
+        footprint_flat = self.get_parameter('robot_footprint').get_parameter_value().double_array_value
+        if len(footprint_flat) % 2 != 0:
+            self.get_logger().error("robot_footprint must have even number of values (x,y pairs)")
+            self.robot_footprint = None
+        else:
+            # Reshape to (N, 2) - N vertices with (x, y)
+            self.robot_footprint = np.array(footprint_flat).reshape(-1, 2).astype(np.float32)
+            self.get_logger().info(f"Robot footprint: {self.robot_footprint.tolist()}")
+
         self.inflation_radius = self.get_parameter('inflation_radius').get_parameter_value().double_value
         self.cost_scaling_factor = self.get_parameter('cost_scaling_factor').get_parameter_value().double_value
 
@@ -150,6 +162,45 @@ class CostmapNode(Node):
                            t.angular.x, t.angular.y, t.angular.z)
         self.last_odom_time = time.time()
 
+    def _filter_robot_footprint(self, points: np.ndarray) -> np.ndarray:
+        """
+        Filter out points inside robot footprint.
+
+        Args:
+            points: (N, 3) array in odom frame
+
+        Returns:
+            (M, 3) array with footprint points removed
+        """
+        if self.robot_footprint is None or self.odom_pose is None:
+            return points
+
+        robot_x, robot_y, _, yaw = self.odom_pose
+
+        # Transform footprint to odom frame
+        # Rotation matrix for yaw
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+        R = np.array([[cos_yaw, -sin_yaw],
+                      [sin_yaw,  cos_yaw]], dtype=np.float32)
+
+        # Transform: footprint_odom = R * footprint_base + T
+        footprint_odom = (R @ self.robot_footprint.T).T + np.array([robot_x, robot_y], dtype=np.float32)
+
+        # Check which points are inside the footprint polygon
+        path = Path(footprint_odom)
+        inside_mask = path.contains_points(points[:, :2])  # Only check x, y (not z)
+
+        # Return points outside footprint
+        outside_mask = ~inside_mask
+        filtered_points = points[outside_mask]
+
+        filtered_count = np.sum(inside_mask)
+        if filtered_count > 0:
+            self.get_logger().debug(f"Filtered {filtered_count} points inside robot footprint")
+
+        return filtered_points
+
     # ---------------- Costmap Update ----------------
     def update_costmap(self):
         """Update costmap from latest point cloud data"""
@@ -165,9 +216,8 @@ class CostmapNode(Node):
         origin_y = robot_y - self.costmap_height / 2.0
         self.costmap.update_origin(origin_x, origin_y)
 
-        # Mark obstacles in costmap - VECTORIZED
-        # latest_points_odom is already numpy array (N, 3) from pc_callback
-        points = self.latest_points_odom
+        # Filter out points inside robot footprint
+        points = self._filter_robot_footprint(self.latest_points_odom)
 
         # Height filtering (vectorized)
         z_valid = (points[:, 2] >= self.min_obstacle_height) & (points[:, 2] <= self.max_obstacle_height)
