@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -23,6 +24,7 @@
 #include <gmserver/msg/gps_info.hpp>
 #include <gmserver/msg/utm_info.hpp>
 #include <command_center_interfaces/msg/planned_path.hpp>
+#include <command_center_interfaces/msg/request_replan.hpp>
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -103,6 +105,10 @@ public:
         goal_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "goal_pose", 10,
             std::bind(&PathPlannerNode::goalCallback, this, std::placeholders::_1));
+
+        branch_subscriber_ = this->create_subscription<command_center_interfaces::msg::RequestReplan>( // 전역 경로 계획 중 분기점 Node에서 향후 경로 선택을 위한 Subscriber
+            "/request_replan", 10,
+            std::bind(&PathPlannerNode::branchCallback, this, std::placeholders::_1));
         
         // Create publishers
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", 10);
@@ -428,13 +434,13 @@ private:
     }
     
     std::tuple<int, int, int> getRGBColor(int index) {
-        if (index < 1 || index > 11) {
-            throw std::invalid_argument("Index must be between 1 and 11");
+        if (index < 1 || index > 13) {
+            throw std::invalid_argument("Index must be between 1 and 13");
         }
-        
+
         switch (index) {
             case 1:  return std::make_tuple(255, 0, 0);     // Red
-            case 2:  return std::make_tuple(0, 255, 0);     // Green  
+            case 2:  return std::make_tuple(0, 255, 0);     // Green
             case 3:  return std::make_tuple(0, 0, 255);     // Blue
             case 4:  return std::make_tuple(255, 255, 0);   // Yellow
             case 5:  return std::make_tuple(255, 0, 255);   // Magenta
@@ -444,6 +450,8 @@ private:
             case 9:  return std::make_tuple(255, 192, 203); // Pink
             case 10: return std::make_tuple(165, 42, 42);   // Brown
             case 11: return std::make_tuple(128, 128, 128); // Gray
+            case 12: return std::make_tuple(75, 0, 130);    // Indigo - for dynamic replanning trigger
+            case 13: return std::make_tuple(255, 20, 147);  // Deep Pink - for dynamic replanning trigger
             default: return std::make_tuple(0, 0, 0);       // Black (fallback)
         }
     }
@@ -616,6 +624,100 @@ private:
         // Trigger immediate path planning
         planPathFromGpsToGoal();
     }
+
+    void branchCallback(const command_center_interfaces::msg::RequestReplan msg) {
+        /*
+        아래 코드 블록에서 경로 분기를 위해 하드코딩된 조건식이 다수 존재합니다.
+        각각의 분기 시점은 만도 자율주행 대회에서 T자 주차, 평행 주차 수행을 위한 시점에 해당하며
+        사용한 맵 파일 mando-merge-base.json 기준
+        N136 (T자 주차)
+        -> N0347(A코스)
+        -> N0393(B코스)
+        N0414 (평행 주차)
+        -> N0397(A코스)
+        -> N0415(B코스)
+        에 해당합니다.
+
+        동작 방식
+
+        A 경로를 default로 주행을 시작하며, 주행 중 해당 콜백이 호출되는 경우 분기점에 해당하는 B 경로를 사용
+
+        향후 기능 구현 과정에서 참고 바랍니다.
+         */
+
+        // Search for node with the given name in the graph
+
+        auto node_it = node_id_to_index_.find(msg.start_node_id);
+
+        // Output next nodes' IDs and lengths for the start_node_id
+        if (node_it != node_id_to_index_.end()) {
+            int start_node_index = node_it->second;
+            RCLCPP_INFO(this->get_logger(), "=== Next nodes from start_node_id '%s' (index %d) ===",
+                       msg.start_node_id.c_str(), start_node_index);
+
+            if (adjacency_list_.find(start_node_index) != adjacency_list_.end()) {
+                const auto& links = adjacency_list_[start_node_index];
+                if (links.empty()) {
+                    RCLCPP_INFO(this->get_logger(), "No next nodes found for start_node_id '%s'", msg.start_node_id.c_str());
+                } else {
+                    for (const auto& link : links) {
+                        int next_node_id = (link.from_node_id == start_node_index) ? link.to_node_id : link.from_node_id;
+                        double length = link.length;
+
+                        // Get the string ID for the next node
+                        std::string next_node_string_id = "UNKNOWN";
+                        if (next_node_id >= 0 && next_node_id < static_cast<int>(node_ids_.size())) {
+                            next_node_string_id = node_ids_[next_node_id];
+                        }
+
+                        RCLCPP_INFO(this->get_logger(), "  -> Next Node ID: %s (index: %d), Length: %.2f meters",
+                                   next_node_string_id.c_str(), next_node_id, length);
+                    }
+                }
+            } else {
+                RCLCPP_INFO(this->get_logger(), "Node '%s' not found in adjacency list", msg.start_node_id.c_str());
+            }
+            RCLCPP_INFO(this->get_logger(), "=== End of next nodes list ===");
+        } else {
+            RCLCPP_INFO(this->get_logger(), "start_node_id '%s' not found in node_id_to_index_ map", msg.start_node_id.c_str());
+        }
+
+        // Find the node with the bigger cost and store it in bigger_node
+        std::string bigger_node = "";
+        if (node_it != node_id_to_index_.end()) {
+            int start_node_index = node_it->second;
+            if (adjacency_list_.find(start_node_index) != adjacency_list_.end()) {
+                const auto& links = adjacency_list_[start_node_index];
+                double max_length = 0.0;
+                int bigger_node_index = -1;
+
+                for (const auto& link : links) {
+                    int next_node_id = (link.from_node_id == start_node_index) ? link.to_node_id : link.from_node_id;
+                    if (link.length > max_length) {
+                        max_length = link.length;
+                        bigger_node_index = next_node_id;
+                    }
+                }
+
+                // Get the string ID for the bigger cost node
+                if (bigger_node_index >= 0 && bigger_node_index < static_cast<int>(node_ids_.size())) {
+                    bigger_node = node_ids_[bigger_node_index];
+                    RCLCPP_INFO(this->get_logger(), "Bigger cost node found: %s (index: %d), Length: %.2f meters",
+                               bigger_node.c_str(), bigger_node_index, max_length);
+                }
+            }
+        }
+
+        node_it = node_id_to_index_.find(bigger_node);
+        RCLCPP_INFO(this->get_logger(), "Using bigger cost node '%s' for routing", bigger_node.c_str());
+
+        int branch_node_index = node_it->second;
+        RCLCPP_INFO(this->get_logger(), "Found branch node '%s' at index %d", msg.start_node_id.c_str(), branch_node_index);
+
+        // Plan path from current position to branch node, then from branch node to goal
+        // This ensures the branch node is included in the path
+        planPathWithMandatoryNode(branch_node_index);
+    }
     
     void checkAndPlanPath()
     {
@@ -715,7 +817,107 @@ private:
         // Clean up temporary nodes after path planning
         removeTemporaryNodes();
     }
-    
+
+    void planPathWithMandatoryNode(int mandatory_node_index) {
+        if (node_map_.empty()) {
+            RCLCPP_WARN(this->get_logger(), "No map data available for path planning");
+            return;
+        }
+
+        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
+            return;
+        }
+
+        // Clean up any existing temporary nodes first
+        removeTemporaryNodes();
+
+        // Convert GPS to UTM coordinates
+        double start_utm_easting, start_utm_northing;
+        gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
+
+        // Goal has been converted to UTM coordinates in goalCallback
+        double goal_x = goal_pose_.pose.position.x;
+        double goal_y = goal_pose_.pose.position.y;
+
+        // Create temporary start node at GPS position
+        int start_node_id = createTemporaryStartNode(start_utm_easting, start_utm_northing);
+        if (start_node_id == -1) {
+            RCLCPP_ERROR(this->get_logger(), "Could not create temporary start node");
+            return;
+        }
+
+        // Create temporary goal node and connect it to the closest existing node
+        int goal_node_id = createTemporaryGoalNode(goal_x, goal_y);
+        if (goal_node_id == -1) {
+            RCLCPP_ERROR(this->get_logger(), "Could not create temporary goal node");
+            return;
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Planning path from GPS -> temp node %d -> mandatory node %d -> temp goal %d",
+                   start_node_id, mandatory_node_index, goal_node_id);
+
+        // Plan path from start to mandatory node
+        auto path_to_branch = planAStarPath(start_node_id, mandatory_node_index);
+        if (path_to_branch.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "No path found from start to mandatory node %d", mandatory_node_index);
+            removeTemporaryNodes();
+            return;
+        }
+
+        // Plan path from mandatory node to goal
+        auto path_from_branch = planAStarPath(mandatory_node_index, goal_node_id);
+        if (path_from_branch.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "No path found from mandatory node %d to goal", mandatory_node_index);
+            removeTemporaryNodes();
+            return;
+        }
+
+        // Combine paths, avoiding duplication of mandatory node
+        std::vector<std::shared_ptr<AStarNode>> combined_path = path_to_branch;
+        // Skip the first node of path_from_branch since it's the same as the last node of path_to_branch
+        for (size_t i = 1; i < path_from_branch.size(); ++i) {
+            combined_path.push_back(path_from_branch[i]);
+        }
+
+        if (!combined_path.empty()) {
+            // Convert to ROS Path message and adjust for RViz
+            nav_msgs::msg::Path planned_path;
+            planned_path.header.frame_id = "map";
+            planned_path.header.stamp = this->get_clock()->now();
+
+            for (const auto& node : combined_path) {
+                geometry_msgs::msg::PoseStamped pose_stamped;
+                pose_stamped.header.frame_id = "map";
+                pose_stamped.header.stamp = this->get_clock()->now();
+                pose_stamped.pose = node->pose;
+
+                // Adjust position for map origin offset (for RViz visualization)
+                pose_stamped.pose.position.x -= map_utm_easting_;
+                pose_stamped.pose.position.y -= map_utm_northing_;
+
+                planned_path.poses.push_back(pose_stamped);
+            }
+
+            path_publisher_->publish(planned_path);
+
+            // Create detailed path with nodes and links
+            auto detailed_path = createDetailedPlannedPath(combined_path, start_node_id, goal_node_id);
+            planned_path_publisher_->publish(detailed_path);
+
+            RCLCPP_INFO(this->get_logger(), "Published path with mandatory node: %zu poses, %zu detailed nodes, %zu links",
+                       planned_path.poses.size(), detailed_path.path_data.nodes.size(), detailed_path.path_data.links.size());
+
+            // Mark that path has been planned for current goal
+            path_planned_for_current_goal_ = true;
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Combined path is empty");
+        }
+
+        // Clean up temporary nodes after path planning
+        removeTemporaryNodes();
+    }
+
     // A* path planning algorithm implementation
     std::vector<std::shared_ptr<AStarNode>> planAStarPath(int start_id, int goal_id)
     {
@@ -1424,6 +1626,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscriber_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
+    rclcpp::Subscription<command_center_interfaces::msg::RequestReplan>::SharedPtr branch_subscriber_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
     rclcpp::Publisher<command_center_interfaces::msg::PlannedPath>::SharedPtr planned_path_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;

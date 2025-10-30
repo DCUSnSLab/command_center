@@ -1,0 +1,34 @@
+# Costmap 2D Configuration
+# This file contains all parameters for the simple_costmap_2d node
+
+/**:
+  ros__parameters:
+    # === Topic Configuration ===
+    point_cloud_topic: '/velodyne_points'
+    odom_topic: '/odom'
+
+    # === Frame IDs ===
+    odom_frame: 'odom'
+    base_frame: 'base_link'
+    sensor_frame: 'velodyne'
+
+    # === Costmap Dimensions ===
+    costmap_width: 20.0          # Width in meters
+    costmap_height: 20.0         # Height in meters
+    costmap_resolution: 0.1      # Cell size in meters (0.1m = 10cm)
+
+    # === Obstacle Detection ===
+    min_obstacle_height: 0.5     # Minimum height for obstacle detection (meters)
+    max_obstacle_height: 2.0     # Maximum height for obstacle detection (meters)
+
+    # === Update Frequency ===
+    update_frequency: 10.0       # Hz (costmap update rate)
+
+    # === Robot Footprint ===
+    # Robot footprint polygon vertices [x1,y1,x2,y2,x3,y3,x4,y4] in base_link frame
+    # Points within this footprint will be filtered out to remove robot body reflections
+    robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+
+    # === Inflation Layer ===
+    inflation_radius: 1.0        # Inflation radius in meters (safety margin around obstacles)
+    cost_scaling_factor: 5.0    # Cost decay factor (higher = steeper decay, range: 1.0~20.0)

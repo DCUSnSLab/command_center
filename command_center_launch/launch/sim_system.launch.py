@@ -1,18 +1,29 @@
 import os
 import time
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
+
 
 
 def generate_launch_description():
     # Declare use_sim_time parameter
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    map_file = PathJoinSubstitution([
+                    FindPackageShare('gmserver'),
+                    'maps',
+                    'mando-merge-base.json'
+                ])
 
     return LaunchDescription([
         # Launch 1: Map service (immediate)
+        DeclareLaunchArgument(
+            'map_file_path',
+            default_value=map_file,
+            description='Path to the JSON map file'
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 os.path.join(
@@ -23,7 +34,7 @@ def generate_launch_description():
             ]),
             launch_arguments={'use_sim_time': use_sim_time}.items()
         ),
-        
+
         # Launch 2: Global planner (after 3 seconds)
         TimerAction(
             period=2.0,
@@ -77,7 +88,7 @@ def generate_launch_description():
         
         # Launch 5: Localization (after 12 seconds)
         TimerAction(
-            period=6.0,
+            period=3.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
@@ -94,7 +105,7 @@ def generate_launch_description():
         
         # Launch 6: Behavior planner (after 15 seconds)
         TimerAction(
-            period=8.0,
+            period=4.0,
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([

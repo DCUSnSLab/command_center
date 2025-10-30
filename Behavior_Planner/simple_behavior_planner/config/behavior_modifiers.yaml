@@ -17,7 +17,7 @@
           lookahead_base_distance: 0.6  # 60% (짧게)
         overrides:
           max_linear_velocity: 0.0      # 전진 속도 0
-          min_linear_velocity: -1.5     # 후진 속도 -1.5 m/s
+          min_linear_velocity: -1.0     # 후진 속도 -1.5 m/s
           respect_reverse_heading: true
           
       3:  # 전진 정밀 pose tracking  
@@ -40,7 +40,7 @@
           goal_reached_threshold: 0.5   # 40% (매우 정밀한 도달 판정)
         overrides:
           max_linear_velocity: 0.0      # 전진 속도 0
-          min_linear_velocity: -0.8     # 느린 후진 속도
+          min_linear_velocity: -0.5     # 느린 후진 속도
           respect_reverse_heading: true
           
       5:  # 가속(빠르게 전진)
@@ -76,26 +76,21 @@
           goal_reached_threshold: 0.3
         overrides: {}
           
-      9:  # 끝 지점
-        description: "Final destination"
+      9:  # 가속 + 정지 준비
+        description: "Fast forward movement"
         multipliers:
-          max_linear_velocity: 0.5      # 50% (매우 느리게)
-          goal_weight: 2.0              # 200% (정확하게)
-          xy_goal_tolerance: 0.3        # 30% (엄격하게)
-          lookahead_base_distance: 0.8  # 80% (짧게)
-          goal_reached_threshold: 0.3   # 30% (매우 정밀한 최종 도달)
+          max_linear_velocity: 1.25      # 130% (빠르게)
+          goal_weight: 0.7              # 70% (덜 엄격하게)
+          lookahead_base_distance: 1.0  # 100% (기본값 - 급격한 방향전환 방지)
+          xy_goal_tolerance: 1.2        # 120% (관대하게)
+          goal_reached_threshold: 1.3   # 130% (관대한 도달 판정)
         overrides:
           min_linear_velocity: 0.0
           
       10:  # 신호등 감지
         description: "Traffic light detection mode"
-        multipliers:
-          max_linear_velocity: 0.6      # 60% (조심스럽게)
-          goal_weight: 1.5              # 150% (정확하게)
-          obstacle_weight: 1.2          # 120% (장애물 더 주의)
-          lookahead_base_distance: 1.2  # 120% (조금 멀리)
-        overrides:
-          min_linear_velocity: 0.0
+        multipliers: {}  # 모든 값 1.0 (기본값 사용)
+        overrides: {}
           
       11:  # 차선 무시
         description: "Lane ignore mode"
