@@ -16,8 +16,8 @@ import math
 from typing import Optional
 
 # ROS2 messages
-from geometry_msgs.msg import Twist, PoseStamped
-from nav_msgs.msg import Path
+from geometry_msgs.msg import Twist, PoseStamped, PointStamped
+from nav_msgs.msg import Path, OccupancyGrid
 from std_msgs.msg import Header
 from smppi.msg import ProcessedObstacles, MPPIState, OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
@@ -57,7 +57,8 @@ class MPPIMainNode(Node):
         self.latest_goal: Optional[PoseStamped] = None
         self.latest_path: Optional[Path] = None
         self.multiple_waypoints: Optional[MultipleWaypoints] = None
-        
+        self.latest_costmap: Optional[OccupancyGrid] = None
+
         self.goal_state: Optional[torch.Tensor] = None
         
         # Goal tracking
@@ -93,6 +94,7 @@ class MPPIMainNode(Node):
         # Topic parameters
         self.declare_parameter('topics.input.processed_obstacles', '/smppi/processed_obstacles')
         self.declare_parameter('topics.input.robot_state', '/smppi/robot_state')
+        self.declare_parameter('topics.input.costmap', '/costmap')
         self.declare_parameter('topics.input.goal_pose', '/goal_pose')
         self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
         self.declare_parameter('topics.output.cmd_vel', '/ackermann_like_controller/cmd_vel')
@@ -151,10 +153,11 @@ class MPPIMainNode(Node):
         """Load parameters from ROS2 parameter server"""
         # Control frequency
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
-        
+
         # Topic names
         self.obstacles_topic = self.get_parameter('topics.input.processed_obstacles').get_parameter_value().string_value
         self.robot_state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
+        self.costmap_topic = self.get_parameter('topics.input.costmap').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
         self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
         self.cmd_topic = self.get_parameter('topics.output.cmd_vel').get_parameter_value().string_value
@@ -228,14 +231,13 @@ class MPPIMainNode(Node):
     
     def _init_critics(self):
         """Initialize critic functions"""
-        # Obstacle critic
+        # Obstacle critic (costmap-based)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'safety_radius': 0.5,
             'collision_cost': 1000.0,
             'repulsion_factor': 2.0,
-            'vehicle_radius': 0.3,
-            'max_range': 5.0
+            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
+            'inflation_zone_start': 50       # Costmap values >= 50 are inflation zone
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)
@@ -275,6 +277,8 @@ class MPPIMainNode(Node):
             ProcessedObstacles, self.obstacles_topic, self.obstacles_callback, reliable_qos)
         self.robot_state_sub = self.create_subscription(
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
+        self.costmap_sub = self.create_subscription(
+            OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
         
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
@@ -308,9 +312,8 @@ class MPPIMainNode(Node):
         # Pause command subscriber
         self.pause_command_sub = self.create_subscription(
             PauseCommand, '/pause_command', self.pause_command_callback, reliable_qos)
-        
+
         # Visualization publishers - publish lookahead point for visualization node
-        from geometry_msgs.msg import PoseStamped, PointStamped
         self.lookahead_pub = self.create_publisher(
             PoseStamped, '/smppi_visualization/lookahead_point', reliable_qos)
         self.target_direction_pub = self.create_publisher(
@@ -321,10 +324,34 @@ class MPPIMainNode(Node):
     def obstacles_callback(self, msg: ProcessedObstacles):
         """Receive processed obstacles from sensor node"""
         self.processed_obstacles = msg
-    
+
     def robot_state_callback(self, msg: MPPIState):
         """Receive robot state from sensor node"""
         self.robot_state = msg
+
+    def costmap_callback(self, msg: OccupancyGrid):
+        """Receive costmap for grid-based collision detection"""
+        self.latest_costmap = msg
+
+        # Update ObstacleCritic with costmap info
+        if self.latest_costmap is not None:
+            costmap_data = np.array(msg.data, dtype=np.int8).reshape(
+                (msg.info.height, msg.info.width))
+
+            costmap_info = {
+                'resolution': msg.info.resolution,
+                'origin_x': msg.info.origin.position.x,
+                'origin_y': msg.info.origin.position.y,
+                'width': msg.info.width,
+                'height': msg.info.height,
+                'data': costmap_data
+            }
+
+            # Set costmap info for all obstacle critics
+            if hasattr(self, 'optimizer') and self.optimizer is not None:
+                for critic in self.optimizer.critics:
+                    if hasattr(critic, 'set_costmap_info'):
+                        critic.set_costmap_info(costmap_info)
     
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""
@@ -505,7 +532,6 @@ class MPPIMainNode(Node):
             
             # Set obstacles
             self.optimizer.set_obstacles(self.processed_obstacles)
-            
             # Optimize
             control_sequence = self.optimizer.optimize()
             
@@ -622,9 +648,6 @@ class MPPIMainNode(Node):
                 target_direction = goal_critic.get_target_direction()
                 
                 if lookahead_point is not None:
-                    from geometry_msgs.msg import PoseStamped
-                    import math
-                    
                     pose_msg = PoseStamped()
                     pose_msg.header.stamp = self.get_clock().now().to_msg()
                     pose_msg.header.frame_id = "odom"
@@ -645,8 +668,6 @@ class MPPIMainNode(Node):
                 
                 # Publish target direction as a point from robot position
                 if target_direction is not None and hasattr(self, 'robot_state') and self.robot_state is not None:
-                    from geometry_msgs.msg import PointStamped
-                    
                     direction_msg = PointStamped()
                     direction_msg.header.stamp = self.get_clock().now().to_msg()
                     direction_msg.header.frame_id = "odom"

@@ -50,11 +50,11 @@ class GoalCritic(BaseCritic):
 
         self.multiple_waypoints = None
         self.previous_node_type = None  # Track previous node type for behavior change detection
-        print(f"[GoalCritic] xy_tol={self.xy_goal_tolerance}, yaw_tol={self.yaw_goal_tolerance}")
-        print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}, vel_fac={self.lookahead_velocity_factor}, "
-              f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
-        print(f"[GoalCritic] Multi-waypoints: {self.use_multiple_waypoints}, reverse_heading: {self.respect_reverse_heading}")
-        print(f"[GoalCritic] Curve detection: {self.curve_detection_enabled}, angle_threshold: {self.curve_angle_threshold}°, reduction: {self.curve_lookahead_reduction_factor}x")
+        # print(f"[GoalCritic] xy_tol={self.xy_goal_tolerance}, yaw_tol={self.yaw_goal_tolerance}")
+        # print(f"[GoalCritic] Lookahead: base={self.lookahead_base_distance}, vel_fac={self.lookahead_velocity_factor}, "
+        #       f"range=[{self.lookahead_min_distance}-{self.lookahead_max_distance}]")
+        # print(f"[GoalCritic] Multi-waypoints: {self.use_multiple_waypoints}, reverse_heading: {self.respect_reverse_heading}")
+        # print(f"[GoalCritic] Curve detection: {self.curve_detection_enabled}, angle_threshold: {self.curve_angle_threshold}°, reduction: {self.curve_lookahead_reduction_factor}x")
 
     @staticmethod
     def _relu(x: torch.Tensor) -> torch.Tensor:
@@ -99,10 +99,10 @@ class GoalCritic(BaseCritic):
         if prev_lookahead is not None:
             prev_lookahead_tensor = torch.tensor(prev_lookahead, device=self.device, dtype=self.dtype)
             lookahead_jump = float(torch.norm(lookahead_point - prev_lookahead_tensor).detach().cpu().item())
-            if lookahead_jump > 0.3:  # 더 민감하게 감지 (0.3m 이상)
-                print(f"🚨 [LOOKAHEAD JUMP] {lookahead_jump:.3f}m")
-                print(f"   From: {prev_lookahead}")
-                print(f"   To:   {lookahead_point.detach().cpu().numpy()}")
+            # if lookahead_jump > 0.3:  # 더 민감하게 감지 (0.3m 이상)
+            #     print(f"🚨 [LOOKAHEAD JUMP] {lookahead_jump:.3f}m")
+            #     print(f"   From: {prev_lookahead}")
+            #     print(f"   To:   {lookahead_point.detach().cpu().numpy()}")
         
         # Store current lookahead for next iteration
         self._prev_lookahead_point = lookahead_point.detach().cpu().numpy()
@@ -201,10 +201,10 @@ class GoalCritic(BaseCritic):
         prev_distance_cost = getattr(self, '_prev_distance_cost', current_distance_cost)
         distance_cost_change = abs(current_distance_cost - prev_distance_cost)
         
-        if distance_cost_change > 10.0:  # Significant cost change
-            print(f"💥 [DISTANCE COST JUMP] {distance_cost_change:.3f}")
-            print(f"   From: {prev_distance_cost:.3f} -> To: {current_distance_cost:.3f}")
-            print(f"   Min distance to lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
+        # if distance_cost_change > 10.0:  # Significant cost change
+        #     print(f"💥 [DISTANCE COST JUMP] {distance_cost_change:.3f}")
+        #     print(f"   From: {prev_distance_cost:.3f} -> To: {current_distance_cost:.3f}")
+        #     print(f"   Min distance to lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
         
         # Store for next iteration
         self._prev_distance_cost = current_distance_cost
@@ -221,13 +221,13 @@ class GoalCritic(BaseCritic):
         debug_counter = getattr(self, '_debug_counter', 0) + 1
         self._debug_counter = debug_counter
         
-        if debug_counter % 10 == 0:  # Every 10th call
-            print(f"🎯 [LOOKAHEAD DEBUG] robot: {np.round(robot_pos_cpu, 3)}")
-            print(f"   lookahead_point: {np.round(lookahead_cpu, 3)}")
-            print(f"   calculated_distance: {robot_to_lookahead_dist:.3f}m")
-            print(f"   current_velocity: {float(v_abs):.3f}m/s")
-            print(f"   distance_cost: {current_distance_cost:.3f}")
-            print(f"   min_traj_dist_to_lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
+        # if debug_counter % 10 == 0:  # Every 10th call
+        #     print(f"🎯 [LOOKAHEAD DEBUG] robot: {np.round(robot_pos_cpu, 3)}")
+        #     print(f"   lookahead_point: {np.round(lookahead_cpu, 3)}")
+        #     print(f"   calculated_distance: {robot_to_lookahead_dist:.3f}m")
+        #     print(f"   current_velocity: {float(v_abs):.3f}m/s")
+        #     print(f"   distance_cost: {current_distance_cost:.3f}")
+        #     print(f"   min_traj_dist_to_lookahead: {float(distances_to_lookahead.min().detach().cpu().item()):.3f}m")
 
         return self.apply_weight(total_cost)
 
@@ -243,12 +243,12 @@ class GoalCritic(BaseCritic):
         debug_counter = getattr(self, '_nav2_debug_counter', 0) + 1
         self._nav2_debug_counter = debug_counter
 
-        if debug_counter % 20 == 0:  # Every 20th call
-            print(f"📏 [NAV2 LOOKAHEAD] vel: {float(current_vel_abs):.3f}m/s")
-            print(f"   base_offset: {base_offset:.3f}m")
-            print(f"   velocity_offset: {float(velocity_offset):.3f}m")
-            print(f"   base_lookahead: {float(base_lookahead):.3f}m (after clamp)")
-            print(f"   range: [{self.lookahead_min_distance:.3f}, {self.lookahead_max_distance:.3f}]m")
+        # if debug_counter % 20 == 0:  # Every 20th call
+        #     print(f"📏 [NAV2 LOOKAHEAD] vel: {float(current_vel_abs):.3f}m/s")
+        #     print(f"   base_offset: {base_offset:.3f}m")
+        #     print(f"   velocity_offset: {float(velocity_offset):.3f}m")
+        #     print(f"   base_lookahead: {float(base_lookahead):.3f}m (after clamp)")
+        #     print(f"   range: [{self.lookahead_min_distance:.3f}, {self.lookahead_max_distance:.3f}]m")
 
         # Apply curve-based lookahead adjustment for single goal case
         # (For simplicity, we treat single goal as a 2-point path)
@@ -337,13 +337,13 @@ class GoalCritic(BaseCritic):
         wp_debug_counter = getattr(self, '_wp_debug_counter', 0) + 1
         self._wp_debug_counter = wp_debug_counter
 
-        if wp_debug_counter % 20 == 0:  # Every 20th call
-            velocity_offset = self.lookahead_velocity_factor * current_vel_abs
-            print(f"🗺️ [WAYPOINT LOOKAHEAD] vel: {float(current_vel_abs):.3f}m/s")
-            print(f"   base_distance: {self.lookahead_base_distance:.3f}m")
-            print(f"   velocity_offset: {float(velocity_offset):.3f}m")
-            print(f"   base_lookahead: {float(base_lookahead):.3f}m (after clamp)")
-            print(f"   node_type: {current_node_type} (group: {current_behavior_group})")
+        # if wp_debug_counter % 20 == 0:  # Every 20th call
+        #     velocity_offset = self.lookahead_velocity_factor * current_vel_abs
+        #     print(f"🗺️ [WAYPOINT LOOKAHEAD] vel: {float(current_vel_abs):.3f}m/s")
+        #     print(f"   base_distance: {self.lookahead_base_distance:.3f}m")
+        #     print(f"   velocity_offset: {float(velocity_offset):.3f}m")
+        #     print(f"   base_lookahead: {float(base_lookahead):.3f}m (after clamp)")
+        #     print(f"   node_type: {current_node_type} (group: {current_behavior_group})")
 
         # Apply curve-based lookahead adjustment
         total_lookahead = self._adjust_lookahead_for_curves(
@@ -369,7 +369,7 @@ class GoalCritic(BaseCritic):
             next_behavior_group = self._get_behavior_group(next_node_types[0])
             if next_behavior_group != current_behavior_group:
                 # Next waypoint has different behavior group - keep lookahead at current goal
-                print(f"[NEXT WP BEHAVIOR CHANGE] Group {current_behavior_group} -> {next_behavior_group} (node {current_node_type} -> {next_node_types[0]})")
+                # print(f"[NEXT WP BEHAVIOR CHANGE] Group {current_behavior_group} -> {next_behavior_group} (node {current_node_type} -> {next_node_types[0]})")
                 return current_goal_pos
 
         remaining = float((total_lookahead - d_cur).item())
@@ -447,11 +447,11 @@ class GoalCritic(BaseCritic):
                 max=base_lookahead.item()
             )
 
-            # Debug logging for curve adjustments
-            if abs(float(adjusted_lookahead) - float(base_lookahead)) > 0.1:  # 더 민감하게 감지
-                print(f"🌪️ [CURVE ADJUST] angle: {max_curve_angle:.1f}°, factor: {curve_factor:.2f}")
-                print(f"   lookahead: {float(base_lookahead):.2f}m -> {float(adjusted_lookahead):.2f}m")
-                print(f"   threshold: {self.curve_angle_threshold:.1f}°, min_lookahead: {self.curve_min_lookahead:.2f}m")
+            # # Debug logging for curve adjustments
+            # if abs(float(adjusted_lookahead) - float(base_lookahead)) > 0.1:  # 더 민감하게 감지
+            #     print(f"🌪️ [CURVE ADJUST] angle: {max_curve_angle:.1f}°, factor: {curve_factor:.2f}")
+            #     print(f"   lookahead: {float(base_lookahead):.2f}m -> {float(adjusted_lookahead):.2f}m")
+            #     print(f"   threshold: {self.curve_angle_threshold:.1f}°, min_lookahead: {self.curve_min_lookahead:.2f}m")
 
             return adjusted_lookahead
 
