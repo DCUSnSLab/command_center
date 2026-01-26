@@ -129,6 +129,9 @@ class SMPPIControllerNode(Node):
         self.declare_parameter('vehicle.min_linear_velocity', 0.0)
         self.declare_parameter('vehicle.max_angular_velocity', 2.5)
         self.declare_parameter('vehicle.min_angular_velocity', -2.5)
+        self.declare_parameter('vehicle.footprint', [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725])
+        self.declare_parameter('vehicle.footprint_padding', 0.15)
+        self.declare_parameter('vehicle.use_polygon_collision', True)
         
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
@@ -186,7 +189,10 @@ class SMPPIControllerNode(Node):
         self.vehicle_params = {
             'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value,
             'max_steering_angle': self.get_parameter('vehicle.max_steering_angle').get_parameter_value().double_value,
-            'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value
+            'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value,
+            'footprint': self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value,
+            'footprint_padding': self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value,
+            'use_polygon_collision': self.get_parameter('vehicle.use_polygon_collision').get_parameter_value().bool_value
         }
         
         # Sensor parameters
@@ -241,14 +247,16 @@ class SMPPIControllerNode(Node):
     
     def _init_critics(self):
         """Initialize critic functions"""
-        # Obstacle critic
+        # Obstacle critic (costmap-based)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'safety_radius': 0.5,
             'collision_cost': 1000.0,
             'repulsion_factor': 2.0,
-            'vehicle_radius': 0.3,
-            'max_range': self.sensor_params['laser_max_range']
+            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
+            'inflation_zone_start': 50,      # Costmap values >= 50 are inflation zone
+            'footprint': self.vehicle_params['footprint'],
+            'footprint_padding': self.vehicle_params['footprint_padding'],
+            'use_polygon_collision': self.vehicle_params['use_polygon_collision']
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)

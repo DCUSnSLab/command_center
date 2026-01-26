@@ -204,6 +204,7 @@ class CostmapNode(Node):
     # ---------------- Costmap Update ----------------
     def update_costmap(self):
         """Update costmap from latest point cloud data"""
+        
         if self.latest_points_odom is None or self.odom_pose is None:
             return None
 
@@ -214,6 +215,7 @@ class CostmapNode(Node):
         robot_x, robot_y, _, _ = self.odom_pose
         origin_x = robot_x - self.costmap_width / 2.0
         origin_y = robot_y - self.costmap_height / 2.0
+        
         self.costmap.update_origin(origin_x, origin_y)
 
         # Filter out points inside robot footprint
@@ -243,7 +245,6 @@ class CostmapNode(Node):
         # Apply inflation layer
         if self.inflation_radius > 0:
             self.costmap.inflate(self.inflation_radius, self.cost_scaling_factor)
-
         return obstacle_count
 
     def publish_costmap(self):
@@ -274,6 +275,7 @@ class CostmapNode(Node):
     # ---------------- Main Loop ----------------
     def main_callback(self):
         # Update costmap from latest point cloud
+        self.get_logger().info(f'L on')
         obstacle_count = self.update_costmap()
         
         # Publish costmap

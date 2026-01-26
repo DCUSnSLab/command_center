@@ -2,8 +2,8 @@
 """
 SMPPI Controller Launch File
 Modular 3-node architecture for optimal performance:
-- Sensor Processing Node: TF transforms, obstacle processing
-- MPPI Main Node: Core optimization and control
+- Costmap Processing Node: Costmap-based obstacle processing (replaces sensor node)
+- MPPI Main Node: Core optimization and control with grid-based collision detection
 - Visualization Node: RViz markers and visualization
 """
 
@@ -54,11 +54,11 @@ def generate_launch_description():
     smppi_dir = get_package_share_directory('smppi')
     default_config_path = os.path.join(smppi_dir, 'config', 'smppi_params.yaml')
     
-    # Sensor Processing Node
-    sensor_processor_node = Node(
+    # Costmap Processing Node (replaces sensor_processor_node)
+    costmap_processor_node = Node(
         package='smppi',
-        executable='sensor_processor_node.py',
-        name='sensor_processor',
+        executable='costmap_processor_node.py',
+        name='costmap_processor',
         namespace=namespace,
         parameters=[
             default_config_path,
@@ -115,7 +115,7 @@ def generate_launch_description():
         
         # Group all nodes
         GroupAction([
-            sensor_processor_node,
+            costmap_processor_node,
             mppi_main_node,
             visualization_node,
         ])

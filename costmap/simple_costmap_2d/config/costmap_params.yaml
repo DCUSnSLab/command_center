@@ -10,7 +10,7 @@
     # === Frame IDs ===
     odom_frame: 'odom'
     base_frame: 'base_link'
-    sensor_frame: 'velodyne'
+    sensor_frame: 'velodyne_base_link'
 
     # === Costmap Dimensions ===
     costmap_width: 20.0          # Width in meters
