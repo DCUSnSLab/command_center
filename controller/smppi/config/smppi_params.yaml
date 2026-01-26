@@ -65,7 +65,7 @@
     # ROS 토픽 설정
     topics:
       input:
-        laser_scan: '/ptl/scan'           # 레이저 스캔 입력 토픽
+        laser_scan: '/scan'           # 레이저 스캔 입력 토픽
         odometry: '/odom'                 # 오도메트리 입력 토픽
         goal_pose: '/goal_pose'             # 단일 목표 위치 입력 토픽
         multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
