@@ -1,0 +1,15 @@
+semantic_map_server:
+  ros__parameters:
+    # Map file path (can be overridden by launch argument)
+    map_file: ""
+
+    # TF frame for map coordinates
+    frame_id: "map"
+
+    # Publish rate (Hz)
+    publish_rate: 1.0
+
+    # Coordinate conversion
+    use_utm: false
+    utm_zone: 52
+    utm_band: "N"

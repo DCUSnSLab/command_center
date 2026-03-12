@@ -20,6 +20,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MPPIParams.msg"
   "msg/PauseCommand.msg"
   "msg/RequestReplan.msg"
+  "msg/SemanticArea.msg"
+  "msg/SemanticMap.msg"
   DEPENDENCIES std_msgs geometry_msgs gmserver
 )
 
