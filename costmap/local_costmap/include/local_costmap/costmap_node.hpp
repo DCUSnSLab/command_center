@@ -17,6 +17,7 @@
 #include "local_costmap/costmap_2d.hpp"
 #include "local_costmap/point_cloud_processor.hpp"
 #include "local_costmap/inflation_layer.hpp"
+#include "local_costmap/height_analyzer.hpp"
 
 namespace local_costmap
 {
@@ -73,6 +74,13 @@ private:
   double cost_scaling_factor_;
   std::vector<double> robot_footprint_;
 
+  // Height analysis parameters
+  bool use_height_analysis_;
+  double obstacle_height_threshold_;
+  double negative_obstacle_threshold_;
+  double min_point_height_;
+  double max_point_height_;
+
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
@@ -87,6 +95,7 @@ private:
   std::unique_ptr<Costmap2D> costmap_;
   std::unique_ptr<PointCloudProcessor> pc_processor_;
   std::unique_ptr<InflationLayer> inflation_layer_;
+  std::unique_ptr<HeightAnalyzer> height_analyzer_;
 
   // State
   std::mutex pc_mutex_;

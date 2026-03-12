@@ -33,8 +33,27 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
 
   // Initialize point cloud processor
   pc_processor_ = std::make_unique<PointCloudProcessor>();
-  pc_processor_->setHeightFilter(min_obstacle_height_, max_obstacle_height_);
   pc_processor_->setRobotFootprint(robot_footprint_);
+
+  // Initialize height analyzer or simple height filter
+  if (use_height_analysis_) {
+    // Use cell-based height analysis (handles ground removal + negative obstacles)
+    pc_processor_->setHeightFilterEnabled(false);  // Disable simple height filter
+    height_analyzer_ = std::make_unique<HeightAnalyzer>();
+    height_analyzer_->initialize(
+      obstacle_height_threshold_,
+      negative_obstacle_threshold_,
+      min_point_height_,
+      max_point_height_);
+    RCLCPP_INFO(this->get_logger(), "Using cell-based height analysis mode");
+    RCLCPP_INFO(this->get_logger(), "  Obstacle height threshold: %.2f m", obstacle_height_threshold_);
+    RCLCPP_INFO(this->get_logger(), "  Negative obstacle threshold: %.2f m", negative_obstacle_threshold_);
+  } else {
+    // Use simple height filter (legacy mode)
+    pc_processor_->setHeightFilterEnabled(true);
+    pc_processor_->setHeightFilter(min_obstacle_height_, max_obstacle_height_);
+    RCLCPP_INFO(this->get_logger(), "Using simple height filter mode");
+  }
 
   // Initialize inflation layer
   inflation_layer_ = std::make_unique<InflationLayer>();
@@ -109,6 +128,13 @@ void CostmapNode::declareParameters()
   // Inflation layer
   this->declare_parameter("inflation_radius", 1.0);
   this->declare_parameter("cost_scaling_factor", 5.0);
+
+  // Height analysis (cell-based min/max analysis for ground removal + negative obstacles)
+  this->declare_parameter("use_height_analysis", true);
+  this->declare_parameter("obstacle_height_threshold", 0.3);      // Height diff in cell to be obstacle
+  this->declare_parameter("negative_obstacle_threshold", -0.3);   // Z drop for pit/cliff detection
+  this->declare_parameter("min_point_height", -2.0);              // Min point height relative to robot
+  this->declare_parameter("max_point_height", 2.0);               // Max point height relative to robot
 }
 
 void CostmapNode::loadParameters()
@@ -133,6 +159,13 @@ void CostmapNode::loadParameters()
 
   inflation_radius_ = this->get_parameter("inflation_radius").as_double();
   cost_scaling_factor_ = this->get_parameter("cost_scaling_factor").as_double();
+
+  // Height analysis parameters
+  use_height_analysis_ = this->get_parameter("use_height_analysis").as_bool();
+  obstacle_height_threshold_ = this->get_parameter("obstacle_height_threshold").as_double();
+  negative_obstacle_threshold_ = this->get_parameter("negative_obstacle_threshold").as_double();
+  min_point_height_ = this->get_parameter("min_point_height").as_double();
+  max_point_height_ = this->get_parameter("max_point_height").as_double();
 }
 
 bool CostmapNode::lookupTransform(
@@ -249,11 +282,17 @@ void CostmapNode::updateCostmap()
   double origin_y = pose.y - costmap_height_ / 2.0;
   costmap_->updateOrigin(origin_x, origin_y);
 
-  // Mark obstacles
-  for (const auto& p : points) {
-    int mx, my;
-    if (costmap_->worldToMap(p.x, p.y, mx, my)) {
-      costmap_->setCost(mx, my, Costmap2D::OCCUPIED);
+  // Mark obstacles using either height analysis or simple marking
+  if (use_height_analysis_ && height_analyzer_) {
+    // Cell-based height analysis (ground removal + negative obstacle detection)
+    height_analyzer_->analyzeAndMark(points, *costmap_, pose.z);
+  } else {
+    // Simple obstacle marking (legacy mode)
+    for (const auto& p : points) {
+      int mx, my;
+      if (costmap_->worldToMap(p.x, p.y, mx, my)) {
+        costmap_->setCost(mx, my, Costmap2D::OCCUPIED);
+      }
     }
   }
 

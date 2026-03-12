@@ -34,6 +34,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   src/costmap_2d.cpp
   src/point_cloud_processor.cpp
   src/inflation_layer.cpp
+  src/height_analyzer.cpp
   src/costmap_node.cpp
 )
 

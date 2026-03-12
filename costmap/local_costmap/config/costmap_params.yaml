@@ -5,10 +5,10 @@
   ros__parameters:
     # === Topic Configuration ===
     point_cloud_topic: '/velodyne_points'
-    odom_topic: '/odom'
+    odom_topic: '/odom_bae'
 
     # === Frame IDs ===
-    odom_frame: 'odom'
+    odom_frame: 'odom_bae'
     base_frame: 'base_link'
     sensor_frame: 'velodyne'
 
@@ -18,7 +18,7 @@
     costmap_resolution: 0.1      # Cell size in meters (0.1m = 10cm)
 
     # === Obstacle Detection ===
-    min_obstacle_height: 0.5     # Minimum height for obstacle detection (meters)
+    min_obstacle_height: 0.15     # Minimum height for obstacle detection (meters)
     max_obstacle_height: 2.0     # Maximum height for obstacle detection (meters)
 
     # === Update Frequency ===
@@ -32,3 +32,19 @@
     # === Inflation Layer ===
     inflation_radius: 1.0        # Inflation radius in meters (safety margin around obstacles)
     cost_scaling_factor: 5.0     # Cost decay factor (higher = steeper decay, range: 1.0~20.0)
+
+    # === Height Analysis (Cell-based min/max) ===
+    # Enables ground removal + negative obstacle (pit/cliff) detection
+    use_height_analysis: false    # true: cell-based analysis, false: simple height filter
+
+    # Cell is obstacle if height difference within cell exceeds this threshold
+    # Detects: walls, boxes, people, etc.
+    obstacle_height_threshold: 0.1    # meters (e.g., 30cm height diff = obstacle)
+
+    # Cell is obstacle if z_min drops below robot_z by this threshold
+    # Detects: pits, cliffs, stairs down, curbs
+    negative_obstacle_threshold: -0.2  # meters (e.g., 30cm drop = danger)
+
+    # Point height range relative to robot base (filters noise/ceiling)
+    min_point_height: 0.1       # meters below robot
+    max_point_height: 1.0        # meters above robot

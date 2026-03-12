@@ -26,6 +26,7 @@ public:
 
   // Set filtering parameters
   void setHeightFilter(double min_height, double max_height);
+  void setHeightFilterEnabled(bool enabled);
   void setRobotFootprint(const std::vector<double>& footprint_flat);
 
   // Process point cloud
@@ -42,6 +43,7 @@ public:
 private:
   double min_height_;
   double max_height_;
+  bool height_filter_enabled_;
 
   // Robot footprint as polygon vertices (N x 2)
   std::vector<Eigen::Vector2f> footprint_;

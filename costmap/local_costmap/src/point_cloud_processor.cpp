@@ -9,6 +9,7 @@ namespace local_costmap
 PointCloudProcessor::PointCloudProcessor()
   : min_height_(0.1),
     max_height_(2.0),
+    height_filter_enabled_(true),
     has_footprint_(false),
     last_point_count_(0),
     last_filtered_count_(0)
@@ -19,6 +20,11 @@ void PointCloudProcessor::setHeightFilter(double min_height, double max_height)
 {
   min_height_ = min_height;
   max_height_ = max_height;
+}
+
+void PointCloudProcessor::setHeightFilterEnabled(bool enabled)
+{
+  height_filter_enabled_ = enabled;
 }
 
 void PointCloudProcessor::setRobotFootprint(const std::vector<double>& footprint_flat)
@@ -215,8 +221,10 @@ std::vector<Point3D> PointCloudProcessor::processCloud(
   // Transform to target frame
   transformPoints(points, transform);
 
-  // Apply height filter
-  filterByHeight(points);
+  // Apply height filter (only if enabled - disabled when using HeightAnalyzer)
+  if (height_filter_enabled_) {
+    filterByHeight(points);
+  }
 
   // Filter robot footprint
   filterByFootprint(points, robot_x, robot_y, robot_yaw);
