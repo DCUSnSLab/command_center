@@ -26,6 +26,7 @@ from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoint
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
 from smppi_controller.critics.obstacle_critic import ObstacleCritic
 from smppi_controller.critics.goal_critic import GoalCritic
+from smppi_controller.critics.lateral_bias_critic import LateralBiasCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.transforms import Transforms
 
@@ -133,6 +134,13 @@ class MPPIMainNode(Node):
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
         self.declare_parameter('costs.goal_weight', 6.0)
+
+        # Curb-safety cost shaping
+        self.declare_parameter('costs.lethal_hard', True)
+        self.declare_parameter('costs.hard_lethal_cost', 1.0e6)
+        self.declare_parameter('costs.lateral_bias_weight', 15.0)
+        self.declare_parameter('costs.lateral_bias_side', 'right')
+        self.declare_parameter('costs.lateral_bias_deadband', 0.25)
         
         # Lookahead parameters
         self.declare_parameter('costs.lookahead.base_distance', 2.5)
@@ -237,7 +245,10 @@ class MPPIMainNode(Node):
             'collision_cost': 1000.0,
             'repulsion_factor': 2.0,
             'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50       # Costmap values >= 50 are inflation zone
+            'inflation_zone_start': 50,      # Costmap values >= 50 are inflation zone
+            # curb/keepout cells must never be traded off against goal progress
+            'lethal_hard': self.get_parameter('costs.lethal_hard').get_parameter_value().bool_value,
+            'hard_lethal_cost': self.get_parameter('costs.hard_lethal_cost').get_parameter_value().double_value,
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)
@@ -260,7 +271,17 @@ class MPPIMainNode(Node):
         }
         self.goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(self.goal_critic)
-        
+
+        # Lateral bias critic: prefer avoiding AWAY from the curb side
+        lateral_params = {
+            'weight': self.get_parameter('costs.lateral_bias_weight').get_parameter_value().double_value,
+            'bias_side': self.get_parameter('costs.lateral_bias_side').get_parameter_value().string_value,
+            'deadband': self.get_parameter('costs.lateral_bias_deadband').get_parameter_value().double_value,
+        }
+        if lateral_params['weight'] > 0.0 and lateral_params['bias_side'] != 'none':
+            self.lateral_bias_critic = LateralBiasCritic(lateral_params)
+            self.optimizer.add_critic(self.lateral_bias_critic)
+
         self.get_logger().info("Critics initialized")
     
     

@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     # 제어 파라미터
-    control_frequency: 20.0               # 제어 주기 [Hz]
+    control_frequency: 10.0               # 제어 주기 [Hz]
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
     goal_reached_threshold: 1.5           # 목표 도달 거리 임계값 [m]
@@ -22,8 +22,8 @@
     # 차량 파라미터
     vehicle:
       wheelbase: 0.65                     # 휠베이스 길이 [m]
-      max_linear_velocity: 2.0            # 최대 선속도 [m/s]
-      min_linear_velocity: -2.0            # 최소 선속도 [m/s] (후진 불가)
+      max_linear_velocity: 1.3            # 최대 선속도 [m/s]
+      min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
       # max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
       # min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
       max_angular_velocity: 0.8          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)  
@@ -44,6 +44,16 @@
     costs:
       obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
       goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
+
+      # 연석 안전: lethal(연석 벽/keepout) 셀은 목표 비용과 절대 교환 불가
+      lethal_hard: true
+      hard_lethal_cost: 1000000.0
+      # 비대칭 측방 비용: 회피가 연석 반대쪽(현재 경로 기준 좌측)으로 향하게 유도
+      lateral_bias_weight: 15.0
+      # 연석은 좌/우 어느 쪽에든 있을 수 있으므로 기본 비활성('none').
+      # 한쪽 연석이 확실한 특정 노선에서만 'right'/'left'로 지정해 사용.
+      lateral_bias_side: 'none'           # ('right'|'left'|'none')
+      lateral_bias_deadband: 0.25         # [m] 이내 오프셋은 무과금 (정상 추종 보호)
       
       lookahead:
         base_distance: 10.0                # 기본 lookahead 거리 [m] (보수적 증가)
@@ -66,16 +76,28 @@
     topics:
       input:
         laser_scan: '/scan'           # 레이저 스캔 입력 토픽
+        costmap: '/costmap_keepout'   # corridor_keepout_node 출력 (원본: /costmap)
         odometry: '/odom'                 # 오도메트리 입력 토픽
         goal_pose: '/sub_goal'             # 단일 목표 위치 입력 토픽
         multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
         processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
         robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
-        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
+        cmd_vel: '/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
         optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
         markers: '/smppi_visualization'                # 시각화 마커 출력 토픽
+
+    # Corridor keepout (인도 회랑 밖 진입 금지)
+    input_costmap_topic: '/costmap'
+    output_costmap_topic: '/costmap_keepout'
+    waypoints_topic: '/multiple_waypoints'
+    odom_topic: '/odom'
+    corridor_half_width: 1.4       # [m] 경로 중심선 기준 회랑 반폭
+    forward_extension: 8.0         # [m] 마지막 waypoint 진행방향 연장 (노드간격 1~2m 지도 대응)
+    gate_node_types: [10]          # 합법 횡단 게이트 노드 타입 (신호등 등)
+    gate_radius: 3.0               # [m] 게이트 개방 반경
+    passthrough_without_route: true
 
     # TF 프레임 설정  
     frames:

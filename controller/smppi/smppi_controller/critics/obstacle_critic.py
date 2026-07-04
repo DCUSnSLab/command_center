@@ -29,6 +29,13 @@ class ObstacleCritic(BaseCritic):
         self.collision_cost = params.get('collision_cost', 1000.0)
         self.repulsion_factor = params.get('repulsion_factor', 2.0)
 
+        # Hard-lethal mode: occupied cells (curb walls, corridor keepout) get a
+        # near-infinite cost so no colliding trajectory can win the softmax --
+        # a summed soft cost of 1000 can be traded away by a good goal score,
+        # which is exactly how avoidance used to slip over the curb.
+        self.lethal_hard = bool(params.get('lethal_hard', True))
+        self.hard_lethal_cost = float(params.get('hard_lethal_cost', 1.0e6))
+
         # Costmap threshold parameters
         self.occupied_cost_threshold = params.get('occupied_cost_threshold', 80)  # Cost >= 80 is occupied
         self.inflation_zone_start = params.get('inflation_zone_start', 50)        # Cost >= 50 is inflation zone
@@ -125,8 +132,9 @@ class ObstacleCritic(BaseCritic):
             # Bounds checking
             valid_mask = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)
 
-            # Initialize costs (out-of-bounds = high collision cost)
-            vertex_costs = np.full(len(gx), self.collision_cost, dtype=np.float32)
+            # Initialize costs (out-of-bounds = lethal)
+            oob_cost = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
+            vertex_costs = np.full(len(gx), oob_cost, dtype=np.float32)
 
             # Get costmap values for valid vertices
             costmap_values = costmap_data[gy[valid_mask], gx[valid_mask]]  # Range: [0, 100]
@@ -150,7 +158,8 @@ class ObstacleCritic(BaseCritic):
                 valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
 
             # Occupied: collision cost
-            valid_costs[occupied_mask] = self.collision_cost
+            valid_costs[occupied_mask] = (self.hard_lethal_cost
+                                          if self.lethal_hard else self.collision_cost)
 
             # Assign computed costs
             vertex_costs[valid_mask] = valid_costs
@@ -176,8 +185,9 @@ class ObstacleCritic(BaseCritic):
             # Bounds checking
             valid_mask = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)
 
-            # Initialize costs (out-of-bounds = high collision cost)
-            point_costs = np.full(len(gx), self.collision_cost, dtype=np.float32)
+            # Initialize costs (out-of-bounds = lethal)
+            oob_cost = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
+            point_costs = np.full(len(gx), oob_cost, dtype=np.float32)
 
             # Get costmap values for valid points (O(1) lookup per point)
             costmap_values = costmap_data[gy[valid_mask], gx[valid_mask]]  # Range: [0, 100]
@@ -202,7 +212,8 @@ class ObstacleCritic(BaseCritic):
                 valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
 
             # Occupied: collision cost
-            valid_costs[occupied_mask] = self.collision_cost
+            valid_costs[occupied_mask] = (self.hard_lethal_cost
+                                          if self.lethal_hard else self.collision_cost)
 
             # Assign computed costs
             point_costs[valid_mask] = valid_costs

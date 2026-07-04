@@ -28,6 +28,7 @@ install(PROGRAMS
   scripts/smppi_controller_node.py
   scripts/sensor_processor_node.py
   scripts/costmap_processor_node.py
+  scripts/corridor_keepout_node.py
   scripts/mppi_main_node.py
   scripts/visualization_node.py
   DESTINATION lib/${PROJECT_NAME}

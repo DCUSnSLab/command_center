@@ -190,6 +190,38 @@ class BehaviorController:
         except Exception as e:
             self.node.get_logger().error(f"Failed to send MPPI parameters: {e}")
 
+    def apply_creep(self, creep_speed: float) -> bool:
+        """BLOCKED 상황 서행 모드: 현재 행동 파라미터에 저속만 덮어써 전송"""
+        if not self.param_manager or not self.mppi_param_pub:
+            return False
+        try:
+            params = dict(self.param_manager.get_behavior_params(self.current_node_type))
+            params['max_linear_velocity'] = float(creep_speed)
+            params['min_linear_velocity'] = 0.0
+            params['behavior_description'] = (
+                f"BLOCKED creep ({params.get('behavior_description', '')})")
+            self._send_mppi_parameters(params)
+            self.node.get_logger().warn(
+                f"[BLOCKED] creep mode ON: max_v={creep_speed} m/s")
+            return True
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to apply creep: {e}")
+            return False
+
+    def reapply_current_behavior(self) -> bool:
+        """현재 노드 타입의 정상 파라미터 재전송 (creep 해제 등 복원용)"""
+        if not self.param_manager or not self.mppi_param_pub:
+            return False
+        try:
+            params = self.param_manager.get_behavior_params(self.current_node_type)
+            self._send_mppi_parameters(params)
+            self.node.get_logger().info(
+                f"[BLOCKED] behavior params restored (type {self.current_node_type})")
+            return True
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to reapply behavior: {e}")
+            return False
+
     def get_current_behavior_type(self) -> int:
         """현재 행동 타입 반환"""
         return self.current_node_type

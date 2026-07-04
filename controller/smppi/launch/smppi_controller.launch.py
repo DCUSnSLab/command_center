@@ -22,7 +22,7 @@ def generate_launch_description():
     # Launch arguments
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
-        default_value='true',
+        default_value='false',
         description='Use simulation time if true'
     )
     
@@ -71,6 +71,23 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', 'info']
     )
     
+    # Corridor Keepout Node (sidewalk keep-in; /costmap -> /costmap_keepout)
+    corridor_keepout_node = Node(
+        package='smppi',
+        executable='corridor_keepout_node.py',
+        name='corridor_keepout',
+        namespace=namespace,
+        parameters=[
+            default_config_path,
+            {
+                'use_sim_time': use_sim_time,
+            }
+        ],
+        output='screen',
+        emulate_tty=True,
+        arguments=['--ros-args', '--log-level', 'info']
+    )
+
     # MPPI Main Controller Node
     mppi_main_node = Node(
         package='smppi',
@@ -116,6 +133,7 @@ def generate_launch_description():
         # Group all nodes
         GroupAction([
             costmap_processor_node,
+            corridor_keepout_node,
             mppi_main_node,
             visualization_node,
         ])

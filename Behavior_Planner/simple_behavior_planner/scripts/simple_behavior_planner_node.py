@@ -4,6 +4,8 @@ Simple Behavior Planner Node (Refactored)
 깔끔하고 모듈화된 새로운 구조
 """
 
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -24,6 +26,7 @@ from simple_behavior_planner.path_manager import PathManager
 from simple_behavior_planner.waypoint_publisher import WaypointPublisher
 from simple_behavior_planner.behavior_controller import BehaviorController
 from simple_behavior_planner.safety_monitor import SafetyMonitor
+from simple_behavior_planner.blocked_wait_monitor import BlockedWaitMonitor
 
 
 class SimpleBehaviorPlannerNode(Node):
@@ -42,6 +45,17 @@ class SimpleBehaviorPlannerNode(Node):
         self.behavior_controller = BehaviorController(
             self, self.behavior_config_path) if self.enable_behavior_control else None
         self.safety_monitor = SafetyMonitor(self)
+        self.blocked_monitor = BlockedWaitMonitor(
+            blocked_detect_sec=self.get_parameter('blocked.detect_sec').value,
+            progress_eps=self.get_parameter('blocked.progress_eps').value,
+            wait_timeout=self.get_parameter('blocked.wait_timeout').value,
+            creep_timeout=self.get_parameter('blocked.creep_timeout').value,
+            creep_speed=self.get_parameter('blocked.creep_speed').value,
+            assist_repeat_sec=self.get_parameter('blocked.assist_repeat_sec').value)
+        self.blocked_near_goal_hold_off = float(
+            self.get_parameter('blocked.near_goal_hold_off').value)
+        self.latest_goal_distance = None
+        self.pause_until = 0.0
 
         # State variables
         self.current_pose: Optional[PoseStamped] = None
@@ -94,6 +108,15 @@ class SimpleBehaviorPlannerNode(Node):
 
         # Behavior parameters
         self.declare_parameter('pause_trigger_distance', 0.8)
+
+        # Blocked-wait (회피 불가 시 정지·대기) parameters
+        self.declare_parameter('blocked.detect_sec', 4.0)
+        self.declare_parameter('blocked.progress_eps', 0.15)
+        self.declare_parameter('blocked.wait_timeout', 12.0)
+        self.declare_parameter('blocked.creep_timeout', 10.0)
+        self.declare_parameter('blocked.creep_speed', 0.3)
+        self.declare_parameter('blocked.assist_repeat_sec', 15.0)
+        self.declare_parameter('blocked.near_goal_hold_off', 0.8)
         self.declare_parameter('waypoint_mode', 'multiple')
         self.declare_parameter('behavior_config_path', 'behavior_modifiers.yaml')
         self.declare_parameter('enable_behavior_control', True)
@@ -192,6 +215,12 @@ class SimpleBehaviorPlannerNode(Node):
         self.request_replan_pub = self.create_publisher(
             RequestReplan, self.request_replan_topic, self.reliable_qos)
 
+        # Blocked-wait status / assist publishers
+        self.behavior_status_pub = self.create_publisher(
+            String, '/behavior_status', self.reliable_qos)
+        self.assist_request_pub = self.create_publisher(
+            String, '/blocked_assist_request', self.reliable_qos)
+
     def _link_module_publishers(self):
         """모듈에 발행자 연결"""
         # Waypoint publisher
@@ -263,6 +292,7 @@ class SimpleBehaviorPlannerNode(Node):
 
     def goal_status_callback(self, msg: ControllerGoalStatus):
         """목표 상태 콜백"""
+        self.latest_goal_distance = msg.distance_to_goal
         current_target = self.path_manager.get_current_target_node()
         if not current_target or msg.goal_id != current_target['id']:
             return
@@ -328,6 +358,9 @@ class SimpleBehaviorPlannerNode(Node):
         # Behavior control
         self._update_behavior_if_needed()
 
+        # Blocked-wait monitoring (회피 불가/보행자 차단 시 정지·대기·서행 에스컬레이션)
+        self._tick_blocked_monitor()
+
         # Waypoint publishing
         if not self.subgoal_published:
             self._publish_waypoints()
@@ -364,6 +397,51 @@ class SimpleBehaviorPlannerNode(Node):
         self.get_logger().info(f'Published waypoints: current={current_target["id"]}, '
                              f'next_count={len(next_nodes)}')
 
+    def _tick_blocked_monitor(self):
+        """Blocked-wait 상태기계 틱"""
+        xy = None
+        if self.current_pose is not None:
+            xy = (self.current_pose.pose.position.x,
+                  self.current_pose.pose.position.y)
+
+        should_be_moving = (
+            self.path_manager.is_path_following
+            and not self.emergency_stop_requested
+            and time.time() >= self.pause_until
+            and not self.safety_monitor.get_safety_status()['should_pause']
+            and (self.latest_goal_distance is None
+                 or self.latest_goal_distance > self.blocked_near_goal_hold_off))
+
+        actions = self.blocked_monitor.update(time.time(), xy, should_be_moving)
+        for action in actions:
+            self._handle_blocked_action(action)
+
+    def _handle_blocked_action(self, action: str):
+        """Blocked-wait 상태기계 액션 처리"""
+        if action.startswith('announce:'):
+            state = action.split(':', 1)[1]
+            msg = String()
+            msg.data = state
+            self.behavior_status_pub.publish(msg)
+            if state == 'NORMAL':
+                self.get_logger().info('[BLOCKED] cleared -> NORMAL')
+            else:
+                self.get_logger().warn(f'[BLOCKED] state -> {state}')
+        elif action == 'creep_on':
+            if self.behavior_controller:
+                self.behavior_controller.apply_creep(
+                    self.blocked_monitor.creep_speed)
+        elif action == 'creep_off':
+            if self.behavior_controller:
+                self.behavior_controller.reapply_current_behavior()
+        elif action == 'assist':
+            msg = String()
+            current = self.path_manager.get_current_target_node()
+            msg.data = (f"blocked at node {current['id'] if current else '?'}: "
+                        f"no in-corridor avoidance path; operator attention requested")
+            self.assist_request_pub.publish(msg)
+            self.get_logger().error(f'[BLOCKED] assist requested: {msg.data}')
+
     # ===== Goal Status Handlers =====
 
     def _check_pause_trigger(self, msg: ControllerGoalStatus):
@@ -379,6 +457,7 @@ class SimpleBehaviorPlannerNode(Node):
                 pause_duration = 2.0 if node_type == 7 else 4.0
                 self._send_pause_command(pause_duration, current_target['id'], f"Node type {node_type} pause")
                 self.pause_signal_sent = True
+                self.pause_until = time.time() + pause_duration + 1.0
 
                 self.get_logger().info(f"Pause command sent: {pause_duration}s for node {msg.goal_id}")
 
