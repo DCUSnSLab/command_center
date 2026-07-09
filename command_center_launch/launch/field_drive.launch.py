@@ -7,7 +7,9 @@ mission needs, including the curb-safety layers:
                         realsense, sllidar) + hunter_start (base, teleop mux,
                         description/TF)  [+ gnss_start when with_gnss]
   t= 3s  map service    gmserver (map_file_path argument)
-  t= 5s  localization   tiny_localization (odom + odom->base_link TF)
+  t= 5s  localization   robot_localization dual-EKF + FAST-LIO + navsat
+                        (odom->base_link & map->odom TF, /odom;
+                        replaces tiny_localization — see scv_dual_ekf.yaml)
   t= 7s  global plan    scv_global_planner
   t= 9s  curb safety    pcd_ground_filter/curb_costmap
                         (L1 below-grade curb detection -> local_costmap on
@@ -68,8 +70,11 @@ def generate_launch_description():
     with_gnss = LaunchConfiguration('with_gnss', default='true')
     enable_visualization = LaunchConfiguration('enable_visualization', default='false')
 
+    # Map must contain UtmInfo (F2: UtmInfo-less maps yield zeroed
+    # waypoints) and its node[0] must equal the navsat datum in
+    # scv_dual_ekf.yaml. record_20260630_141709_map_d1 satisfies both.
     default_map = PathJoinSubstitution([
-        FindPackageShare('gmserver'), 'maps', '1_5_map hard_relocated.json'
+        FindPackageShare('gmserver'), 'maps', 'record_20260630_141709_map_d1.json'
     ])
 
     sim_args = {'use_sim_time': use_sim_time}
@@ -105,9 +110,10 @@ def generate_launch_description():
             _include('gmserver', 'map_service.launch.py', sim_args),
         ]),
 
-        # --- t=5: localization (odom + odom->base_link TF) -----------------
+        # --- t=5: localization (FAST-LIO + dual-EKF + navsat) --------------
+        # Owns odom->base_link AND map->odom TF; datum = graph-map node[0].
         TimerAction(period=5.0, actions=[
-            _include('tiny_localization', 'tiny_localization.launch.py', sim_args),
+            _include('robot_localization', 'scv_dual_ekf.launch.py', sim_args),
         ]),
 
         # --- t=7: global planner (calls /load_map with map_file_path) ------

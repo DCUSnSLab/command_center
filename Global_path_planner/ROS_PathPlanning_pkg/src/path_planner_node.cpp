@@ -92,6 +92,13 @@ public:
         
         // Create service client for map loading
         map_client_ = this->create_client<gmserver::srv::LoadMap>("load_map");
+
+        // map->odom TF is owned by robot_localization (ekf_filter_node_map)
+        // since the dual-EKF migration; the legacy GPS-based broadcast below
+        // was also mathematically wrong (it tracked the robot's CURRENT GPS
+        // position instead of a constant frame offset). Default OFF.
+        this->declare_parameter("publish_map_odom_tf", false);
+        publish_map_odom_tf_ = this->get_parameter("publish_map_odom_tf").as_bool();
         
         // Create subscribers
         gps_subscriber_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
@@ -510,7 +517,9 @@ private:
         
         // Publish GPS-based map->odom transform
         if (!map_tf_initialized_ && first_node_initialized_) {
-            publishMapToOdomTransform(*msg);
+            if (publish_map_odom_tf_) {
+                publishMapToOdomTransform(*msg);
+            }
             map_tf_initialized_ = true;
         }
         
@@ -1623,6 +1632,7 @@ private:
     
     // Member variables
     rclcpp::Client<gmserver::srv::LoadMap>::SharedPtr map_client_;
+    bool publish_map_odom_tf_{false};
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscriber_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
