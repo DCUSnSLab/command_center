@@ -1,0 +1,90 @@
+# SCV 실차 테스트 절차서 — 연석 안전 스택 + 신규 위치추정
+
+기준: 2026-07-09 코드 상태
+(연석 4계층 방어 + robot_localization dual-EKF/FAST-LIO 전환 완료 시점)
+
+- 실행: `ros2 launch command_center_launch field_drive.launch.py`
+- 브랜치: SCV_Perception / command_center `feature/curb-safety`,
+  robot_localization `feature/scv-localization`
+- 사전 검증 이력: 개루프 30-bag 회귀, 실노드 e2e, 폐루프 33-월드(침범 0),
+  위치추정 bag 재생 검증 — **미검증 잔여 = 실차 폐루프뿐**
+
+---
+
+## 0. 출발 전 (연구실)
+
+| # | 항목 | 명령/기준 |
+|---|---|---|
+| 0-1 | 브랜치·빌드 확인 | 세 저장소가 위 브랜치인지: `git -C src/perception branch --show-current` 등. 재빌드 시 사본 캐시 주의: `rm -rf build/<pkg> install/<pkg>` 후 빌드 |
+| 0-2 | 스크립트 실행권한 | `--symlink-install` 사용 시 `chmod +x src/**/scripts/*.py` (미적용 시 "No executable found") |
+| 0-3 | 지도-datum 일치 | 기본 지도 `record_20260630_141709_map_d1.json`. **다른 지도 사용 시** ① UtmInfo 필드 존재 확인(없으면 waypoint 전부 0) ② `scv_dual_ekf.yaml`의 `datum:`을 그 지도 node[0]의 Lat/Long으로 변경 |
+| 0-4 | NTRIP 계정/망 | ntrip_client 설정 및 통신망(SIM/테더링) 확인 — **기준 bag은 전 구간 RTK 미고정 상태로 주행했음** |
+| 0-5 | 조종기 | teleop 조종기 배터리/페어링 — mux 수동 개입이 유일한 즉시 개입 수단 |
+
+## 1. 현장 기동 (자율주행 전, 정지 상태)
+
+`field_drive.launch.py` 실행 후 순서대로:
+
+| # | 확인 | 명령 | 합격 기준 |
+|---|---|---|---|
+| 1-1 | 노드 생존 | `ros2 node list` | 위치추정 5종(fastlio, wheel_odom_adapter, ekf×2, navsat) + curb/costmap/corridor/mppi/behavior 존재, "process has died" 없음 |
+| 1-2 | 센서 스트림 | `ros2 topic hz /velodyne_points /vectornav/imu /ublox_gps_node/fix /hunter/velocity` | 10 / ~100 / ~10 / ~50 Hz |
+| 1-3 | **RTK Fix** | `ros2 topic echo /ublox_gps_node/fix --once` | `status.status: 2` 또는 covariance 대각 < 0.01 (1σ<10cm). **미달 시 자율주행 보류** — NTRIP부터 해결 |
+| 1-4 | TF 트리 | `ros2 run tf2_tools view_frames` | map→odom→base_link 단선 연결, base_link→gnss_antenna는 **URDF 1개만** (launch 폴백 off 확인) |
+| 1-5 | 위치추정 초기화 | `ros2 topic echo /odom --once` | **정지 상태에서 즉시** 출력 (구 tiny와 달리 주행 불필요). `/odometry/global`도 확인 |
+| 1-6 | 연석 검출 | curb 노드 로그 | `plane a=…, c=−0.7~−0.95` 범위, "passthrough" 경고 지속되면 전방 개활 방향으로 차량 회전 |
+| 1-7 | 코스트맵 | RViz: `/costmap_keepout` | **차도 영역이 lethal(적색)**, 인도 회랑만 free. 회랑이 경로 따라 형성되는지 |
+
+## 2. 캘리브레이션 (첫 방문 시 1회)
+
+**2-1. navsat yaw_offset**: 개활지에서 로봇을 **정동(east)** 방향으로 정렬(원거리 지형지물/지도 기준) 후
+`ros2 topic echo /vectornav/imu --field orientation` → yaw 환산값이 0이 아니면 그 차이를 `scv_dual_ekf.yaml`의 `yaw_offset`에 입력.
+검증: 직선 10m 수동 주행 → `/odometry/global` 궤적이 실제 진행 방향과 일치하는지.
+
+**2-2. (선택) 안테나 오프셋 확인**: RTK fix 상태에서 제자리 360° 회전 → `/odometry/gps` 위치가 원을 그리면 URDF 오프셋 오차 (반지름=오차). URDF값 (+0.02, 0, 0.795)이 이미 검증되어 있어 확인용.
+
+## 3. 수동 주행 검증 (mux 수동 모드)
+
+| # | 시나리오 | 확인 |
+|---|---|---|
+| 3-1 | 직선 20m 왕복 | `/odom` 매끈(점프 없음), RViz에서 costmap이 차량 따라 롤링, 연석 lethal 유지 |
+| 3-2 | 제자리 회전 | TF/odometry 안정, FAST-LIO 발산 없음 |
+| 3-3 | **mux 개입 테스트** | 자율 모드 전환 준비 상태에서 조종기 입력이 항상 우선하는지 — **이후 모든 단계의 전제조건** |
+
+## 4. 자율주행 — 점진 시나리오 (각 단계 합격 후 다음으로)
+
+안전요원 1인 조종기 파지, 1인 차량 측방 동행. 최초엔 `max_linear_velocity`를 0.5로 제한 권장 (`smppi_params.yaml`).
+
+| 단계 | 시나리오 | 합격 기준 | 관찰 토픽 |
+|---|---|---|---|
+| A | 개활 직선 10m | 목표 도달, 경로이탈 <0.5m | `/odom`, `/goal_status` |
+| B | 연석 인접 구간 직진 | **연석 방향 접근 없음** (폐루프에서 ±1cm였음), 차도 셀 lethal 상시 | RViz costmap |
+| C | 인도 위 정적 장애물(박스) — 회랑 내 회피 여유 있게 배치 | 회랑 안에서 회피, **연석 쪽 이탈 금지** | `/mppi_optimal_path` |
+| D | **회랑 전폭 차단** (안전요원 2인이 길 막기) | 정지 → `BLOCKED_WAIT` → (12s) `CREEP` → 비켜주면 `NORMAL` 복귀·재주행 | `/behavior_status` |
+| E | D에서 계속 차단 유지 | (10s creep 후) `ASSIST` 발행 → **연석 침범 없이 대기 지속** | `/blocked_assist_request` |
+| F | GPS 열화 구간(수목 아래) 통과 | FAST-LIO 주도로 경로 유지, `/odometry/global` 점프 후 자연 수렴 | 위치추정 토픽들 |
+
+## 5. 즉시 중단 기준 (조종기 개입 → 수동 회수)
+
+- 차량이 **연석 30cm 이내** 접근 또는 차도 방향 조향 지속
+- mppi 로그 `ALL trajectories lethal` 1초 이상 반복 (비상정지 가드 작동 중 — 원인 파악 전 재개 금지)
+- `/odom` 1m 이상 점프, TF 끊김(RViz 프레임 적색), 노드 반복 재시작(respawn 루프)
+- RTK 상실 + F 시나리오 외 구간에서 경로이탈 >1m
+
+## 6. 기록 (전 세션 상시)
+
+```bash
+ros2 bag record /velodyne_points /vectornav/imu /ublox_gps_node/fix /hunter/velocity \
+  /odom /odometry/global /odometry/gps /odometry/fast_lio /tf /tf_static \
+  /costmap /costmap_keepout /velodyne_points_curb /cmd_vel /behavior_status \
+  /blocked_assist_request /planned_path_detailed /multiple_waypoints /goal_status \
+  /camera/camera/color/image_raw
+```
+종료 후 BagArchive(203.250.35.87:31447) 업로드 → 회귀 하니스로 재검증 가능.
+
+## 7. 알려진 특성 / 튜닝 후보 (이상 아님)
+
+- BLOCKED↔NORMAL 채터링 가능 (경계 진동) — 알림만 영향, 필요 시 `blocked.progress_eps` 상향
+- MPPI가 장애물 앞에서 완전정지 대신 저속 크리프 → BLOCKED 감지가 수 초 지연될 수 있음
+- 게이트(횡단) 기능은 지도에 node_type 10이 없어 현재 비활성 — 횡단 노선 제작 시 지정
+- gps_manager 미사용 중 — RTK 두절 드리프트 >3m 관측 시 도입 검토
