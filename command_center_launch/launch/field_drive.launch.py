@@ -18,6 +18,11 @@ mission needs, including the curb-safety layers:
   t=15s  behavior       simple_behavior_planner (waypoints, BLOCKED_WAIT
                         stop-and-wait escalation)
 
+Node-death policy: the perception chain is inline (curb node feeds the
+costmap feeds the controller), so safety-critical nodes are started with
+respawn in their own launch files; local_costmap keeps publishing its LAST
+grid when input stops — check the curb node log if the costmap looks frozen.
+
 Field checklist before launch:
   * curb_params.yaml plane_c bounds must bracket the CURRENT sensor mount
     height (measured 0.73-0.94 m across 2026 recordings).

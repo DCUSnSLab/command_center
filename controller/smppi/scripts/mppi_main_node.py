@@ -138,6 +138,8 @@ class MPPIMainNode(Node):
         # Curb-safety cost shaping
         self.declare_parameter('costs.lethal_hard', True)
         self.declare_parameter('costs.hard_lethal_cost', 1.0e6)
+        # best-trajectory cost at/above which we zero the command
+        self.declare_parameter('costs.all_lethal_stop_cost', 5.0e5)
         self.declare_parameter('costs.lateral_bias_weight', 15.0)
         self.declare_parameter('costs.lateral_bias_side', 'right')
         self.declare_parameter('costs.lateral_bias_deadband', 0.25)
@@ -200,6 +202,9 @@ class MPPIMainNode(Node):
             'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value
         }
         
+        self.all_lethal_stop_cost = self.get_parameter(
+            'costs.all_lethal_stop_cost').get_parameter_value().double_value
+
         # Critic weights
         self.critic_weights = {
             'obstacle_weight': self.get_parameter('costs.obstacle_weight').get_parameter_value().double_value,
@@ -561,6 +566,18 @@ class MPPIMainNode(Node):
             
             # Apply velocity limits before publishing
             cmd_vel = self._apply_velocity_limits(cmd_vel)
+            
+            # SAFETY GUARD: if even the BEST sampled trajectory is lethal
+            # (robot cell itself marked lethal, corridor glitch, perception
+            # fault), the softmax average of all-lethal rollouts is an
+            # unpredictable "escape" manoeuvre. Command a hard stop instead
+            # and let the behavior planner / operator resolve it.
+            best = getattr(self.optimizer, 'last_best_cost', 0.0)
+            if best >= self.all_lethal_stop_cost:
+                cmd_vel = Twist()
+                self.get_logger().error(
+                    f'ALL trajectories lethal (best cost {best:.2e}) — '
+                    f'emergency zero command', throttle_duration_sec=1.0)
             
             # Publish control command
             self.cmd_pub.publish(cmd_vel)

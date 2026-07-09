@@ -68,6 +68,8 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
     
@@ -85,6 +87,8 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
 
@@ -102,6 +106,8 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
     
@@ -120,6 +126,8 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
     
