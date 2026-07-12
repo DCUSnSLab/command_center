@@ -102,6 +102,12 @@ void CostmapNode::declareParameters()
   // Update frequency
   this->declare_parameter("update_frequency", 10.0);
 
+  // Input staleness watchdog: if no point cloud is processed for this many
+  // seconds (or none was EVER received), the grid is published fully LETHAL
+  // so the controller's all-lethal guard commands a safe stop instead of
+  // driving blind on a frozen map.
+  this->declare_parameter("staleness_timeout", 0.5);
+
   // Robot footprint
   this->declare_parameter("robot_footprint",
     std::vector<double>{0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725});
@@ -128,6 +134,7 @@ void CostmapNode::loadParameters()
   max_obstacle_height_ = this->get_parameter("max_obstacle_height").as_double();
 
   update_frequency_ = this->get_parameter("update_frequency").as_double();
+  staleness_timeout_ = this->get_parameter("staleness_timeout").as_double();
 
   robot_footprint_ = this->get_parameter("robot_footprint").as_double_array();
 
@@ -189,6 +196,8 @@ void CostmapNode::pointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstS
     latest_points_ = std::move(points);
     has_new_points_ = true;
   }
+  last_points_time_ = this->now();
+  ever_received_points_ = true;
 }
 
 void CostmapNode::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& msg)
@@ -213,6 +222,18 @@ void CostmapNode::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& ms
 
 void CostmapNode::mainLoopCallback()
 {
+  // C3 watchdog: stale (or never-arrived) input => fail-safe all-lethal grid.
+  // Recovery is automatic: the next successful update resets the grid.
+  const bool stale = !ever_received_points_ ||
+    (this->now() - last_points_time_).seconds() > staleness_timeout_;
+  if (stale) {
+    costmap_->reset(Costmap2D::OCCUPIED);
+    RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "point cloud input %s (timeout %.2fs) — publishing ALL-LETHAL fail-safe grid",
+      ever_received_points_ ? "STALE" : "never received", staleness_timeout_);
+    publishCostmap();
+    return;
+  }
   updateCostmap();
   publishCostmap();
 }

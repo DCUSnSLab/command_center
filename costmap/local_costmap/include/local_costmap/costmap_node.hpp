@@ -69,6 +69,7 @@ private:
   double min_obstacle_height_;
   double max_obstacle_height_;
   double update_frequency_;
+  double staleness_timeout_;
   double inflation_radius_;
   double cost_scaling_factor_;
   std::vector<double> robot_footprint_;
@@ -92,6 +93,11 @@ private:
   std::mutex pc_mutex_;
   std::vector<Point3D> latest_points_;
   std::atomic<bool> has_new_points_;
+
+  // input-staleness watchdog (C3): when the point cloud stops arriving the
+  // node must NOT keep republishing its last grid as if the world froze.
+  std::atomic<bool> ever_received_points_{false};
+  rclcpp::Time last_points_time_;
 
   std::mutex odom_mutex_;
   RobotPose robot_pose_;
