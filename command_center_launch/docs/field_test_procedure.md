@@ -18,7 +18,8 @@
 | 0-1 | 브랜치·빌드 확인 | 세 저장소가 위 브랜치인지: `git -C src/perception branch --show-current` 등. 재빌드 시 사본 캐시 주의: `rm -rf build/<pkg> install/<pkg>` 후 빌드 |
 | 0-2 | 스크립트 실행권한 | `--symlink-install` 사용 시 `chmod +x src/**/scripts/*.py` (미적용 시 "No executable found") |
 | 0-3 | 지도-datum 일치 | 기본 지도 `record_20260630_141709_map_d1.json`. **다른 지도 사용 시** ① UtmInfo 필드 존재 확인(없으면 waypoint 전부 0) ② `scv_dual_ekf.yaml`의 `datum:`을 그 지도 node[0]의 Lat/Long으로 변경 |
-| 0-4 | NTRIP 계정/망 | ntrip_client 설정 및 통신망(SIM/테더링) 확인 — **기준 bag은 전 구간 RTK 미고정 상태로 주행했음** |
+| 0-4 | NTRIP 계정/망 | ntrip_client 설정 및 통신망(SIM/테더링) 확인 — **기준 bag은 전 구간 RTK 미고정 상태로 주행했음**. 주의: 장치의 ntrip_client_launch.py에 username이 `nevlife12`로 수정돼 있음(주석은 `nevlife123`) — 오타 여부 확인 필요 |
+| 0-5 | 안테나 (AKA900 RTK로 교체됨) | URDF `gnss_antenna` = base_link 기준 (+0.02, 0, +0.795) — 2026-07-14 실기기 TF 실측 일치 확인. **안테나 마운트를 물리적으로 옮겼다면 tf_mounts.xacro 갱신 + 2-2 회전 시험 필수** |
 | 0-5 | 조종기 | teleop 조종기 배터리/페어링 — mux 수동 개입이 유일한 즉시 개입 수단 |
 
 ## 1. 현장 기동 (자율주행 전, 정지 상태)
@@ -29,6 +30,8 @@
 |---|---|---|---|
 | 1-1 | 노드 생존 | `ros2 node list` | 위치추정 5종(fastlio, wheel_odom_adapter, ekf×2, navsat) + curb/costmap/corridor/mppi/behavior 존재, "process has died" 없음 |
 | 1-2 | 센서 스트림 | `ros2 topic hz /velodyne_points /vectornav/imu /ublox_gps_node/fix /hunter/velocity` | 10 / ~100 / ~10 / ~50 Hz |
+| 1-2b | 신규 2D LiDAR (RPLIDAR C1 전·후방) | `ros2 topic hz /front/scan /rear/scan` | 각 ~10 Hz. **현재 안전 스택은 이 스캔을 소비하지 않음**(코스트맵 융합은 후속 작업) — 검출 실패 시에도 주행 가능하나 기록 권장 |
+| 1-2c | velodyne 링크 | `ip -br a \| grep enp7s0` | `UP` — 2026-07-14 실기기 점검에서 DOWN(전원/케이블 분리) 상태였음. 미연결 시 C3가 전면 lethal을 발행해 출발 자체가 차단됨(정상 페일세이프) |
 | 1-3 | **RTK Fix** | `ros2 topic echo /ublox_gps_node/fix --once` | `status.status: 2` 또는 covariance 대각 < 0.01 (1σ<10cm). **미달 시 자율주행 보류** — NTRIP부터 해결 |
 | 1-4 | TF 트리 | `ros2 run tf2_tools view_frames` | map→odom→base_link 단선 연결, base_link→gnss_antenna는 **URDF 1개만** (launch 폴백 off 확인) |
 | 1-5 | 위치추정 초기화 | `ros2 topic echo /odom --once` | **정지 상태에서 즉시** 출력 (구 tiny와 달리 주행 불필요). `/odometry/global`도 확인 |
