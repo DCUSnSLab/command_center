@@ -18,9 +18,11 @@
 | 0-1 | 브랜치·빌드 확인 | 세 저장소가 위 브랜치인지: `git -C src/perception branch --show-current` 등. 재빌드 시 사본 캐시 주의: `rm -rf build/<pkg> install/<pkg>` 후 빌드 |
 | 0-2 | 스크립트 실행권한 | `--symlink-install` 사용 시 `chmod +x src/**/scripts/*.py` (미적용 시 "No executable found") |
 | 0-3 | 지도-datum 일치 | 기본 지도 `record_20260630_141709_map_d1.json`. **다른 지도 사용 시** ① UtmInfo 필드 존재 확인(없으면 waypoint 전부 0) ② `scv_dual_ekf.yaml`의 `datum:`을 그 지도 node[0]의 Lat/Long으로 변경 |
-| 0-4 | NTRIP 계정/망 | ntrip_client 설정 및 통신망(SIM/테더링) 확인 — **기준 bag은 전 구간 RTK 미고정 상태로 주행했음**. 주의: 장치의 ntrip_client_launch.py에 username이 `nevlife12`로 수정돼 있음(주석은 `nevlife123`) — 오타 여부 확인 필요 |
+| 0-4 | NTRIP 계정/망 | ntrip_client 설정 및 통신망(SIM/테더링) 확인 — 2026-07-14 실측: 국토지리정보원 VRS 접속 성공(계정 `nevlife12` 유효). **기준 bag은 전 구간 RTK 미고정 상태로 주행했음** |
 | 0-5 | 안테나 (AKA900 RTK로 교체됨) | URDF `gnss_antenna` = base_link 기준 (+0.02, 0, +0.795) — 2026-07-14 실기기 TF 실측 일치 확인. **안테나 마운트를 물리적으로 옮겼다면 tf_mounts.xacro 갱신 + 2-2 회전 시험 필수** |
-| 0-5 | 조종기 | teleop 조종기 배터리/페어링 — mux 수동 개입이 유일한 즉시 개입 수단 |
+| 0-6 | CAN (can0) | 부팅 후 can0는 DOWN이 기본. hunter_base.launch가 자동으로 올림(sudoers.d/scv-can0 필요, 2026-07-14 설치됨). 수동 확인: `ip -br link \| grep can0` → UP. **2026-07-14 필드런은 can0 미기동 → hunter_base 즉사(SIGABRT) → 구동·휠속도 전무가 1차 실패 원인** |
+| 0-7 | 조종기 | teleop 조종기 배터리/페어링 — mux 수동 개입이 유일한 즉시 개입 수단 |
+| 0-8 | 시작 위치 | **차량을 지도 경로 위(node 인접)에 두고 시작.** 사용 지도 경로는 공학관 순환 루프임(동쪽 운동장 인도 아님 — 2026-07-14 위치 착오 재발 방지) |
 
 ## 1. 현장 기동 (자율주행 전, 정지 상태)
 
@@ -35,6 +37,8 @@
 | 1-3 | **RTK Fix** | `ros2 topic echo /ublox_gps_node/fix --once` | `status.status: 2` 또는 covariance 대각 < 0.01 (1σ<10cm). **미달 시 자율주행 보류** — NTRIP부터 해결 |
 | 1-4 | TF 트리 | `ros2 run tf2_tools view_frames` | map→odom→base_link 단선 연결, base_link→gnss_antenna는 **URDF 1개만** (launch 폴백 off 확인) |
 | 1-5 | 위치추정 초기화 | `ros2 topic echo /odom --once` | **정지 상태에서 즉시** 출력 (구 tiny와 달리 주행 불필요). `/odometry/global`도 확인 |
+| 1-5b | **GPS 게이트 통과** | gps_fix_gate 로그 | `first sane fix passed` 확인. 콜드스타트 쓰레기 좌표(→2026-07-14 EKF −168 km 발산 원인)는 게이트가 자동 차단하지만, `fix DROPPED`가 1분 이상 지속되면 수신기 재부팅 |
+| 1-5c | 전역 위치 정합 | `/odometry/global`과 `/odometry/gps` 비교 | 두 좌표 차이 < 5 m (발산 잔재 없음) |
 | 1-6 | 연석 검출 | curb 노드 로그 | `plane a=…, c=−0.7~−0.95` 범위, "passthrough" 경고 지속되면 전방 개활 방향으로 차량 회전 |
 | 1-7 | 코스트맵 | RViz: `/costmap_keepout` | **차도 영역이 lethal(적색)**, 인도 회랑만 free. 회랑이 경로 따라 형성되는지 |
 
@@ -78,7 +82,8 @@
 
 ```bash
 ros2 bag record /velodyne_points /vectornav/imu /ublox_gps_node/fix /hunter/velocity \
-  /odom /odometry/global /odometry/gps /odometry/fast_lio /tf /tf_static \
+  /odom /odometry/global /odometry/gps /odometry/fast_lio /gps/fix_gated /tf /tf_static \
+  /front/scan /rear/scan \
   /costmap /costmap_keepout /velodyne_points_curb /cmd_vel /behavior_status \
   /blocked_assist_request /planned_path_detailed /multiple_waypoints /goal_status \
   /camera/camera/color/image_raw
