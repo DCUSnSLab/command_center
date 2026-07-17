@@ -17,7 +17,8 @@ from typing import Optional
 
 # ROS2 messages
 from geometry_msgs.msg import Twist, PoseStamped, PointStamped
-from nav_msgs.msg import Path, OccupancyGrid
+from nav_msgs.msg import Path, OccupancyGrid, Odometry
+from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import Header
 from smppi.msg import ProcessedObstacles, MPPIState, OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
@@ -29,6 +30,7 @@ from smppi_controller.critics.goal_critic import GoalCritic
 from smppi_controller.critics.lateral_bias_critic import LateralBiasCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.transforms import Transforms
+from smppi_controller.localization_anchor import LocalizationAnchorMonitor
 
 
 class MPPIMainNode(Node):
@@ -140,6 +142,10 @@ class MPPIMainNode(Node):
         self.declare_parameter('costs.hard_lethal_cost', 1.0e6)
         # best-trajectory cost at/above which we zero the command
         self.declare_parameter('costs.all_lethal_stop_cost', 5.0e5)
+        # C4 map-anchor interlock: refuse to drive until the map frame has
+        # been anchored by a gate-passed GNSS fix (route/keepout live in map)
+        self.declare_parameter('safety.require_map_anchor', True)
+        self.declare_parameter('safety.global_odom_timeout', 1.0)
         self.declare_parameter('costs.lateral_bias_weight', 15.0)
         self.declare_parameter('costs.lateral_bias_side', 'right')
         self.declare_parameter('costs.lateral_bias_deadband', 0.25)
@@ -204,6 +210,12 @@ class MPPIMainNode(Node):
         
         self.all_lethal_stop_cost = self.get_parameter(
             'costs.all_lethal_stop_cost').get_parameter_value().double_value
+
+        self.require_map_anchor = self.get_parameter(
+            'safety.require_map_anchor').get_parameter_value().bool_value
+        self.anchor_monitor = LocalizationAnchorMonitor(
+            global_timeout=self.get_parameter(
+                'safety.global_odom_timeout').get_parameter_value().double_value)
 
         # Critic weights
         self.critic_weights = {
@@ -305,7 +317,15 @@ class MPPIMainNode(Node):
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
-        
+
+        # C4: map-anchor interlock inputs. /gps/fix_gated only carries fixes
+        # that passed the sanity gate, so its arrival IS the anchor event.
+        if self.require_map_anchor:
+            self.create_subscription(NavSatFix, '/gps/fix_gated',
+                                     self.anchor_fix_callback, 10)
+            self.create_subscription(Odometry, '/odometry/global',
+                                     self.global_odom_callback, 10)
+
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
             self.goal_sub = self.create_subscription(
@@ -354,6 +374,14 @@ class MPPIMainNode(Node):
     def robot_state_callback(self, msg: MPPIState):
         """Receive robot state from sensor node"""
         self.robot_state = msg
+
+    def anchor_fix_callback(self, msg: NavSatFix):
+        """C4: a fix that passed gps_fix_gate anchors the map frame."""
+        self.anchor_monitor.on_anchor_fix(time.time())
+
+    def global_odom_callback(self, msg: Odometry):
+        """C4: map-frame localization liveness."""
+        self.anchor_monitor.on_global_odom(time.time())
 
     def costmap_callback(self, msg: OccupancyGrid):
         """Receive costmap for grid-based collision detection"""
@@ -578,7 +606,22 @@ class MPPIMainNode(Node):
                 self.get_logger().error(
                     f'ALL trajectories lethal (best cost {best:.2e}) — '
                     f'emergency zero command', throttle_duration_sec=1.0)
-            
+
+            # C4 SAFETY GUARD: the route and the corridor keepout live in the
+            # map frame. Until it is anchored by a gate-passed GNSS fix the
+            # filter still believes it sits at the datum, so both are displaced
+            # by the datum->start offset (chamber-measured: 3.0 m spawn offset
+            # => 3.01 m map error, collapsing to 0.21 m on anchor) and the L2
+            # keepout protects nothing. Hold until anchored; once anchored we
+            # never re-block (GPS outages are FAST-LIO's job, by design).
+            if self.require_map_anchor:
+                allow, reason = self.anchor_monitor.update(time.time())
+                if not allow:
+                    cmd_vel = Twist()
+                    self.get_logger().warn(
+                        f'map frame not anchored — holding: {reason}',
+                        throttle_duration_sec=2.0)
+
             # Publish control command
             self.cmd_pub.publish(cmd_vel)
             
