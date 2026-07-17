@@ -12,29 +12,32 @@
 - 주의: 차량에서 테더링을 켜면 기본 라우트가 usb0으로 넘어가 **교내망 IP(203.250.35.76)
   경로가 끊긴다** (2026-07-16 실측). 테더링 중 원격 접근은 tailscale이 유일 경로.
 
-### 차량(scv) 쪽 — 최초 1회, 차량 앞에서
-tailscaled 는 이미 설치·기동돼 있음 (2026-07-16, apt). 남은 것은 로그인뿐:
+### 구성 완료 상태 (2026-07-16 검증)
+tailnet 계정: junhp12345@ (개인 계정, 기존 macbookpro·iphone 등록돼 있음)
 
-```bash
-sudo tailscale up --hostname scv-vehicle
-# → 출력되는 https://login.tailscale.com/a/... 링크를
-#   아무 브라우저(폰 가능)에서 열고 팀 계정으로 승인
-tailscale ip -4        # 부여된 100.x.x.x 주소 확인 (메모)
-tailscale status
-```
+| 노드 | tailscale 주소 | 상태 |
+|---|---|---|
+| scv-vehicle (차량) | **100.102.222.82** | 등록·온라인 검증 완료 |
+| ppub-lab (연구실 PC) | 100.74.53.67 | 등록·온라인 검증 완료 |
+| macbookpro | 100.94.103.28 | 기등록 — 맥북에서 Tailscale 앱 로그인만 하면 사용 가능 |
 
-### 맥북 쪽 — 최초 1회
-```bash
-brew install --cask tailscale     # 또는 https://tailscale.com/download
-# 메뉴바에서 Tailscale 실행 → 차량과 같은 계정으로 로그인
-tailscale status                  # scv-vehicle 이 보여야 함
-ssh scv@scv-vehicle               # MagicDNS. 안 되면 ssh scv@<100.x 주소>
-```
-계정/비밀번호는 기존 장치 계정 그대로 (scv / 기존 비밀번호).
+접속: `ssh scv@100.102.222.82` (또는 MagicDNS: `ssh scv@scv-vehicle`).
+계정/비밀번호는 기존 장치 계정 그대로. ppub↔차량 tailnet SSH 실측 완료(직결 2 ms).
 
 ### 이후 매번
-차량 전원 → 테더링 켜기 → 맥북에서 `ssh scv@scv-vehicle`. 끝.
-(tailscaled는 systemd enable 되어 있어 자동 기동)
+차량 전원 → 테더링 켜기 → 맥북/ppub에서 `ssh scv@scv-vehicle`. 끝.
+(tailscaled는 systemd enable — 자동 기동)
+
+### 주의: 교내망 유선과 병행할 때 (연구실)
+- 차량에 소스 기반 정책 라우팅 설치됨(`/etc/NetworkManager/dispatcher.d/90-scv-policy-routing`) —
+  테더링과 유선을 동시에 켜도 교내망 IP(203.250.35.76) 인바운드가 유지됨 (2026-07-16 실측).
+- 유선이 default인 상태에서 tailscale을 쓰려면 컨트롤플레인(192.200.0.101~104)만 테더링으로
+  우회하는 host route가 필요함 (Fortinet 차단 회피). **이 우회 라우트는 휘발성** — 재부팅/테더링
+  재연결 시 재추가 필요:
+  `for i in 101 102 103 104; do sudo ip route replace 192.200.0.$i via <테더GW> dev <테더IF>; done`
+- **실외(유선 없음)에서는 우회 불필요** — default가 LTE라서 그냥 동작.
+- ppub은 iPhone 테더링을 컨트롤플레인 통로로만 사용하도록 설정됨
+  (`ipv4/ipv6.never-default`, IPv6 비활성 — API 트래픽이 폰 데이터로 새는 것 차단).
 
 ## 2. 테더링 데이터 절약 수칙
 
