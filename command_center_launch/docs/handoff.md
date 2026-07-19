@@ -149,6 +149,14 @@ BagArchive `http://203.250.35.87:31447` 에 업로드 + 재색인. **LTE에서 �
 | tiny_localization → robot_localization dual-EKF + FAST-LIO | bag 검증 완료, datum = 지도 node[0] (35.91361, 128.80308) |
 | 리포트 | https://claude.ai/code/artifact/edfb1737-efa0-48a3-bcf0-3e6df9cc2d0f |
 
+### 2026-07-18 2차 시도에서 발견된 맵 EKF 발산 — 근본 수정 완료 (2026-07-20)
+정지 차량·정상 GPS·정상 IMU에서 `/odometry/global`이 −542 m 발산(제공된 ekf_diag bag으로
+8,877 m 재현). 원인: navsat 출력 stamp가 100 Hz IMU보다 60~120 ms 늦어 측정 순서 역전 →
+robot_localization 맵 EKF의 비관측 속도·가속도 상태가 여기되어 폭주(파라미터로 수정 불가 확인).
+**수정: 맵 EKF를 `map_anchor_node.py`(무EKF 보완필터)로 교체** — robot_localization `20a87ed`,
+차량 반영·재빌드 완료. 검증: 필드 bag 0.28 m / 주행 bag(260 s) navsat 대비 7 cm 추종.
+운용상 달라지는 것 없음(같은 토픽·TF 발행, C4 인터록 그대로). ekf_odom(/odom)은 원래 건강해 불변.
+
 ### 2026-07-14 1차 실차 시도 — 실패, 원인 2건 모두 수정·실차 검증 완료
 1. **hunter_base SIGABRT** — can0가 DOWN이면 ugv_sdk가 0.2초 만에 abort. 구동·휠속도 전무.
    → launch에 can0 자동 브링업(sudoers.d/scv-can0) + 2 s 지연 + respawn. 실차 검증: can0 down →
