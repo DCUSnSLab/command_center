@@ -18,7 +18,7 @@
     costmap_resolution: 0.1      # Cell size in meters (0.1m = 10cm)
 
     # === Obstacle Detection ===
-    min_obstacle_height: 0.5     # Minimum height for obstacle detection (meters)
+    min_obstacle_height: 0.15     # Minimum height for obstacle detection (meters)
     max_obstacle_height: 2.0     # Maximum height for obstacle detection (meters)
 
     # === Update Frequency ===
