@@ -5,24 +5,15 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <sensor_msgs/msg/imu.hpp>
-#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <tf2_ros/transform_broadcaster.h>
-#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/LinearMath/Quaternion.h>
-#include <gmserver/srv/load_map.hpp>
-#include <gmserver/msg/graph_map.hpp>
-#include <gmserver/msg/map_data.hpp>
-#include <gmserver/msg/map_node.hpp>
-#include <gmserver/msg/map_link.hpp>
-#include <gmserver/msg/gps_info.hpp>
-#include <gmserver/msg/utm_info.hpp>
+#include <map_interfaces/msg/graph_layer.hpp>
+#include <map_interfaces/msg/map_node.hpp>
+#include <map_interfaces/msg/map_link.hpp>
+#include <map_interfaces/msg/utm_layer.hpp>
 #include <command_center_interfaces/msg/planned_path.hpp>
 #include <command_center_interfaces/msg/request_replan.hpp>
 #include <vector>
@@ -73,35 +64,26 @@ class PathPlannerNode : public rclcpp::Node
 public:
     PathPlannerNode() : Node("global_path_planner_node")
     {
-        // Declare parameters
-        this->declare_parameter<std::string>("map_file_path", 
-            "/home/ros2/ros2_ws/src/gmserver/maps/3x3_map.json");
-        
         // Initialize state variables
-        current_gps_received_ = false;
-        current_imu_received_ = false;
         goal_received_ = false;
         path_planned_for_current_goal_ = false;
         has_temp_goal_node_ = false;
         has_temp_start_node_ = false;
         temp_goal_node_id_ = -2;
         temp_start_node_id_ = -3;
-        gps_ref_initialized_ = false;
-        map_tf_initialized_ = false;
-        first_node_initialized_ = false;
-        
-        // Create service client for map loading
-        map_client_ = this->create_client<gmserver::srv::LoadMap>("load_map");
-        
-        // Create subscribers
-        gps_subscriber_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
-            "/ublox_gps_node/fix", 10,
-            std::bind(&PathPlannerNode::gpsCallback, this, std::placeholders::_1));
-            
-        imu_subscriber_ = this->create_subscription<sensor_msgs::msg::Imu>(
-            "/zed/zed_node/imu/data", 10,
-            std::bind(&PathPlannerNode::imuCallback, this, std::placeholders::_1));
-            
+        datum_initialized_ = false;
+        graph_received_ = false;
+
+        // Subscribe to map_provider graph layer (latched, received once / on change)
+        graph_sub_ = this->create_subscription<map_interfaces::msg::GraphLayer>(
+            "/map_provider_node/graph", rclcpp::QoS(1).transient_local().reliable(),
+            std::bind(&PathPlannerNode::graphCallback, this, std::placeholders::_1));
+
+        // Subscribe to map_provider datum (UtmLayer, latched)
+        utm_layer_sub_ = this->create_subscription<map_interfaces::msg::UtmLayer>(
+            "/map_provider_node/utm", rclcpp::QoS(1).transient_local().reliable(),
+            std::bind(&PathPlannerNode::utmLayerCallback, this, std::placeholders::_1));
+
         goal_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "goal_pose", 10,
             std::bind(&PathPlannerNode::goalCallback, this, std::placeholders::_1));
@@ -109,112 +91,69 @@ public:
         branch_subscriber_ = this->create_subscription<command_center_interfaces::msg::RequestReplan>( // 전역 경로 계획 중 분기점 Node에서 향후 경로 선택을 위한 Subscriber
             "/request_replan", 10,
             std::bind(&PathPlannerNode::branchCallback, this, std::placeholders::_1));
-        
+
         // Create publishers
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", 10);
         planned_path_publisher_ = this->create_publisher<command_center_interfaces::msg::PlannedPath>("planned_path_detailed", 10);
         nodes_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_nodes_viz", 10);
         links_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_links_viz", 10);
         map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
-        odom_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("odometry/gps", 10);
-        
-        // Create TF broadcaster for map->odom transform
-        tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
-        
-        // Create TF listener for coordinate transformations
+
+        // Create TF listener for vehicle pose (map->base_link) lookup
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-        
+
         // Create timer for checking path planning conditions
         timer_ = this->create_wall_timer(
             std::chrono::seconds(2),
             std::bind(&PathPlannerNode::checkAndPlanPath, this));
-        
+
         RCLCPP_INFO(this->get_logger(), "Global path planner node initialized with A* algorithm");
-        
-        // Load map initially
-        loadMapData();
     }
 
 private:
-    void loadMapData()
+    // map_provider graph layer 수신 -> 그래프 구성. latched 이므로 1회 수신(변경 시 갱신).
+    void graphCallback(const map_interfaces::msg::GraphLayer::SharedPtr msg)
     {
-        RCLCPP_INFO(this->get_logger(), "Starting map data loading...");
-        
-        // Wait for service to be available
-        if (!map_client_->wait_for_service(std::chrono::seconds(10))) {
-            RCLCPP_ERROR(this->get_logger(), "Map service not available after 10 seconds");
-            return;
-        }
-        
-        RCLCPP_INFO(this->get_logger(), "Map service is available");
-        
-        // Get map file path parameter
-        std::string map_file_path;
-        this->get_parameter("map_file_path", map_file_path);
-        
-        // Create service request
-        auto request = std::make_shared<gmserver::srv::LoadMap::Request>();
-        request->map_file_path = map_file_path;
-        
-        RCLCPP_INFO(this->get_logger(), "Requesting map data from: %s", map_file_path.c_str());
-        
-        // Call service asynchronously
-        auto future = map_client_->async_send_request(request);
-        
-        RCLCPP_INFO(this->get_logger(), "Map service request sent, waiting for response...");
-        
-        // Wait for response
-        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), future) ==
-            rclcpp::FutureReturnCode::SUCCESS)
-        {
-            auto response = future.get();
-            RCLCPP_INFO(this->get_logger(), "Map service response received: success=%s", 
-                       response->success ? "true" : "false");
-            
-            if (response->success) {
-                // Store GraphMap data
-                graph_map_ = response->graph_map;
+        graph_map_ = *msg;
+        graph_received_ = true;
 
-                // Node 데이터 기반 아래 변수 초기화 진행
-                map_utm_easting_ = graph_map_.map_data.nodes[0].utm_info.easting;
-                map_utm_northing_ = graph_map_.map_data.nodes[0].utm_info.northing;
-                map_gps_lat_ = graph_map_.map_data.nodes[0].gps_info.lat;
-                map_gps_long_ = graph_map_.map_data.nodes[0].gps_info.longitude;
-                RCLCPP_INFO(this->get_logger(), "east %f", map_utm_easting_);
-                RCLCPP_INFO(this->get_logger(), "north %f", map_utm_northing_);
-                RCLCPP_INFO(this->get_logger(), "lat %f", map_gps_lat_);
-                RCLCPP_INFO(this->get_logger(), "long %f", map_gps_long_);
+        RCLCPP_INFO(this->get_logger(),
+                   "Graph received: %zu nodes, %zu links",
+                   graph_map_.nodes.size(), graph_map_.links.size());
 
-                first_node_initialized_ = true;
-                
-                // Convert GraphMap to PoseArray for compatibility with existing visualization
-                convertGraphMapToPoseArrays();
-                
-                RCLCPP_INFO(this->get_logger(), 
-                           "Map data stored: %zu nodes, %zu links", 
-                           graph_map_.map_data.nodes.size(), graph_map_.map_data.links.size());
-                
-                // Build graph from map data using actual connectivity
-                buildGraph();
-                
-                RCLCPP_INFO(this->get_logger(), 
-                           "Map loaded successfully: %zu nodes, %zu links", 
-                           graph_map_.map_data.nodes.size(), graph_map_.map_data.links.size());
-                
-                // Publish visualization data only after GPS reference is initialized
-                if (gps_ref_initialized_) {
-                    publishVisualizationData();
-                }
-            } else {
-                RCLCPP_ERROR(this->get_logger(), "Failed to load map: %s", 
-                            response->message.c_str());
-            }
-        } else {
-            RCLCPP_ERROR(this->get_logger(), "Failed to call map service - timeout or error");
+        // Convert GraphLayer to PoseArray for compatibility with existing visualization
+        convertGraphMapToPoseArrays();
+
+        // Build graph from map data using actual connectivity
+        buildGraph();
+
+        // Publish visualization data only after datum is initialized
+        if (datum_initialized_) {
+            publishVisualizationData();
         }
     }
-    
+
+    // map_provider datum(UtmLayer) 수신 -> map frame 원점 UTM 갱신. latched.
+    void utmLayerCallback(const map_interfaces::msg::UtmLayer::SharedPtr msg)
+    {
+        datum_easting_ = msg->origin_easting;
+        datum_northing_ = msg->origin_northing;
+        utm_zone_ = msg->utm_zone;
+        northern_ = msg->northern;
+        datum_initialized_ = true;
+
+        RCLCPP_INFO(this->get_logger(),
+                   "datum received: UTM zone=%d %s e=%.3f n=%.3f",
+                   static_cast<int>(utm_zone_), northern_ ? "north" : "south",
+                   datum_easting_, datum_northing_);
+
+        // Publish visualization data now that datum is initialized
+        if (graph_received_) {
+            publishVisualizationData();
+        }
+    }
+
     void convertGraphMapToPoseArrays()
     {
         // Convert nodes to PoseArray
@@ -222,31 +161,24 @@ private:
         node_ids_.clear();
         node_types_.clear();
         
-        for (const auto& node : graph_map_.map_data.nodes) {
+        for (const auto& node : graph_map_.nodes) {
             geometry_msgs::msg::Pose pose;
-            
-            // Use UTM coordinates if available, otherwise use GPS
-            if (!node.utm_info.zone.empty()) {
-                pose.position.x = node.utm_info.easting;
-                pose.position.y = node.utm_info.northing;
-                pose.position.z = node.gps_info.alt;
-            } else {
-                // Simple GPS to local coordinate conversion as fallback
-                pose.position.x = node.gps_info.longitude * 111320.0;
-                pose.position.y = node.gps_info.lat * 110540.0;
-                pose.position.z = node.gps_info.alt;
-            }
-            
+
+            // Always use absolute UTM coordinates
+            pose.position.x = node.easting;
+            pose.position.y = node.northing;
+            pose.position.z = 0.0;
+
             // Convert heading from degrees to quaternion
-            double heading_rad = node.heading * M_PI / 180.0;
+            double heading_rad = node.heading_deg * M_PI / 180.0;
             pose.orientation.x = 0.0;
             pose.orientation.y = 0.0;
             pose.orientation.z = sin(heading_rad / 2.0);
             pose.orientation.w = cos(heading_rad / 2.0);
-            
+
             map_nodes_.poses.push_back(pose);
             node_ids_.push_back(node.id);
-            node_types_.push_back(node.node_type);
+            node_types_.push_back(static_cast<short>(node.node_type));
         }
         
         map_nodes_.header.frame_id = "map";
@@ -264,14 +196,14 @@ private:
         node_id_to_index_.clear();
         
         // Build node map and ID mapping
-        for (size_t i = 0; i < graph_map_.map_data.nodes.size(); ++i) {
-            const auto& map_node = graph_map_.map_data.nodes[i];
+        for (size_t i = 0; i < graph_map_.nodes.size(); ++i) {
+            const auto& map_node = graph_map_.nodes[i];
             node_map_[static_cast<int>(i)] = std::make_shared<AStarNode>(static_cast<int>(i), map_nodes_.poses[i]);
             node_id_to_index_[map_node.id] = static_cast<int>(i);
         }
         
         // Build adjacency list using GraphMap links
-        for (const auto& link : graph_map_.map_data.links) {
+        for (const auto& link : graph_map_.links) {
             // Find node indices from string IDs
             auto from_it = node_id_to_index_.find(link.from_node_id);
             auto to_it = node_id_to_index_.find(link.to_node_id);
@@ -280,8 +212,8 @@ private:
                 int from_node_idx = from_it->second;
                 int to_node_idx = to_it->second;
                 
-                // Use link length from GraphMap, or calculate if not available
-                double distance = (link.length > 0.0) ? link.length * 1000.0 : // Convert km to m
+                // map_interfaces/MapLink.length 는 미터 단위(map_provider). 없으면 유클리드 거리(m).
+                double distance = (link.length > 0.0) ? link.length :
                                  calculateDistance(map_nodes_.poses[from_node_idx], map_nodes_.poses[to_node_idx]);
                 
                 // Add bidirectional links (roads can be traversed in both directions)
@@ -310,10 +242,10 @@ private:
         }
         
         // Check for isolated nodes
-        for (size_t i = 0; i < graph_map_.map_data.nodes.size(); ++i) {
+        for (size_t i = 0; i < graph_map_.nodes.size(); ++i) {
             if (adjacency_list_.find(static_cast<int>(i)) == adjacency_list_.end()) {
                 RCLCPP_WARN(this->get_logger(), "Node %zu (%s) is isolated (no connections)", 
-                           i, graph_map_.map_data.nodes[i].id.c_str());
+                           i, graph_map_.nodes[i].id.c_str());
             }
         }
     }
@@ -331,20 +263,16 @@ private:
 
         int i = 0;
 
-        RCLCPP_INFO(this->get_logger(), "gps east %f", gps_ref_utm_easting_);
-        RCLCPP_INFO(this->get_logger(), "gps north %f", gps_ref_utm_northing_);
-        RCLCPP_INFO(this->get_logger(), "map east\t%f", map_utm_easting_);
-        RCLCPP_INFO(this->get_logger(), "map north\t%f", map_utm_northing_);
+        RCLCPP_INFO(this->get_logger(), "datum east\t%f", datum_easting_);
+        RCLCPP_INFO(this->get_logger(), "datum north\t%f", datum_northing_);
 
         // Adjust map nodes for RViz visualization
         if (!map_nodes_.poses.empty()) {
             RCLCPP_INFO(this->get_logger(), "nodes viz init");
             geometry_msgs::msg::PoseArray viz_nodes = map_nodes_;
             for (auto& pose : viz_nodes.poses) {
-                //pose.position.x -= gps_ref_utm_easting_;
-                //pose.position.y -= gps_ref_utm_northing_;
-                pose.position.x -= map_utm_easting_;
-                pose.position.y -= map_utm_northing_;
+                pose.position.x -= datum_easting_;
+                pose.position.y -= datum_northing_;
 
                 viz_marker.header.frame_id = "map";
                 viz_marker.header.stamp = this->get_clock()->now();
@@ -389,8 +317,8 @@ private:
         //     RCLCPP_INFO(this->get_logger(), "links viz init");
         //     geometry_msgs::msg::PoseArray viz_links = map_links_;
         //     for (auto& pose : viz_links.poses) {
-        //         //pose.position.x -= gps_ref_utm_easting_;
-        //         //pose.position.y -= gps_ref_utm_northing_;
+        //         //pose.position.x -= datum_easting_;
+        //         //pose.position.y -= datum_northing_;
         //         pose.position.x -= map_utm_easting_;
         //         pose.position.y -= map_utm_northing_;
 
@@ -477,80 +405,25 @@ private:
         graph.markers.push_back(text_marker);
     }
 
-    void gpsCallback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
-    {
-        if (msg->status.status < 0) {
-            return; // Invalid GPS fix
-        }
-        
-        // Initialize GPS reference coordinates from first valid GPS reading
-        if (!gps_ref_initialized_) {
-            gps_ref_lat_ = msg->latitude;
-            gps_ref_lon_ = msg->longitude;
-            gps_ref_alt_ = msg->altitude;
-            
-            // Calculate GPS reference UTM coordinates for goal transformation
-            gpsToUTM(gps_ref_lat_, gps_ref_lon_, gps_ref_utm_easting_, gps_ref_utm_northing_);
-            
-            gps_ref_initialized_ = true;
-            
-            RCLCPP_INFO(this->get_logger(), 
-                       "GPS reference initialized from first GPS reading: lat=%.6f, lon=%.6f, alt=%.2f -> UTM(%.2f, %.2f)", 
-                       gps_ref_lat_, gps_ref_lon_, gps_ref_alt_,
-                       gps_ref_utm_easting_, gps_ref_utm_northing_);
-            
-            // Publish visualization data now that GPS reference is initialized
-            if (first_node_initialized_) {
-                publishVisualizationData();
-            }
-        }
-        
-        current_gps_ = *msg;
-        current_gps_received_ = true;
-        
-        // Publish GPS-based map->odom transform
-        if (!map_tf_initialized_ && first_node_initialized_) {
-            publishMapToOdomTransform(*msg);
-            map_tf_initialized_ = true;
-        }
-        
-        // Publish GPS-based odometry
-        publishGpsOdometry(*msg);
-        
-        RCLCPP_DEBUG(this->get_logger(), "GPS received: lat=%.6f, lon=%.6f", 
-                    msg->latitude, msg->longitude);
-    }
-    
-    void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
-    {
-        current_imu_ = *msg;
-        current_imu_received_ = true;
-        
-        RCLCPP_DEBUG(this->get_logger(), "IMU received: orientation(%.3f, %.3f, %.3f, %.3f)", 
-                    msg->orientation.x, msg->orientation.y, msg->orientation.z, msg->orientation.w);
-    }
-    
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
-        if (!gps_ref_initialized_) {
-            RCLCPP_WARN(this->get_logger(), "Goal received, but GPS reference not initialized yet. Waiting for first GPS reading.");
+        if (!datum_initialized_ || !graph_received_) {
+            RCLCPP_WARN(this->get_logger(), "Goal received, but datum/graph not initialized yet. Waiting for map_provider.");
             return;
         }
 
         // Transform goal to map frame based on frame_id
         geometry_msgs::msg::PoseStamped goal_in_map_frame = *msg;
 
-        RCLCPP_INFO(this->get_logger(), "gps_ref_utm east %f", gps_ref_utm_easting_);
-        RCLCPP_INFO(this->get_logger(), "gps_ref_utm north %f", gps_ref_utm_northing_);
-        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lat %f", current_gps_.latitude);
-        RCLCPP_INFO(this->get_logger(), "goalcallback current gps lon %f", current_gps_.longitude);
-        
+        RCLCPP_INFO(this->get_logger(), "datum east %f", datum_easting_);
+        RCLCPP_INFO(this->get_logger(), "datum north %f", datum_northing_);
+
         if (msg->header.frame_id == "map") {
             RCLCPP_INFO(this->get_logger(), "frame_id : map");
             // Goal is already in map frame, convert to absolute UTM coordinates
             goal_pose_ = *msg;
-            goal_pose_.pose.position.x += gps_ref_utm_easting_;
-            goal_pose_.pose.position.y += gps_ref_utm_northing_;
+            goal_pose_.pose.position.x += datum_easting_;
+            goal_pose_.pose.position.y += datum_northing_;
             
             RCLCPP_INFO(this->get_logger(), 
                        "Goal received in map frame - Relative: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
@@ -571,8 +444,8 @@ private:
                 // Convert to absolute UTM coordinates
                 // goal_pose_ = goal_in_map;
                 goal_pose_ = *msg;
-                goal_pose_.pose.position.x += gps_ref_utm_easting_;
-                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+                goal_pose_.pose.position.x += datum_easting_;
+                goal_pose_.pose.position.y += datum_northing_;
                 
                 RCLCPP_INFO(this->get_logger(), 
                            "Goal received in odom frame - Odom: (%.2f, %.2f) -> Map: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
@@ -595,8 +468,8 @@ private:
                 
                 // Convert to absolute UTM coordinates
                 goal_pose_ = goal_in_map;
-                goal_pose_.pose.position.x += gps_ref_utm_easting_;
-                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+                goal_pose_.pose.position.x += datum_easting_;
+                goal_pose_.pose.position.y += datum_northing_;
                 
                 RCLCPP_INFO(this->get_logger(), 
                            "Goal received in %s frame - Transformed to Map: (%.2f, %.2f) -> Absolute UTM: (%.2f, %.2f)", 
@@ -611,8 +484,8 @@ private:
                 
                 // Fallback: treat as map frame
                 goal_pose_ = *msg;
-                goal_pose_.pose.position.x += gps_ref_utm_easting_;
-                goal_pose_.pose.position.y += gps_ref_utm_northing_;
+                goal_pose_.pose.position.x += datum_easting_;
+                goal_pose_.pose.position.y += datum_northing_;
             }
         }
         RCLCPP_INFO(this->get_logger(), "goalCallback goal pose x %f", goal_pose_.pose.position.x);
@@ -721,36 +594,53 @@ private:
     
     void checkAndPlanPath()
     {
-        // Only plan path when we have GPS reference initialized, current GPS and goal, and haven't planned for current goal yet
-        if (gps_ref_initialized_ && current_gps_received_ && goal_received_ && !path_planned_for_current_goal_) {
+        // Only plan when datum + graph ready, goal set, and not yet planned for current goal
+        if (datum_initialized_ && graph_received_ && goal_received_ && !path_planned_for_current_goal_) {
             planPathFromGpsToGoal();
         }
     }
-    
+
+    // TF map->base_link 조회로 현재 차량의 절대 UTM 위치를 계산
+    bool getCurrentUtm(double& e, double& n)
+    {
+        try {
+            geometry_msgs::msg::TransformStamped tf =
+                tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+            e = tf.transform.translation.x + datum_easting_;
+            n = tf.transform.translation.y + datum_northing_;
+            return true;
+        } catch (const tf2::TransformException& ex) {
+            RCLCPP_WARN(this->get_logger(),
+                       "Could not lookup map->base_link transform: %s", ex.what());
+            return false;
+        }
+    }
+
     void planPathFromGpsToGoal()
     {
         if (node_map_.empty()) {
             RCLCPP_WARN(this->get_logger(), "No map data available for path planning");
             return;
         }
-        
-        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
-            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
+
+        if (!datum_initialized_ || !graph_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "Datum, graph or Goal not available for path planning");
             return;
         }
-        
+
         // Clean up any existing temporary nodes first
         removeTemporaryNodes();
-        
-        // Convert GPS to UTM coordinates
-        double start_utm_easting, start_utm_northing;
-        gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
 
-        RCLCPP_INFO(this->get_logger(), "current gps lat %f", current_gps_.latitude);
-        RCLCPP_INFO(this->get_logger(), "current gps lon %f", current_gps_.longitude);
+        // Current vehicle absolute UTM from TF map->base_link
+        double start_utm_easting, start_utm_northing;
+        if (!getCurrentUtm(start_utm_easting, start_utm_northing)) {
+            RCLCPP_WARN(this->get_logger(), "Current vehicle pose unavailable (TF); aborting planning");
+            return;
+        }
+
         RCLCPP_INFO(this->get_logger(), "start utm east %f", start_utm_easting);
         RCLCPP_INFO(this->get_logger(), "start utm north %f", start_utm_northing);
-        
+
         // Goal has been converted to UTM coordinates in goalCallback
         double goal_x = goal_pose_.pose.position.x;
         double goal_y = goal_pose_.pose.position.y;
@@ -789,10 +679,8 @@ private:
                 pose_stamped.header.frame_id = "map";
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
-                //pose_stamped.pose.position.x -= gps_ref_utm_easting_;
-                //pose_stamped.pose.position.y -= gps_ref_utm_northing_;
-                pose_stamped.pose.position.x -= map_utm_easting_;
-                pose_stamped.pose.position.y -= map_utm_northing_;
+                pose_stamped.pose.position.x -= datum_easting_;
+                pose_stamped.pose.position.y -= datum_northing_;
                 pose_stamped.pose.position.z = 0;
                 
                 planned_path.poses.push_back(pose_stamped);
@@ -824,17 +712,20 @@ private:
             return;
         }
 
-        if (!gps_ref_initialized_ || !current_gps_received_ || !goal_received_) {
-            RCLCPP_WARN(this->get_logger(), "GPS reference, current GPS or Goal not available for path planning");
+        if (!datum_initialized_ || !graph_received_ || !goal_received_) {
+            RCLCPP_WARN(this->get_logger(), "Datum, graph or Goal not available for path planning");
             return;
         }
 
         // Clean up any existing temporary nodes first
         removeTemporaryNodes();
 
-        // Convert GPS to UTM coordinates
+        // Current vehicle absolute UTM from TF map->base_link
         double start_utm_easting, start_utm_northing;
-        gpsToUTM(current_gps_.latitude, current_gps_.longitude, start_utm_easting, start_utm_northing);
+        if (!getCurrentUtm(start_utm_easting, start_utm_northing)) {
+            RCLCPP_WARN(this->get_logger(), "Current vehicle pose unavailable (TF); aborting planning");
+            return;
+        }
 
         // Goal has been converted to UTM coordinates in goalCallback
         double goal_x = goal_pose_.pose.position.x;
@@ -892,9 +783,9 @@ private:
                 pose_stamped.header.stamp = this->get_clock()->now();
                 pose_stamped.pose = node->pose;
 
-                // Adjust position for map origin offset (for RViz visualization)
-                pose_stamped.pose.position.x -= map_utm_easting_;
-                pose_stamped.pose.position.y -= map_utm_northing_;
+                // Adjust position for datum offset (map frame metric = absolute UTM - datum)
+                pose_stamped.pose.position.x -= datum_easting_;
+                pose_stamped.pose.position.y -= datum_northing_;
 
                 planned_path.poses.push_back(pose_stamped);
             }
@@ -1049,50 +940,6 @@ private:
         return std::sqrt(dx*dx + dy*dy + dz*dz);
     }
     
-    // Universal GPS to UTM conversion
-    void gpsToUTM(double lat, double lon, double& easting, double& northing)
-    {
-        // WGS84 ellipsoid parameters
-        const double a = 6378137.0;           // Semi-major axis
-        const double f = 1.0 / 298.257223563; // Flattening
-        const double k0 = 0.9996;            // UTM scale factor
-
-        // Determine the UTM zone
-        int zone = static_cast<int>((lon + 180.0) / 6.0) + 1;
-
-        // Calculate the central meridian for the zone
-        double lon0_deg = (zone - 1) * 6 - 180 + 3;
-        double lon0_rad = lon0_deg * M_PI / 180.0;
-
-        // False easting and northing
-        double false_easting = 500000.0;
-        double false_northing = (lat < 0) ? 10000000.0 : 0.0; // Southern hemisphere
-
-        // Convert lat/lon to radians
-        double lat_rad = lat * M_PI / 180.0;
-        double lon_rad = lon * M_PI / 180.0;
-
-        // Equations for conversion
-        double e2 = 2 * f - f * f;
-        double e_prime_sq = e2 / (1.0 - e2);
-
-        double N = a / std::sqrt(1.0 - e2 * std::sin(lat_rad) * std::sin(lat_rad));
-        double T = std::tan(lat_rad) * std::tan(lat_rad);
-        double C = e_prime_sq * std::cos(lat_rad) * std::cos(lat_rad);
-        double A = std::cos(lat_rad) * (lon_rad - lon0_rad);
-
-        double M = a * ((1.0 - e2/4.0 - 3.0*e2*e2/64.0 - 5.0*e2*e2*e2/256.0) * lat_rad
-                       - (3.0*e2/8.0 + 3.0*e2*e2/32.0 + 45.0*e2*e2*e2/1024.0) * std::sin(2.0*lat_rad)
-                       + (15.0*e2*e2/256.0 + 45.0*e2*e2*e2/1024.0) * std::sin(4.0*lat_rad)
-                       - (35.0*e2*e2*e2/3072.0) * std::sin(6.0*lat_rad));
-
-        easting = false_easting + k0 * N * (A + (1.0 - T + C) * std::pow(A, 3) / 6.0
-                                           + (5.0 - 18.0*T + T*T + 72.0*C - 58.0*e_prime_sq) * std::pow(A, 5) / 120.0);
-
-        northing = false_northing + k0 * (M + N * std::tan(lat_rad) * (std::pow(A, 2) / 2.0
-                                                                      + (5.0 - T + 9.0*C + 4.0*C*C) * std::pow(A, 4) / 24.0
-                                                                      + (61.0 - 58.0*T + T*T + 600.0*C - 330.0*e_prime_sq) * std::pow(A, 6) / 720.0));
-    }
     
     // Find closest node to given UTM coordinates
     int findClosestNode(double utm_x, double utm_y)
@@ -1285,9 +1132,9 @@ private:
         int start_node_id, int goal_node_id)
     {
         command_center_interfaces::msg::PlannedPath detailed_path;
-        
+
         // Set header
-        detailed_path.header.frame_id = "odom";
+        detailed_path.header.frame_id = "map";
         detailed_path.header.stamp = this->get_clock()->now();
         
         // Set path metadata
@@ -1305,38 +1152,38 @@ private:
         detailed_path.total_distance = total_distance;
         detailed_path.total_time = total_distance / 10.0; // 평균 속도 10m/s 가정
         
-        // Convert path nodes to MapNode messages
+        // Convert path nodes to MapNode messages (map_interfaces, 절대 UTM 유지)
         detailed_path.path_data.nodes.clear();
         for (size_t i = 0; i < path_nodes.size(); ++i) {
-            gmserver::msg::MapNode map_node;
-            
+            map_interfaces::msg::MapNode map_node;
+
             int node_idx = path_nodes[i]->id;
-            
+
             // Temporary nodes에 대한 처리
             if (node_idx == temp_start_node_id_) {
                 map_node.id = "GPS_START";
-                map_node.remark = "Temporary start node from GPS position";
+                map_node.source = "gps";
             } else if (node_idx == temp_goal_node_id_) {
                 map_node.id = "GPS_GOAL";
-                map_node.remark = "Temporary goal node from RViz goal";
-            } else if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.map_data.nodes.size())) {
-                // 실제 맵 노드에서 정보 복사
-                map_node = graph_map_.map_data.nodes[node_idx];
+                map_node.source = "gps";
+            } else if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.nodes.size())) {
+                // 실제 맵 노드에서 정보 복사 (id/node_type/easting/northing/lat/lon/heading_deg/source)
+                map_node = graph_map_.nodes[node_idx];
             } else {
                 // Fallback for unknown nodes
                 map_node.id = "NODE_" + std::to_string(node_idx);
-                map_node.remark = "Unknown node";
             }
-            
-            // UTM 좌표는 그대로 유지 (visualization용은 따로 조정됨)
-            if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
+
+            if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.nodes.size()) &&
                 node_idx != temp_start_node_id_ && node_idx != temp_goal_node_id_) {
-                // 실제 맵 노드의 경우 GPS 정보는 원본 유지, UTM은 odom frame으로 변환
-                map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
-                map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
-                map_node.heading = graph_map_.map_data.nodes[node_idx].heading;
+                // 실제 맵 노드: 원본 절대 UTM/GPS/heading 유지 (datum 빼지 않음)
+                map_node.easting = graph_map_.nodes[node_idx].easting;
+                map_node.northing = graph_map_.nodes[node_idx].northing;
+                map_node.latitude = graph_map_.nodes[node_idx].latitude;
+                map_node.longitude = graph_map_.nodes[node_idx].longitude;
+                map_node.heading_deg = graph_map_.nodes[node_idx].heading_deg;
                 // If heading is -1.0, calculate from previous node in path
-                if (std::abs(map_node.heading + 1.0) < 1e-6 && i > 0) {
+                if (std::abs(map_node.heading_deg + 1.0) < 1e-6 && i > 0) {
                     double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
                     double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
                     double heading_rad = std::atan2(dy, dx);
@@ -1344,20 +1191,15 @@ private:
                     if (heading_deg < 0) {
                         heading_deg += 360.0;
                     }
-                    map_node.heading = heading_deg;
+                    map_node.heading_deg = heading_deg;
                 }
-                // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
-                //map_node.utm_info.easting -= gps_ref_utm_easting_;
-                //map_node.utm_info.northing -= gps_ref_utm_northing_;
-                map_node.utm_info.easting -= map_utm_easting_;
-                map_node.utm_info.northing -= map_utm_northing_;
-                
             } else {
-                // Temporary 노드의 경우 pose에서 역산
-                map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
-                map_node.gps_info.longitude = 0.0;
-                map_node.gps_info.alt = path_nodes[i]->pose.position.z;
-                
+                // Temporary 노드: pose(절대 UTM)에서 값 채움
+                map_node.easting = path_nodes[i]->pose.position.x;
+                map_node.northing = path_nodes[i]->pose.position.y;
+                map_node.latitude = 0.0; // GPS 역변환은 생략
+                map_node.longitude = 0.0;
+
                 // Calculate heading from previous node if available
                 if (i > 0) {
                     double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
@@ -1367,74 +1209,54 @@ private:
                     if (heading_deg < 0) {
                         heading_deg += 360.0;
                     }
-                    map_node.heading = heading_deg;
+                    map_node.heading_deg = heading_deg;
                 } else {
-                    map_node.heading = 0.0;
+                    map_node.heading_deg = 0.0;
                 }
-                // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
-                //map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
-                //map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
-                map_node.utm_info.easting = path_nodes[i]->pose.position.x - map_utm_easting_;
-                map_node.utm_info.northing = path_nodes[i]->pose.position.y - map_utm_northing_;
-                map_node.utm_info.zone = "52N"; // K-City 기본 zone
             }
-            
+
             detailed_path.path_data.nodes.push_back(map_node);
         }
-        
+
         // Create links between consecutive path nodes
         detailed_path.path_data.links.clear();
         for (size_t i = 1; i < path_nodes.size(); ++i) {
-            gmserver::msg::MapLink map_link;
-            
+            map_interfaces::msg::MapLink map_link;
+
             int from_node_idx = path_nodes[i-1]->id;
             int to_node_idx = path_nodes[i]->id;
-            
+
             // Set link metadata
             map_link.id = "PATH_LINK_" + std::to_string(i-1) + "_" + std::to_string(i);
             map_link.from_node_id = detailed_path.path_data.nodes[i-1].id;
             map_link.to_node_id = detailed_path.path_data.nodes[i].id;
-            
-            // Calculate link length
+
+            // Calculate link length (meters)
             double distance = calculateDistance(path_nodes[i-1]->pose, path_nodes[i]->pose);
-            map_link.length = distance / 1000.0; // Convert to km
-            
-            // Try to find existing link in graph for more details
-            bool found_existing_link = false;
-            if (from_node_idx >= 0 && from_node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
-                to_node_idx >= 0 && to_node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
+            map_link.length = distance;
+
+            // Try to find existing link in graph to reuse its length
+            if (from_node_idx >= 0 && from_node_idx < static_cast<int>(graph_map_.nodes.size()) &&
+                to_node_idx >= 0 && to_node_idx < static_cast<int>(graph_map_.nodes.size()) &&
                 from_node_idx != temp_start_node_id_ && from_node_idx != temp_goal_node_id_ &&
                 to_node_idx != temp_start_node_id_ && to_node_idx != temp_goal_node_id_) {
-                
-                std::string from_id = graph_map_.map_data.nodes[from_node_idx].id;
-                std::string to_id = graph_map_.map_data.nodes[to_node_idx].id;
-                
-                // Find existing link in GraphMap
-                for (const auto& original_link : graph_map_.map_data.links) {
+
+                std::string from_id = graph_map_.nodes[from_node_idx].id;
+                std::string to_id = graph_map_.nodes[to_node_idx].id;
+
+                // Find existing link in GraphLayer
+                for (const auto& original_link : graph_map_.links) {
                     if ((original_link.from_node_id == from_id && original_link.to_node_id == to_id) ||
                         (original_link.from_node_id == to_id && original_link.to_node_id == from_id)) {
-                        // Copy original link information
-                        map_link = original_link;
-                        // Ensure correct direction
+                        map_link.id = original_link.id;
+                        map_link.length = original_link.length;
                         map_link.from_node_id = from_id;
                         map_link.to_node_id = to_id;
-                        found_existing_link = true;
                         break;
                     }
                 }
             }
-            
-            // If no existing link found, use calculated data
-            if (!found_existing_link) {
-                map_link.admin_code = "PATH";
-                map_link.road_rank = 1;
-                map_link.road_type = 1;
-                map_link.link_type = 3;
-                map_link.lane_no = 2;
-                map_link.maker = "Path Planner";
-                map_link.remark = "Generated path link";
-            }
-            
+
             detailed_path.path_data.links.push_back(map_link);
         }
         
@@ -1445,130 +1267,6 @@ private:
         return detailed_path;
     }
     
-    void publishMapToOdomTransform(const sensor_msgs::msg::NavSatFix& gps)
-    {
-        // Convert GPS to UTM coordinates
-        double utm_easting, utm_northing;
-        gpsToUTM(gps.latitude, gps.longitude, utm_easting, utm_northing);
-        
-        // Create transform from map to odom based on GPS position
-        geometry_msgs::msg::TransformStamped transform_stamped;
-        
-        transform_stamped.header.stamp = this->get_clock()->now();
-        transform_stamped.header.frame_id = "map";
-        transform_stamped.child_frame_id = "odom";
-        
-        // Set translation to GPS UTM position relative to reference point
-        // transform_stamped.transform.translation.x = utm_easting - gps_ref_utm_easting_;
-        // transform_stamped.transform.translation.y = utm_northing - gps_ref_utm_northing_;
-        transform_stamped.transform.translation.x = utm_easting - map_utm_easting_;
-        transform_stamped.transform.translation.y = utm_northing - map_utm_northing_;
-        transform_stamped.transform.translation.z = gps.altitude - gps_ref_alt_;
-
-        RCLCPP_INFO(this->get_logger(), "TF utm east\t%f", utm_easting);
-        RCLCPP_INFO(this->get_logger(), "TF map utm east\t%f", map_utm_easting_);
-        RCLCPP_INFO(this->get_logger(), "TF utm north\t%f", utm_northing);
-        RCLCPP_INFO(this->get_logger(), "TF map utm north\t%f", map_utm_northing_);
-        
-        tf2::Quaternion q;
-        q.setRPY(0, 0, 0);
-        transform_stamped.transform.rotation.x = q.x();
-        transform_stamped.transform.rotation.y = q.y();
-        transform_stamped.transform.rotation.z = q.z();
-        transform_stamped.transform.rotation.w = q.w();
-        
-        // Broadcast the transform
-        tf_broadcaster_->sendTransform(transform_stamped);
-        
-        RCLCPP_DEBUG(this->get_logger(), 
-                    "Published map->odom transform: GPS(%.6f, %.6f) -> UTM(%.2f, %.2f) -> offset(%.2f, %.2f), IMU: %s",
-                    gps.latitude, gps.longitude, utm_easting, utm_northing,
-                    transform_stamped.transform.translation.x, transform_stamped.transform.translation.y,
-                    current_imu_received_ ? "available" : "not available");
-    }
-    
-    void publishGpsOdometry(const sensor_msgs::msg::NavSatFix& gps)
-    {
-        // Convert GPS to UTM coordinates
-        double utm_easting, utm_northing;
-        gpsToUTM(gps.latitude, gps.longitude, utm_easting, utm_northing);
-        
-        // Create odometry message
-        nav_msgs::msg::Odometry odom_msg;
-        odom_msg.header.stamp = this->get_clock()->now();
-        odom_msg.header.frame_id = "odom";
-        odom_msg.child_frame_id = "base_link";
-        
-        // Set position relative to map origin
-        odom_msg.pose.pose.position.x = utm_easting - map_utm_easting_;
-        odom_msg.pose.pose.position.y = utm_northing - map_utm_northing_;
-        odom_msg.pose.pose.position.z = gps.altitude - gps_ref_alt_;
-        
-        // Set orientation from IMU if available, otherwise use default
-        if (current_imu_received_) {
-            odom_msg.pose.pose.orientation = current_imu_.orientation;
-        } else {
-            odom_msg.pose.pose.orientation.x = 0.0;
-            odom_msg.pose.pose.orientation.y = 0.0;
-            odom_msg.pose.pose.orientation.z = 0.0;
-            odom_msg.pose.pose.orientation.w = 1.0;
-        }
-        
-        // Set pose covariance based on GPS accuracy
-        // Initialize all to zero
-        std::fill(odom_msg.pose.covariance.begin(), odom_msg.pose.covariance.end(), 0.0);
-        
-        // Set position covariance (diagonal elements)
-        if (gps.position_covariance_type != sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN) {
-            // Use GPS covariance if available
-            for (int i = 0; i < 3; ++i) {
-                for (int j = 0; j < 3; ++j) {
-                    odom_msg.pose.covariance[i * 6 + j] = gps.position_covariance[i * 3 + j];
-                }
-            }
-        } else {
-            // Set default covariance values
-            odom_msg.pose.covariance[0] = 2.0;  // x variance
-            odom_msg.pose.covariance[7] = 2.0;  // y variance  
-            odom_msg.pose.covariance[14] = 4.0; // z variance
-        }
-        
-        // Set orientation covariance
-        if (current_imu_received_) {
-            // Use IMU covariance for orientation if available
-            for (int i = 3; i < 6; ++i) {
-                for (int j = 3; j < 6; ++j) {
-                    odom_msg.pose.covariance[i * 6 + j] = current_imu_.orientation_covariance[(i-3) * 3 + (j-3)];
-                }
-            }
-        } else {
-            // Set default orientation covariance
-            odom_msg.pose.covariance[21] = 0.1; // roll variance
-            odom_msg.pose.covariance[28] = 0.1; // pitch variance
-            odom_msg.pose.covariance[35] = 0.5; // yaw variance (higher uncertainty without IMU)
-        }
-        
-        // Velocity is not available from GPS alone, set to zero with high uncertainty
-        odom_msg.twist.twist.linear.x = 0.0;
-        odom_msg.twist.twist.linear.y = 0.0;
-        odom_msg.twist.twist.linear.z = 0.0;
-        odom_msg.twist.twist.angular.x = 0.0;
-        odom_msg.twist.twist.angular.y = 0.0;
-        odom_msg.twist.twist.angular.z = 0.0;
-        
-        // Set twist covariance (high uncertainty for velocity)
-        std::fill(odom_msg.twist.covariance.begin(), odom_msg.twist.covariance.end(), 0.0);
-        for (int i = 0; i < 6; ++i) {
-            odom_msg.twist.covariance[i * 6 + i] = 1000.0; // High uncertainty on diagonal
-        }
-        
-        // Publish odometry
-        odom_publisher_->publish(odom_msg);
-        
-        RCLCPP_DEBUG(this->get_logger(), 
-                    "Published GPS odometry: pos(%.2f, %.2f, %.2f)",
-                    odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y, odom_msg.pose.pose.position.z);
-    }
 
     // 현재 ROS 버전에서 특정 메시지형의 doTransform 미지원으로 인한 변환 함수 구현.
     // 다른 코드에서도 쓸 수 있게 향후 tools 같은 디렉토리에 별도 클래스로 작성하는게 좋긴함
@@ -1622,9 +1320,8 @@ private:
     }
     
     // Member variables
-    rclcpp::Client<gmserver::srv::LoadMap>::SharedPtr map_client_;
-    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscriber_;
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
+    rclcpp::Subscription<map_interfaces::msg::GraphLayer>::SharedPtr graph_sub_;
+    rclcpp::Subscription<map_interfaces::msg::UtmLayer>::SharedPtr utm_layer_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_subscriber_;
     rclcpp::Subscription<command_center_interfaces::msg::RequestReplan>::SharedPtr branch_subscriber_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
@@ -1632,50 +1329,36 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr nodes_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr links_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr map_viz_publisher_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
-    // std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
-    
-    // GraphMap data from gmserver
-    gmserver::msg::GraphMap graph_map_;
-    
+
+    // Graph layer data from map_provider
+    map_interfaces::msg::GraphLayer graph_map_;
+
     // Converted data for compatibility with existing visualization
     geometry_msgs::msg::PoseArray map_nodes_;
     geometry_msgs::msg::PoseArray map_links_;
     std::vector<std::string> node_ids_;
     std::vector<short> node_types_;
-    
+
     // Node ID to index mapping for efficient lookup
     std::unordered_map<std::string, int> node_id_to_index_;
-    
-    // GPS, IMU and Goal state
-    sensor_msgs::msg::NavSatFix current_gps_;
-    sensor_msgs::msg::Imu current_imu_;
+
+    // Goal state
     geometry_msgs::msg::PoseStamped goal_pose_;
-    bool current_gps_received_;
-    bool current_imu_received_;
     bool goal_received_;
     bool path_planned_for_current_goal_; // Flag to ensure single path planning per goal
-    
-    // GPS reference coordinates for goal transformation  
-    double gps_ref_lat_;
-    double gps_ref_lon_;
-    double gps_ref_alt_;
-    double gps_ref_utm_easting_;
-    double gps_ref_utm_northing_;
 
-    double map_utm_easting_; // utm value of first Node in map data
-    double map_utm_northing_;
-    double map_gps_lat_; // lat lon value of first Node in map data
-    double map_gps_long_;
+    // datum (map frame origin in absolute UTM) from map_provider UtmLayer
+    double datum_easting_{0.0};
+    double datum_northing_{0.0};
+    uint8_t utm_zone_{52};
+    bool northern_{true};
 
-    bool gps_ref_initialized_; // Flag to track GPS reference initialization
-    bool map_tf_initialized_;
-    bool first_node_initialized_;
-    
+    bool datum_initialized_; // datum(UtmLayer) received
+    bool graph_received_;    // graph layer received
+
     // A* algorithm data structures
     std::unordered_map<int, std::shared_ptr<AStarNode>> node_map_;
     std::unordered_map<int, std::vector<Link>> adjacency_list_;

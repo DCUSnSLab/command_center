@@ -11,5 +11,5 @@ string goal_node_id
 float64 total_distance  # 총 경로 거리 (미터)
 float64 total_time      # 예상 총 이동 시간 (초)
 
-# 경로를 구성하는 노드와 링크 (기존 MapData 구조 재활용)
-gmserver/MapData path_data
+# 경로를 구성하는 노드와 링크 (SCV_MapManager graph layer 재활용)
+map_interfaces/GraphLayer path_data

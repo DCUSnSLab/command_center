@@ -28,13 +28,14 @@ class PathManager:
         """PlannedPath 메시지에서 노드 정보 추출"""
         nodes = []
         for node in planned_path.path_data.nodes:
+            # map_interfaces/GraphLayer MapNode: 좌표 평탄(easting/northing), heading_deg, alt 없음
             node_data = {
                 'id': node.id,
-                'x': node.utm_info.easting,
-                'y': node.utm_info.northing,
-                'z': node.gps_info.alt,
+                'x': node.easting,
+                'y': node.northing,
+                'z': 0.0,
                 'node_type': node.node_type,
-                'heading': node.heading
+                'heading': node.heading_deg
             }
             nodes.append(node_data)
         return nodes
