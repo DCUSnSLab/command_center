@@ -14,6 +14,9 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>command_center_interfaces</depend>
+  <depend>map_interfaces</depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

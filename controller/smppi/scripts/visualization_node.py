@@ -210,11 +210,11 @@ class VisualizationNode(Node):
         try:
             marker_array = MarkerArray()
             
-            # Goal marker
-            if self.enable_goal and self.latest_goal is not None:
-                goal_marker = self.create_goal_marker()
-                if goal_marker:
-                    marker_array.markers.append(goal_marker)
+            # Goal marker (목표점 진행방향 화살표) — BEV 정리로 비활성화
+            # if self.enable_goal and self.latest_goal is not None:
+            #     goal_marker = self.create_goal_marker()
+            #     if goal_marker:
+            #         marker_array.markers.append(goal_marker)
             
             # Optimal trajectory marker
             if self.enable_trajectory and self.optimal_path is not None:
@@ -244,11 +244,11 @@ class VisualizationNode(Node):
                 if footprint_marker:
                     marker_array.markers.append(footprint_marker)
             
-            # Robot heading marker
-            if self.robot_state is not None:
-                heading_marker = self.create_heading_marker()
-                if heading_marker:
-                    marker_array.markers.append(heading_marker)
+            # Robot heading marker (X축 진행방향 화살표) — BEV 정리로 비활성화
+            # if self.robot_state is not None:
+            #     heading_marker = self.create_heading_marker()
+            #     if heading_marker:
+            #         marker_array.markers.append(heading_marker)
             
             # Target direction marker
             if self.target_direction is not None and self.robot_state is not None:
@@ -284,9 +284,9 @@ class VisualizationNode(Node):
         goal_marker.scale.x = 0.8  # Arrow length
         goal_marker.scale.y = 0.1  # Arrow width
         goal_marker.scale.z = 0.1  # Arrow height
-        goal_marker.color.r = 0.0
-        goal_marker.color.g = 1.0
-        goal_marker.color.b = 0.0
+        goal_marker.color.r = 0.95
+        goal_marker.color.g = 0.95
+        goal_marker.color.b = 0.95
         goal_marker.color.a = 0.8
         
         return goal_marker
@@ -315,8 +315,8 @@ class VisualizationNode(Node):
         # Trajectory appearance
         traj_marker.scale.x = 0.05  # Line width
         traj_marker.color.r = 1.0
-        traj_marker.color.g = 0.0
-        traj_marker.color.b = 0.0
+        traj_marker.color.g = 1.0
+        traj_marker.color.b = 1.0
         traj_marker.color.a = 1.0
         
         return traj_marker
@@ -348,9 +348,9 @@ class VisualizationNode(Node):
         # Obstacle appearance
         obstacle_marker.scale.x = 0.1  # Point width
         obstacle_marker.scale.y = 0.1  # Point height
-        obstacle_marker.color.r = 1.0  # Red color
-        obstacle_marker.color.g = 0.0
-        obstacle_marker.color.b = 0.0
+        obstacle_marker.color.r = 0.75
+        obstacle_marker.color.g = 0.75
+        obstacle_marker.color.b = 0.75
         obstacle_marker.color.a = 0.8
         
         markers.append(obstacle_marker)
@@ -393,9 +393,9 @@ class VisualizationNode(Node):
             
             # Blue color for footprint boundary
             footprint_marker.scale.x = 0.05  # Line width
-            footprint_marker.color.r = 0.0
-            footprint_marker.color.g = 0.0
-            footprint_marker.color.b = 1.0  # Blue
+            footprint_marker.color.r = 0.9
+            footprint_marker.color.g = 0.9
+            footprint_marker.color.b = 0.9
             footprint_marker.color.a = 0.8
             
             return footprint_marker
@@ -430,9 +430,9 @@ class VisualizationNode(Node):
             lookahead_marker.scale.z = 0.12  # Arrow height
             
             # Bright green color for lookahead direction
-            lookahead_marker.color.r = 0.0
-            lookahead_marker.color.g = 1.0
-            lookahead_marker.color.b = 0.2
+            lookahead_marker.color.r = 0.55
+            lookahead_marker.color.g = 0.55
+            lookahead_marker.color.b = 0.55
             lookahead_marker.color.a = 0.9
             
             # Short lifetime for real-time updates
@@ -475,9 +475,9 @@ class VisualizationNode(Node):
                 
                 # Color - blue with decreasing intensity for distant waypoints
                 alpha = 0.8 - (i * 0.15)  # Fade out for distant waypoints
-                marker.color.r = 0.3
-                marker.color.g = 0.5
-                marker.color.b = 1.0
+                marker.color.r = 0.45
+                marker.color.g = 0.45
+                marker.color.b = 0.45
                 marker.color.a = max(alpha, 0.4)
                 
                 # Lifetime
@@ -525,9 +525,9 @@ class VisualizationNode(Node):
             heading_marker.scale.z = 0.15  # Arrow height
             
             # Distinctive color - purple/magenta for robot heading
-            heading_marker.color.r = 1.0
-            heading_marker.color.g = 0.0
-            heading_marker.color.b = 1.0  # Magenta
+            heading_marker.color.r = 0.9
+            heading_marker.color.g = 0.9
+            heading_marker.color.b = 0.9
             heading_marker.color.a = 0.9
             
             # Short lifetime for real-time updates
@@ -580,9 +580,9 @@ class VisualizationNode(Node):
             direction_marker.scale.z = 0.0   # Arrow head length (auto)
             
             # Orange color for target direction
-            direction_marker.color.r = 1.0
-            direction_marker.color.g = 0.5
-            direction_marker.color.b = 0.0  # Orange
+            direction_marker.color.r = 0.6
+            direction_marker.color.g = 0.6
+            direction_marker.color.b = 0.6
             direction_marker.color.a = 0.8
             
             # Short lifetime for real-time updates

@@ -3,7 +3,7 @@
 <package format="3">
   <name>scv_global_planner</name>
   <version>0.0.0</version>
-  <description>Global path planning package with A* algorithm that uses gmserver map service</description>
+  <description>Global path planning package with A* algorithm that uses map_provider graph/utm layers</description>
   <maintainer email="junhp12345@gmail.com">ros2</maintainer>
   <license>MIT</license>
 
@@ -14,11 +14,10 @@
   <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>nav_msgs</depend>
-  <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2</depend>
   <depend>tf2_geometry_msgs</depend>
-  <depend>gmserver</depend>
+  <depend>map_interfaces</depend>
   <depend>command_center_interfaces</depend>
 
   <test_depend>ament_lint_auto</test_depend>
