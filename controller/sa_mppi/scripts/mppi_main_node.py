@@ -23,7 +23,7 @@ from sa_mppi.msg import ProcessedObstacles, MPPIState, OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
 
 # SMPPI modules
-from sa_mppi_controller.optimizer.sa_mppi_optimizer import SMPPIOptimizer
+from sa_mppi_controller.optimizer.base_mppi_optimizer import BaseMPPIOptimizer
 from sa_mppi_controller.critics.obstacle_critic import ObstacleCritic
 from sa_mppi_controller.critics.goal_critic import GoalCritic
 from sa_mppi_controller.motion_models.ackermann_model import AckermannModel
@@ -37,6 +37,9 @@ from sa_mppi_controller.situation.situation_aware import SituationAware
 # SituationAware config dict, which reads them via cfg.get(key, default).
 SA_PARAM_DEFAULTS = {
     'max_decel': 1.5, 'sensor_error': 0.3,
+    'enable_cbf': True,               # ablation: braking-distance CBF speed cap
+    'enable_dynamic_aware': True,     # brake/raise-variance only for MOVING obstacles (costmap temporal diff)
+    'dynamic_min_cluster': 5,         # min moving cells in a connected blob to trust (rejects flicker)
     'min_safety_range': 1.0, 'max_safety_range': 6.0, 'lookahead_time': 3.0,
     'crowded_cost_threshold': 10.0, 'max_reachable_half_angle_deg': 80.0,
     'crowded_density_entry': 0.03, 'crowded_density_exit': 0.03,
@@ -56,7 +59,7 @@ SA_PARAM_DEFAULTS = {
     'adaptation.crowded.reverse_scale': 1.0, 'adaptation.crowded.v_bias': 0.0,
     'adaptation.crowded.lambda_scale': 1.0,
     'adaptation.curved.noise_scale': 1.0, 'adaptation.curved.noise_scale_v': 1.0,
-    'adaptation.curved.noise_scale_delta': 1.0, 'adaptation.curved.speed_scale': 0.7,
+    'adaptation.curved.noise_scale_delta': 1.8, 'adaptation.curved.speed_scale': 1.0,
     'adaptation.curved.reverse_scale': 1.0, 'adaptation.curved.v_bias': 0.0,
     'adaptation.curved.lambda_scale': 1.0,
 }
@@ -149,6 +152,7 @@ class MPPIMainNode(Node):
         self.declare_parameter('optimizer.smoothing_factor', 0.8)
         self.declare_parameter('optimizer.noise_std_u', [0.40, 0.18])
         self.declare_parameter('optimizer.omega_diag', [0.6, 1.2])
+        self.declare_parameter('optimizer.noise_sigma', [0.15, 0.2])  # base-MPPI control noise [v, delta]
         
         # Vehicle parameters
         self.declare_parameter('vehicle.footprint', [0.0, 0.0])
@@ -222,6 +226,8 @@ class MPPIMainNode(Node):
             'wheelbase': self.get_parameter('vehicle.wheelbase').get_parameter_value().double_value,
             'noise_std_u': self.get_parameter('optimizer.noise_std_u').get_parameter_value().double_array_value,
             'omega_diag': self.get_parameter('optimizer.omega_diag').get_parameter_value().double_array_value,
+            'noise_sigma': list(self.get_parameter('optimizer.noise_sigma').get_parameter_value().double_array_value),
+            'max_steering_angle': max_steering_angle,
         }
         
         # Vehicle parameters
@@ -263,20 +269,22 @@ class MPPIMainNode(Node):
         self.get_logger().info("Ackermann motion model initialized")
     
     def _init_optimizer(self):
-        """Initialize SMPPI optimizer"""
-        self.optimizer = SMPPIOptimizer(self.optimizer_params)
+        """Initialize the base MPPI optimizer (base MPPI core + SA techniques)."""
+        self.optimizer = BaseMPPIOptimizer(self.optimizer_params)
         self.optimizer.set_motion_model(self.motion_model)
-        self.get_logger().info("SMPPI optimizer initialized")
+        self.get_logger().info("Base MPPI optimizer initialized (direct control sampling + SA)")
     
     def _init_critics(self):
         """Initialize critic functions"""
         # Obstacle critic (costmap-based)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'collision_cost': 1000.0,
+            'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
             'repulsion_factor': 2.0,
-            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50       # Costmap values >= 50 are inflation zone
+            'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
+            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
+            'footprint': list(self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value),
+            'footprint_padding': self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)
@@ -314,7 +322,7 @@ class MPPIMainNode(Node):
         cfg['dt'] = self.optimizer_params['model_dt']
         cfg['max_speed'] = self.optimizer_params['v_max']
         cfg['horizon'] = self.optimizer_params['time_steps']
-        cfg['occupied_cost_threshold'] = 80.0  # matches ObstacleCritic occupied threshold
+        cfg['occupied_cost_threshold'] = 80.0  # costmap value counted as occupied for sector density
         self.situation_aware = SituationAware(
             cfg, device=self.optimizer.device, dtype=self.optimizer.dtype)
         self.situation_aware.set_logger(self.get_logger())
@@ -394,9 +402,15 @@ class MPPIMainNode(Node):
         self.latest_costmap = msg
 
         # Update ObstacleCritic with costmap info
-        if self.latest_costmap is not None:
+        if self.latest_costmap is not None and \
+                hasattr(self, 'optimizer') and self.optimizer is not None:
             costmap_data = np.array(msg.data, dtype=np.int8).reshape(
                 (msg.info.height, msg.info.width))
+
+            # One on-device tensor per costmap, shared by the obstacle critic
+            # and the situation-aware layer (no per-iteration CPU<->GPU copies)
+            costmap_tensor = torch.as_tensor(
+                costmap_data, device=self.optimizer.device, dtype=self.optimizer.dtype)
 
             costmap_info = {
                 'resolution': msg.info.resolution,
@@ -404,26 +418,18 @@ class MPPIMainNode(Node):
                 'origin_y': msg.info.origin.position.y,
                 'width': msg.info.width,
                 'height': msg.info.height,
-                'data': costmap_data
+                'data': costmap_data,
+                'costmap_tensor': costmap_tensor
             }
 
             # Set costmap info for all obstacle critics
-            if hasattr(self, 'optimizer') and self.optimizer is not None:
-                for critic in self.optimizer.critics:
-                    if hasattr(critic, 'set_costmap_info'):
-                        critic.set_costmap_info(costmap_info)
+            for critic in self.optimizer.critics:
+                if hasattr(critic, 'set_costmap_info'):
+                    critic.set_costmap_info(costmap_info)
 
             # Snapshot costmap as a torch grid for the situation-aware layer
-            # (sector density / nearest-obstacle distance). Built once per costmap.
-            self.sa_costmap_info = {
-                'costmap_tensor': torch.as_tensor(
-                    costmap_data, device=self.optimizer.device, dtype=self.optimizer.dtype),
-                'resolution': msg.info.resolution,
-                'origin_x': msg.info.origin.position.x,
-                'origin_y': msg.info.origin.position.y,
-                'width': msg.info.width,
-                'height': msg.info.height,
-            }
+            # (sector density / nearest-obstacle distance)
+            self.sa_costmap_info = costmap_info
     
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""

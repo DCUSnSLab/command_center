@@ -1,8 +1,8 @@
 """
-SMPPI Optimizer Module
+SA-MPPI Optimizer Module (base MPPI core + situation-aware techniques).
+SMPPI lives in the separate `smppi` package.
 """
 
-from .sa_mppi_optimizer import SMPPIOptimizer
-from .trajectory_sampler import TrajectorySampler
+from .base_mppi_optimizer import BaseMPPIOptimizer
 
-__all__ = ['SMPPIOptimizer', 'TrajectorySampler']
+__all__ = ['BaseMPPIOptimizer']

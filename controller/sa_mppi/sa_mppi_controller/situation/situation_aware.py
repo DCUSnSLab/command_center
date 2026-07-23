@@ -2,7 +2,13 @@
 import math
 import torch
 
-from .situations import external_score, internal_score
+from .situations import (
+    external_score,
+    internal_score,
+    DynamicLayer,
+    dynamic_sector,
+    external_score_dynamic,
+)
 
 
 def clamp01(value):
@@ -27,6 +33,12 @@ class SituationAware:
         self.horizon = max(int(config.get("horizon", 20)), 1)
 
         self.max_decel = max(float(config.get("max_decel", 1.5)), 1e-3)
+        self.enable_cbf = bool(config.get("enable_cbf", True))  # ablation toggle
+        # Dynamic-aware safety: brake (CBF) and raise proposal variance (crowded)
+        # only for *moving* obstacles, not static geometry. Detected by
+        # ego-motion-compensated costmap temporal differencing.
+        self.enable_dynamic_aware = bool(config.get("enable_dynamic_aware", True))  # ablation toggle
+        self.dynamic_min_cluster = max(int(config.get("dynamic_min_cluster", 5)), 1)
         self.sensor_error = float(config.get("sensor_error", 0.3))
         self.min_safety_range = max(float(config.get("min_safety_range", 1.0)), 0.05)
         self.max_safety_range = max(float(config.get("max_safety_range", 6.0)), self.min_safety_range)
@@ -97,6 +109,14 @@ class SituationAware:
         self.control_sequence = None
         self.current_speed = 0.0
 
+        # Dynamic-aware perception (temporal-difference moving-cell detector)
+        self.dynamic_layer = DynamicLayer(
+            occupied_thresh=self.occupied_thresh,
+            min_cluster=self.dynamic_min_cluster,
+            device=self.device,
+        )
+        self.dynamic_mask = None
+
         # State for stabilization
         self.current_context = self.NORMAL
         self._pending_context = self.NORMAL
@@ -140,6 +160,8 @@ class SituationAware:
             self.costmap_tensor = None
             self.width = 0
             self.height = 0
+            self.dynamic_mask = None
+            self.dynamic_layer.reset()
         else:
             cm = costmap_info.get("costmap_tensor", None)
             # Move the costmap to this module's device once per tick (the optimizer
@@ -153,6 +175,13 @@ class SituationAware:
             self.origin_y = float(costmap_info.get("origin_y", 0.0))
             self.width = int(costmap_info.get("width", 0))
             self.height = int(costmap_info.get("height", 0))
+            # Update the moving-cell mask (ego-motion-compensated temporal diff).
+            if self.enable_dynamic_aware and cm is not None:
+                self.dynamic_mask = self.dynamic_layer.update(
+                    cm, self.origin_x, self.origin_y, self.resolution
+                )
+            else:
+                self.dynamic_mask = None
 
         if control_sequence is not None:
             self.control_sequence = control_sequence.detach().to(self.device).clone()
@@ -186,9 +215,22 @@ class SituationAware:
             math.pi,
         )
         # Two situation axes (see situations.py): external (density) / internal (rotation).
-        s_external, reachable_density, min_obs_dist = external_score(
+        # Static external score always computed for min_obstacle_dist (debug/legacy).
+        s_external_static, reachable_density, min_obs_dist = external_score(
             self, x, y, theta, context_range, reachable_half_angle
         )
+        # Dynamic-aware external axis: "crowded" is driven by MOVING obstacles
+        # only, so static clutter keeps baseline sampling variance (avoids the
+        # noise_scale_delta steering washout that freezes the robot in tight
+        # static geometry). Also yields d_dyn for the CBF.
+        d_dyn = float("inf")
+        n_dynamic = 0
+        if self.enable_dynamic_aware and self.dynamic_mask is not None:
+            s_external, dyn_density, d_dyn, n_dynamic = external_score_dynamic(
+                self, x, y, theta, context_range, reachable_half_angle
+            )
+        else:
+            s_external = s_external_static
         s_internal, curvature_deg = internal_score(self)
         scores = {"internal": s_internal, "external": s_external}
         raw_context = self._classify_raw(scores)
@@ -200,11 +242,20 @@ class SituationAware:
         # This DERIVES the speed adaptation from vehicle physics (a_max, sensor margin eps) instead of
         # hand-tuned per-situation speed_scale constants — composite with the situation profile (only ever
         # slows further), floored to keep the robot moving. d_clear = forward nearest-obstacle distance.
-        d_clear = min_obs_dist if math.isfinite(min_obs_dist) else context_range
-        v_cbf = math.sqrt(2.0 * self.max_decel * max(d_clear - self.sensor_error, 0.0))
-        cbf_speed_scale = min(v_cbf / max(self.max_speed, 1e-6), 1.0)
+        # Dynamic-aware: brake for the nearest MOVING obstacle; if none is
+        # moving, the CBF is inactive (static geometry handled by obstacle cost).
+        if self.enable_dynamic_aware and self.dynamic_mask is not None:
+            d_safety = d_dyn  # nearest moving obstacle (inf if none -> no braking)
+        else:
+            d_safety = min_obs_dist if math.isfinite(min_obs_dist) else context_range
+        if math.isfinite(d_safety):
+            v_cbf = math.sqrt(2.0 * self.max_decel * max(d_safety - self.sensor_error, 0.0))
+            cbf_speed_scale = min(v_cbf / max(self.max_speed, 1e-6), 1.0)
+        else:
+            cbf_speed_scale = 1.0  # no moving obstacle -> no braking-distance cap
         adaptation = dict(adaptation)
-        adaptation["speed_scale"] = max(min(adaptation.get("speed_scale", 1.0), cbf_speed_scale), 0.12)
+        _prof_ss = adaptation.get("speed_scale", 1.0)
+        adaptation["speed_scale"] = max(min(_prof_ss, cbf_speed_scale) if self.enable_cbf else _prof_ss, 0.12)
         normal_score = clamp01((1.0 - scores["internal"]) * (1.0 - scores["external"]))
 
         return {
@@ -220,6 +271,8 @@ class SituationAware:
             "lookahead_distance": lookahead_dist,
             "reachable_density": reachable_density,
             "min_obstacle_dist": min_obs_dist,
+            "min_dynamic_dist": d_dyn,
+            "n_dynamic_cells": n_dynamic,
             "cumulative_curvature_deg": curvature_deg,
             "normal_score": normal_score,
             # Interface compat: external axis surfaces as crowded_score, internal

@@ -133,11 +133,16 @@ void PointCloudProcessor::transformPoints(
   }
 }
 
-void PointCloudProcessor::filterByHeight(std::vector<Point3D>& points)
+void PointCloudProcessor::filterByHeight(std::vector<Point3D>& points, double robot_z)
 {
+  // Points are in the odom frame; filter by height relative to the robot
+  // so the filter stays correct on slopes and under odom z drift
+  const float min_z = static_cast<float>(robot_z + min_height_);
+  const float max_z = static_cast<float>(robot_z + max_height_);
+
   auto new_end = std::remove_if(points.begin(), points.end(),
-    [this](const Point3D& p) {
-      return p.z < min_height_ || p.z > max_height_;
+    [min_z, max_z](const Point3D& p) {
+      return p.z < min_z || p.z > max_z;
     });
 
   points.erase(new_end, points.end());
@@ -199,7 +204,7 @@ void PointCloudProcessor::filterByFootprint(
 std::vector<Point3D> PointCloudProcessor::processCloud(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud,
   const geometry_msgs::msg::TransformStamped& transform,
-  double robot_x, double robot_y, double robot_yaw)
+  double robot_x, double robot_y, double robot_z, double robot_yaw)
 {
   std::vector<Point3D> points;
 
@@ -216,7 +221,7 @@ std::vector<Point3D> PointCloudProcessor::processCloud(
   transformPoints(points, transform);
 
   // Apply height filter
-  filterByHeight(points);
+  filterByHeight(points, robot_z);
 
   // Filter robot footprint
   filterByFootprint(points, robot_x, robot_y, robot_yaw);
