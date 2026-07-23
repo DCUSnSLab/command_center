@@ -532,15 +532,30 @@ class MPPIMainNode(Node):
             
             # Set obstacles
             self.optimizer.set_obstacles(self.processed_obstacles)
+
+            # --- fine-grained timing breakdown (GPU-synced) to locate the bottleneck ---
+            _prof = (self.control_count % 20 == 0)
+            _cuda = torch.cuda.is_available()
+            def _t():
+                if _prof and _cuda:
+                    torch.cuda.synchronize()
+                return time.perf_counter()
+            _ta = _t()
             # Optimize
             control_sequence = self.optimizer.optimize()
-            
+            _tb = _t()
             # Get control command
             cmd_vel = self.optimizer.get_control_command()
-            
+            _tc = _t()
+            if _prof:
+                self.get_logger().info(
+                    "[SMPPI TIMING] optimize=%.1fms cmd=%.1fms (prep+rest below)" % (
+                        (_tb - _ta) * 1000.0, (_tc - _tb) * 1000.0))
+                self._t_opt = _tb - _ta
+
             # Apply velocity limits before publishing
             cmd_vel = self._apply_velocity_limits(cmd_vel)
-            
+
             # Publish control command
             self.cmd_pub.publish(cmd_vel)
             
@@ -558,13 +573,19 @@ class MPPIMainNode(Node):
             
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
-            
+
+            _td = _t()
             # Publish optimal path for visualization node
             self.publish_optimal_path()
-            
             # Publish lookahead point for visualization
             self.publish_lookahead_point()
-            
+            _te = _t()
+            if _prof:
+                self.get_logger().info(
+                    "[SMPPI TIMING] publish_path+lookahead=%.1fms | prepare+goal+shift=%.1fms" % (
+                        (_te - _td) * 1000.0,
+                        ((_ta - start_time) + (_td - _tc)) * 1000.0))
+
             # Statistics and real-time monitoring
             end_time = time.perf_counter()
             compute_time = (end_time - start_time) * 1000  # ms
@@ -600,26 +621,30 @@ class MPPIMainNode(Node):
                 path_msg = OptimalPath()
                 path_msg.header.stamp = self.get_clock().now().to_msg()
                 path_msg.header.frame_id = "odom"
-                
-                # Convert trajectory to PoseStamped points
+
+                # Move the whole trajectory to CPU ONCE (single transfer) and build
+                # the message from numpy scalars.  The previous per-point float()
+                # calls each forced a GPU->CPU sync (~T+1 syncs) -> ~20 ms/cycle.
+                arr = optimal_trajectory.detach().cpu().numpy()   # [T+1, >=2]
+                has_yaw = arr.shape[1] >= 3
+                if has_yaw:
+                    qw = np.cos(arr[:, 2] / 2.0)
+                    qz = np.sin(arr[:, 2] / 2.0)
+
                 pose_points = []
-                for i in range(optimal_trajectory.shape[0]):
+                for i in range(arr.shape[0]):
                     pose_stamped = PoseStamped()
                     pose_stamped.header = path_msg.header
-                    pose_stamped.pose.position.x = float(optimal_trajectory[i, 0])
-                    pose_stamped.pose.position.y = float(optimal_trajectory[i, 1])
+                    pose_stamped.pose.position.x = float(arr[i, 0])
+                    pose_stamped.pose.position.y = float(arr[i, 1])
                     pose_stamped.pose.position.z = 0.0
-                    
-                    # Set orientation from yaw (if available)
-                    if optimal_trajectory.shape[1] >= 3:
-                        yaw = float(optimal_trajectory[i, 2])
-                        pose_stamped.pose.orientation.w = np.cos(yaw / 2.0)
-                        pose_stamped.pose.orientation.z = np.sin(yaw / 2.0)
+                    if has_yaw:
+                        pose_stamped.pose.orientation.w = float(qw[i])
+                        pose_stamped.pose.orientation.z = float(qz[i])
                     else:
                         pose_stamped.pose.orientation.w = 1.0
-                    
                     pose_points.append(pose_stamped)
-                
+
                 path_msg.path_points = pose_points
                 path_msg.total_cost = 0.0
                 path_msg.costs = []

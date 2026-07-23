@@ -222,10 +222,10 @@ class VisualizationNode(Node):
                 if traj_marker:
                     marker_array.markers.append(traj_marker)
             
-            # Obstacle markers
-            if self.enable_obstacles and self.processed_obstacles is not None:
-                obstacle_markers = self.create_obstacle_markers()
-                marker_array.markers.extend(obstacle_markers)
+            # Obstacle markers — BEV 정리로 비활성화
+            # if self.enable_obstacles and self.processed_obstacles is not None:
+            #     obstacle_markers = self.create_obstacle_markers()
+            #     marker_array.markers.extend(obstacle_markers)
             
             # Lookahead point marker
             if self.lookahead_point is not None:
@@ -233,10 +233,10 @@ class VisualizationNode(Node):
                 if lookahead_marker:
                     marker_array.markers.append(lookahead_marker)
             
-            # Multiple waypoints markers (next waypoints)
-            if self.waypoint_mode == 'multiple' and self.multiple_waypoints is not None:
-                next_waypoint_markers = self.create_next_waypoints_markers()
-                marker_array.markers.extend(next_waypoint_markers)
+            # Multiple waypoints markers — BEV 정리로 비활성화
+            # if self.waypoint_mode == 'multiple' and self.multiple_waypoints is not None:
+            #     next_waypoint_markers = self.create_next_waypoints_markers()
+            #     marker_array.markers.extend(next_waypoint_markers)
             
             # Robot footprint marker
             if self.enable_robot_footprint and self.robot_state is not None and len(self.footprint) > 0:
@@ -250,11 +250,11 @@ class VisualizationNode(Node):
             #     if heading_marker:
             #         marker_array.markers.append(heading_marker)
             
-            # Target direction marker
-            if self.target_direction is not None and self.robot_state is not None:
-                direction_marker = self.create_target_direction_marker()
-                if direction_marker:
-                    marker_array.markers.append(direction_marker)
+            # Target direction marker — BEV 정리로 비활성화
+            # if self.target_direction is not None and self.robot_state is not None:
+            #     direction_marker = self.create_target_direction_marker()
+            #     if direction_marker:
+            #         marker_array.markers.append(direction_marker)
             
             # Publish markers
             if len(marker_array.markers) > 0:

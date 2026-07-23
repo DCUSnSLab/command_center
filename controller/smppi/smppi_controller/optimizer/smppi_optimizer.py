@@ -71,6 +71,8 @@ class SMPPIOptimizer:
 
         # ===== DEBUG STORAGE =====
         self.debug: Dict[str, Any] = {}
+        self.debug_every = int(params.get('debug_every', 10))  # compute .item() metrics every N ticks
+        self._opt_dbg_counter = 0
         self.last_cmd_applied = torch.zeros(2, device=self.device, dtype=self.dtype)  # for pub vs plan diff
 
         print(f"[SMPPI] Initialized (SMPPI core) K={self.K}, T={self.T}, dt={self.dt}, dev={self.device}")
@@ -121,55 +123,35 @@ class SMPPIOptimizer:
 
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
-            
-            # DEBUG: Control sequence 변화량 추적
-            old_U = self.control_sequence.clone()
             self.control_sequence = self.control_sequence + dU
-            dU_norm = torch.norm(dU).item()
-            max_dU_delta = torch.max(torch.abs(dU[:, 1])).item()  # 조향각 변화량
-            # print(f"max_dU : {max_dU_delta}~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-            # 매 5회마다 출력
-            if hasattr(self, '_control_debug_counter'):
-                self._control_debug_counter += 1
-            else:
-                self._control_debug_counter = 0
-                
-            # if self._control_debug_counter % 5 == 0 and dU_norm > 0.01:
-            #     print(f"[CONTROL UPDATE] dU_norm: {dU_norm:.4f} | max_delta_change: {max_dU_delta:.4f}")
-            #     print(f"  U[0:3] before: [{old_U[0,0]:.3f}, {old_U[0,1]:.3f}], [{old_U[1,0]:.3f}, {old_U[1,1]:.3f}], [{old_U[2,0]:.3f}, {old_U[2,1]:.3f}]")
-            #     print(f"  U[0:3] after:  [{self.control_sequence[0,0]:.3f}, {self.control_sequence[0,1]:.3f}], [{self.control_sequence[1,0]:.3f}, {self.control_sequence[1,1]:.3f}], [{self.control_sequence[2,0]:.3f}, {self.control_sequence[2,1]:.3f}]")
 
-            # ====== DEBUG METRICS ======
-            with torch.no_grad():
-                # a0 from odom
-                a0 = self.robot_state[3:5] if self.robot_state is not None \
-                    else torch.zeros(2, device=self.device, dtype=self.dtype)
-
-                # plan preview (first action)
-                A_preview = self._integrate_U_to_A(a0, self.control_sequence.unsqueeze(0))[0]  # [T,2]
-                A_preview[:, 0] = torch.clamp(A_preview[:, 0], self.v_min, self.v_max)
-                A_preview[:, 1] = torch.clamp(A_preview[:, 1], self.w_min, self.w_max)
-                a_first = A_preview[0]
-
-                # progress (dot with goal direction)
-                prog = self._compute_progress(traj)  # [K] per sample
-                clamp_v = ((A_samples[...,0] <= self.v_min+1e-6) | (A_samples[...,0] >= self.v_max-1e-6)).float().mean().item()
-                clamp_w = ((A_samples[...,1] <= self.w_min+1e-6) | (A_samples[...,1] >= self.w_max-1e-6)).float().mean().item()
-
-                self.debug.update({
-                    "iter": it,
-                    "a0_v": float(a0[0]), "a0_w": float(a0[1]),
-                    "a_first_v": float(a_first[0]), "a_first_w": float(a_first[1]),
-                    "weights_entropy": _entropy(weights),
-                    "traj_cost_mean": float(traj_costs.mean().detach().cpu().item()),
-                    "traj_cost_min": float(traj_costs.min().detach().cpu().item()),
-                    "omega_cost_mean": float(action_costs.mean().detach().cpu().item()),
-                    "total_cost_min": float(total_costs.min().detach().cpu().item()),
-                    "dU_norm": float(torch.norm(dU).detach().cpu().item()),
-                    "progress_mean": float(prog.mean().detach().cpu().item()),
-                    "progress_max": float(prog.max().detach().cpu().item()),
-                    "clamp_ratio_v": clamp_v, "clamp_ratio_w": clamp_w,
-                })
+            # ====== DEBUG METRICS (gated) ======
+            # Each metric below calls .item()/float() -> a GPU->CPU sync. They are
+            # only consumed by the monitoring log (every ~10 cycles), so compute
+            # them at most every debug_every cycles instead of every control tick.
+            self._opt_dbg_counter = getattr(self, '_opt_dbg_counter', 0) + 1
+            if (self._opt_dbg_counter % self.debug_every) == 0:
+                with torch.no_grad():
+                    a0 = self.robot_state[3:5] if self.robot_state is not None \
+                        else torch.zeros(2, device=self.device, dtype=self.dtype)
+                    A_preview = self._integrate_U_to_A(a0, self.control_sequence.unsqueeze(0))[0]
+                    A_preview[:, 0] = torch.clamp(A_preview[:, 0], self.v_min, self.v_max)
+                    A_preview[:, 1] = torch.clamp(A_preview[:, 1], self.w_min, self.w_max)
+                    a_first = A_preview[0]
+                    prog = self._compute_progress(traj)
+                    self.debug.update({
+                        "iter": it,
+                        "a0_v": float(a0[0]), "a0_w": float(a0[1]),
+                        "a_first_v": float(a_first[0]), "a_first_w": float(a_first[1]),
+                        "weights_entropy": _entropy(weights),
+                        "traj_cost_mean": float(traj_costs.mean().item()),
+                        "traj_cost_min": float(traj_costs.min().item()),
+                        "omega_cost_mean": float(action_costs.mean().item()),
+                        "total_cost_min": float(total_costs.min().item()),
+                        "dU_norm": float(torch.norm(dU).item()),
+                        "progress_mean": float(prog.mean().item()),
+                        "progress_max": float(prog.max().item()),
+                    })
         return self.control_sequence
     
     # ---------- sample & integrate ----------
@@ -210,13 +192,12 @@ class SMPPIOptimizer:
         return U_samples, A_samples, eps
 
     def _integrate_U_to_A(self, a0: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
-        K, T, nu = U.shape
-        dA = U * self.dt
-        A = torch.zeros(K, T, nu, device=self.device, dtype=self.dtype)
-        A[:, 0, :] = a0 + dA[:, 0, :]
-        for t in range(1, T):
-            A[:, t, :] = A[:, t - 1, :] + dA[:, t, :]
-        return A
+        # A[:, t] = a0 + sum_{i<=t} U[i]*dt  ==  a0 + cumsum(U*dt, dim=1).
+        # Vectorized (cumsum) instead of a Python T-loop -> identical result,
+        # ~T x fewer kernel launches. a0 may be [2] (shared) or [K,2] (per-sample).
+        dA = torch.cumsum(U * self.dt, dim=1)
+        a0b = a0.view(1, 1, -1) if a0.dim() == 1 else a0.unsqueeze(1)
+        return a0b + dA
 
     # ---------- simulate ----------
     def _simulate_from_A(self, A_samples: torch.Tensor) -> torch.Tensor:
@@ -242,20 +223,14 @@ class SMPPIOptimizer:
     # ---------- critics ----------
     def _evaluate_trajectories(self, trajectories: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         total = torch.zeros(self.K, device=self.device, dtype=self.dtype)
-        timings = []  # <-- critic별 시간 저장
-        for i, critic in enumerate(self.critics):
-            t0 = time.perf_counter()
-            cost = critic.compute_cost(
+        # NOTE: no per-critic cuda.synchronize() here — it forced a GPU sync per
+        # critic every tick (serializing the pipeline). Costs accumulate lazily
+        # on-GPU; the single sync happens naturally at get_control_command().
+        for critic in self.critics:
+            total = total + critic.compute_cost(
                 trajectories, actions,
                 self.robot_state, self.goal_state, self.obstacles
             )
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            t_cost = (time.perf_counter() - t0) * 1000.0
-            timings.append((critic.__class__.__name__, t_cost, cost.shape))
-
-            total += cost
-        # 디버깅 정보 저장
-        self.debug["critic_timings"] = timings
         return total
 
     def _compute_action_sequence_cost(self, A_samples: torch.Tensor) -> torch.Tensor:
@@ -279,23 +254,10 @@ class SMPPIOptimizer:
 
     # ---------- horizon shift ----------
     def shift_control_sequence(self):
-        # DEBUG: Tail value 변화 추적
-        old_tail = self.control_sequence[-1].clone()
-        old_second_last = self.control_sequence[-2].clone()
-        
+        # Receding-horizon shift: roll plan by one step, zero the derivative tail.
+        # (no per-tick .item() debug sync)
         self.control_sequence = torch.roll(self.control_sequence, -1, dims=0)
-        self.control_sequence[-1] = 0.0  # derivative control의 일반적 꼬리값
-        
-        # Tail discontinuity 추적
-        if hasattr(self, '_tail_debug_counter'):
-            self._tail_debug_counter += 1
-        else:
-            self._tail_debug_counter = 0
-            
-        tail_change = torch.norm(old_second_last - self.control_sequence[-1]).item()
-        # if self._tail_debug_counter % 20 == 0 and tail_change > 0.1:
-            # print(f"[TAIL SHIFT] old_tail: [{old_tail[0]:.3f}, {old_tail[1]:.3f}] -> new_tail: [0.0, 0.0]")
-            # print(f"  tail_discontinuity: {tail_change:.4f} (old_second_last vs new_tail)")
+        self.control_sequence[-1] = 0.0
 
     def get_control_command(self) -> Twist:
         if self.robot_state is None:

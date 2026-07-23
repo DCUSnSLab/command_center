@@ -192,17 +192,18 @@ class AckermannModel:
         
         # Set initial states
         trajectories[:, 0, :] = initial_states
-        
-        # Forward integrate
+
+        # Validate ALL controls ONCE (vectorized over K*T) instead of per-step.
+        # validate_controls is elementwise (clamps only), so validating the whole
+        # [K,T,2] up front is identical to per-step and avoids T x redundant work
+        # (incl. per-call tensor allocations) inside the rollout loop.
+        valid_controls = self.validate_controls(
+            controls.reshape(-1, 2)
+        ).reshape(batch_size, time_steps, 2)
+
+        # Forward integrate (state recursion must stay sequential)
         for t in range(time_steps):
-            current_states = trajectories[:, t, :]
-            current_controls = controls[:, t, :]
-            
-            # Validate controls
-            valid_controls = self.validate_controls(current_controls)
-            
-            # Forward step
-            next_states = self.forward(current_states, valid_controls, dt)
+            next_states = self.forward(trajectories[:, t, :], valid_controls[:, t, :], dt)
             trajectories[:, t + 1, :] = next_states
-        
+
         return trajectories

@@ -71,6 +71,7 @@ private:
   double update_frequency_;
   double inflation_radius_;
   double cost_scaling_factor_;
+  double sensor_timeout_;
   std::vector<double> robot_footprint_;
 
   // ROS interfaces
@@ -92,6 +93,8 @@ private:
   std::mutex pc_mutex_;
   std::vector<Point3D> latest_points_;
   std::atomic<bool> has_new_points_;
+  bool cloud_received_;
+  rclcpp::Time last_cloud_time_;
 
   std::mutex odom_mutex_;
   RobotPose robot_pose_;

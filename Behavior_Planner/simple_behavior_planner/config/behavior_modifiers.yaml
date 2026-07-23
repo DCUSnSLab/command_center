@@ -101,5 +101,6 @@
         overrides:
           min_linear_velocity: 0.0
 
-    # SMPPI config 파일 경로 설정 (simple_behavior_planner 패키지 내부 파일 사용)
-    smppi_config_path: "smppi_params.yaml"
+    # SMPPI baseline 파라미터는 smppi 컨트롤러 패키지의 config를 단일 출처로 사용.
+    # (simple_behavior_planner는 자체 smppi_params.yaml을 갖지 않고 여기서 읽어온다)
+    smppi_config_path: "package://smppi/config/smppi_params.yaml"

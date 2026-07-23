@@ -95,9 +95,10 @@ public:
         // Create publishers
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", 10);
         planned_path_publisher_ = this->create_publisher<command_center_interfaces::msg::PlannedPath>("planned_path_detailed", 10);
-        nodes_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_nodes_viz", 10);
-        links_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_links_viz", 10);
-        map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
+        // map_node/graph/link 시각화 제거 (map_provider 그래프와 중복). planned_path 만 표시.
+        // nodes_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_nodes_viz", 10);
+        // links_publisher_ = this->create_publisher<geometry_msgs::msg::PoseArray>("map_links_viz", 10);
+        // map_viz_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("map_graph_viz", 10);
 
         // Create TF listener for vehicle pose (map->base_link) lookup
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -128,10 +129,10 @@ private:
         // Build graph from map data using actual connectivity
         buildGraph();
 
-        // Publish visualization data only after datum is initialized
-        if (datum_initialized_) {
-            publishVisualizationData();
-        }
+        // map graph 시각화 제거 (publishVisualizationData 비활성)
+        // if (datum_initialized_) {
+        //     publishVisualizationData();
+        // }
     }
 
     // map_provider datum(UtmLayer) 수신 -> map frame 원점 UTM 갱신. latched.
@@ -148,10 +149,10 @@ private:
                    static_cast<int>(utm_zone_), northern_ ? "north" : "south",
                    datum_easting_, datum_northing_);
 
-        // Publish visualization data now that datum is initialized
-        if (graph_received_) {
-            publishVisualizationData();
-        }
+        // map graph 시각화 제거 (publishVisualizationData 비활성)
+        // if (graph_received_) {
+        //     publishVisualizationData();
+        // }
     }
 
     void convertGraphMapToPoseArrays()

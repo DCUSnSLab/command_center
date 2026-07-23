@@ -18,11 +18,17 @@
     costmap_resolution: 0.1      # Cell size in meters (0.1m = 10cm)
 
     # === Obstacle Detection ===
-    min_obstacle_height: 0.5     # Minimum height for obstacle detection (meters)
+    # Heights are relative to the robot (base_link z), not the odom origin
+    min_obstacle_height: 0.15     # Minimum height for obstacle detection (meters)
     max_obstacle_height: 2.0     # Maximum height for obstacle detection (meters)
 
     # === Update Frequency ===
     update_frequency: 10.0       # Hz (costmap update rate)
+
+    # === Sensor Timeout ===
+    # If no point cloud arrives within this time, the costmap is cleared
+    # to UNKNOWN instead of publishing stale obstacle data
+    sensor_timeout: 1.0          # seconds
 
     # === Robot Footprint ===
     # Robot footprint polygon vertices [x1,y1,x2,y2,x3,y3,x4,y4] in base_link frame
@@ -30,5 +36,5 @@
     robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
 
     # === Inflation Layer ===
-    inflation_radius: 1.0        # Inflation radius in meters (safety margin around obstacles)
-    cost_scaling_factor: 5.0     # Cost decay factor (higher = steeper decay, range: 1.0~20.0)
+    inflation_radius: 3.0        # Inflation radius in meters (safety margin around obstacles)
+    cost_scaling_factor: 10.0     # Cost decay factor (higher = steeper decay, range: 1.0~20.0)

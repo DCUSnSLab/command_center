@@ -31,8 +31,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 from sa_mppi.msg import ProcessedObstacles, MPPIState, OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus
 
-# SMPPI modules
-from sa_mppi_controller.optimizer.sa_mppi_optimizer import SMPPIOptimizer
+# MPPI modules (base MPPI core + SA techniques)
+from sa_mppi_controller.optimizer.base_mppi_optimizer import BaseMPPIOptimizer
 from sa_mppi_controller.critics.obstacle_critic import ObstacleCritic
 from sa_mppi_controller.critics.goal_critic import GoalCritic
 from sa_mppi_controller.motion_models.ackermann_model import AckermannModel
@@ -240,8 +240,8 @@ class SMPPIControllerNode(Node):
         self.get_logger().info("Ackermann motion model initialized")
     
     def _init_optimizer(self):
-        """Initialize SMPPI optimizer"""
-        self.optimizer = SMPPIOptimizer(self.optimizer_params)
+        """Initialize base MPPI optimizer (base MPPI core + SA techniques)"""
+        self.optimizer = BaseMPPIOptimizer(self.optimizer_params)
         self.optimizer.set_motion_model(self.motion_model)
         self.get_logger().info("SMPPI optimizer initialized")
     
@@ -250,13 +250,12 @@ class SMPPIControllerNode(Node):
         # Obstacle critic (costmap-based)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'collision_cost': 1000.0,
+            'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
             'repulsion_factor': 2.0,
-            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50,      # Costmap values >= 50 are inflation zone
+            'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
+            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
             'footprint': self.vehicle_params['footprint'],
-            'footprint_padding': self.vehicle_params['footprint_padding'],
-            'use_polygon_collision': self.vehicle_params['use_polygon_collision']
+            'footprint_padding': self.vehicle_params['footprint_padding']
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)

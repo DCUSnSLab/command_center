@@ -11,7 +11,8 @@ namespace local_costmap
 
 CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   : Node("local_costmap_node", options),
-    has_new_points_(false)
+    has_new_points_(false),
+    cloud_received_(false)
 {
   // Initialize robot pose
   robot_pose_.valid = false;
@@ -45,8 +46,9 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
 
   // Create subscribers
+  // Sensor drivers typically publish best_effort; SensorDataQoS matches both
   pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-    point_cloud_topic_, qos,
+    point_cloud_topic_, rclcpp::SensorDataQoS(),
     std::bind(&CostmapNode::pointCloudCallback, this, _1));
 
   odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -102,6 +104,10 @@ void CostmapNode::declareParameters()
   // Update frequency
   this->declare_parameter("update_frequency", 10.0);
 
+  // Sensor timeout: if no point cloud arrives within this time,
+  // the costmap is cleared to UNKNOWN instead of publishing stale data
+  this->declare_parameter("sensor_timeout", 1.0);
+
   // Robot footprint
   this->declare_parameter("robot_footprint",
     std::vector<double>{0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725});
@@ -128,6 +134,8 @@ void CostmapNode::loadParameters()
   max_obstacle_height_ = this->get_parameter("max_obstacle_height").as_double();
 
   update_frequency_ = this->get_parameter("update_frequency").as_double();
+
+  sensor_timeout_ = this->get_parameter("sensor_timeout").as_double();
 
   robot_footprint_ = this->get_parameter("robot_footprint").as_double_array();
 
@@ -164,9 +172,19 @@ void CostmapNode::pointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstS
     source_frame = source_frame.substr(1);
   }
 
+  // Look up the transform at the cloud's timestamp so points are not smeared
+  // while the robot moves; fall back to the latest transform if unavailable
   geometry_msgs::msg::TransformStamped transform;
-  if (!lookupTransform(odom_frame_, source_frame, transform)) {
-    return;
+  try {
+    transform = tf_buffer_->lookupTransform(
+      odom_frame_, source_frame,
+      msg->header.stamp, rclcpp::Duration::from_seconds(0.1));
+  } catch (const tf2::TransformException& ex) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "TF lookup at cloud time failed (%s), falling back to latest", ex.what());
+    if (!lookupTransform(odom_frame_, source_frame, transform)) {
+      return;
+    }
   }
 
   // Get current robot pose
@@ -181,13 +199,15 @@ void CostmapNode::pointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstS
   }
 
   // Process point cloud
-  auto points = pc_processor_->processCloud(msg, transform, pose.x, pose.y, pose.yaw);
+  auto points = pc_processor_->processCloud(msg, transform, pose.x, pose.y, pose.z, pose.yaw);
 
   // Store processed points
   {
     std::lock_guard<std::mutex> lock(pc_mutex_);
     latest_points_ = std::move(points);
     has_new_points_ = true;
+    cloud_received_ = true;
+    last_cloud_time_ = this->now();
   }
 }
 
@@ -232,13 +252,43 @@ void CostmapNode::updateCostmap()
 
   // Get latest points
   std::vector<Point3D> points;
+  bool new_points = false;
+  bool cloud_received = false;
+  rclcpp::Time last_cloud_time;
   {
     std::lock_guard<std::mutex> lock(pc_mutex_);
-    if (!has_new_points_) {
+    new_points = has_new_points_;
+    cloud_received = cloud_received_;
+    last_cloud_time = last_cloud_time_;
+    if (new_points) {
+      points = std::move(latest_points_);
+      has_new_points_ = false;
+    }
+  }
+
+  if (!new_points) {
+    if (!cloud_received) {
+      // No cloud processed yet since startup (sensor not up, or TF missing)
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "Waiting for first point cloud on %s, publishing UNKNOWN costmap",
+        point_cloud_topic_.c_str());
+      costmap_->reset(Costmap2D::UNKNOWN);
+      costmap_->updateOrigin(pose.x - costmap_width_ / 2.0,
+                             pose.y - costmap_height_ / 2.0);
       return;
     }
-    points = std::move(latest_points_);
-    has_new_points_ = false;
+
+    // Sensor data stopped: clear the costmap to UNKNOWN instead of
+    // keeping stale obstacles while the robot may still be moving
+    if ((this->now() - last_cloud_time).seconds() > sensor_timeout_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "No point cloud for %.1f s (timeout %.1f s), clearing costmap to UNKNOWN",
+        (this->now() - last_cloud_time).seconds(), sensor_timeout_);
+      costmap_->reset(Costmap2D::UNKNOWN);
+      costmap_->updateOrigin(pose.x - costmap_width_ / 2.0,
+                             pose.y - costmap_height_ / 2.0);
+    }
+    return;
   }
 
   // Reset costmap
