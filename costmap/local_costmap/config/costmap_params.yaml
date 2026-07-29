@@ -4,7 +4,7 @@
 /**:
   ros__parameters:
     # === Topic Configuration ===
-    point_cloud_topic: '/velodyne_points'
+    point_cloud_topic: '/perception/points_nonground'
     odom_topic: '/odom'
 
     # === Frame IDs ===
@@ -29,6 +29,19 @@
     # If no point cloud arrives within this time, the costmap is cleared
     # to UNKNOWN instead of publishing stale obstacle data
     sensor_timeout: 1.0          # seconds
+
+    # === Raytracing / Persistence (Nav2 obstacle_layer style) ===
+    # Obstacles persist until a beam passes through their cell; cells along
+    # each beam are cleared to free space
+    raytrace_max_range: 20.0     # Max clearing distance from sensor (meters)
+    obstacle_max_range: 20.0     # Max marking distance from sensor (meters)
+    track_unknown_space: false   # true: never-observed cells stay UNKNOWN(-1)
+                                 # (note: MPPI critic treats UNKNOWN as lethal)
+
+    # === Denoise ===
+    # Obstacle groups (8-connected) smaller than this are removed as noise;
+    # set to 1 to disable
+    denoise_minimal_group_size: 2
 
     # === Robot Footprint ===
     # Robot footprint polygon vertices [x1,y1,x2,y2,x3,y3,x4,y4] in base_link frame

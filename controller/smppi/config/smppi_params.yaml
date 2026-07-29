@@ -5,6 +5,9 @@
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
     goal_reached_threshold: 3.0           # 목표 도달 거리 임계값 [m]
+    passed_goal_max_distance: 8.0         # 통과 판정 상한 [m]: goal 을 이 거리 이내에서
+                                          # 지나쳤으면(진입 방향 평면 기준) 도달로 인정.
+                                          # 최종/pause(7,8)/행동전환 노드는 제외. 0 이하 비활성.
     waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
 
     # SMPPI 최적화 파라미터
@@ -44,7 +47,7 @@
     costs:
       obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
       goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
-      
+
       lookahead:
         base_distance: 10.0                # 기본 lookahead 거리 [m] (보수적 증가)
         velocity_factor: 1.3              # 속도 비례 팩터 [s] (고속 안정성)
@@ -72,7 +75,7 @@
         processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
         robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
-        cmd_vel: '/cmd_vel'  # 속도 명령 출력 토픽
+        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
         goal_status: '/goal_status'                    # 목표 상태 출력 토픽
         optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
         markers: '/smppi_visualization'                # 시각화 마커 출력 토픽

@@ -250,13 +250,12 @@ class SMPPIControllerNode(Node):
         # Obstacle critic (costmap-based)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'collision_cost': 1000.0,
+            'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
             'repulsion_factor': 2.0,
-            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50,      # Costmap values >= 50 are inflation zone
-            'footprint': self.vehicle_params['footprint'],
-            'footprint_padding': self.vehicle_params['footprint_padding'],
-            'use_polygon_collision': self.vehicle_params['use_polygon_collision']
+            'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
+            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
+            'footprint': list(self.vehicle_params['footprint']),
+            'footprint_padding': self.vehicle_params['footprint_padding']
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)

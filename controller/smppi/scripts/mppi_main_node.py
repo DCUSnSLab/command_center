@@ -142,6 +142,9 @@ class MPPIMainNode(Node):
         
         # Goal tracking
         self.declare_parameter('goal_reached_threshold', 2.0)
+        # 통과 판정 상한: goal 을 이 거리 이내에서 '지나친' 경우도 도달로 인정
+        # (회피 기동으로 goal 옆을 지나갔을 때 유턴 방지). 0 이하면 비활성.
+        self.declare_parameter('passed_goal_max_distance', 8.0)
         
         # Waypoint mode ('single' or 'multiple')
         self.declare_parameter('waypoint_mode', 'multiple')
@@ -211,6 +214,7 @@ class MPPIMainNode(Node):
         
         # Goal tracking parameters
         self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
+        self.passed_goal_max_distance = self.get_parameter('passed_goal_max_distance').get_parameter_value().double_value
         
         # Waypoint mode
         self.waypoint_mode = self.get_parameter('waypoint_mode').get_parameter_value().string_value
@@ -231,32 +235,29 @@ class MPPIMainNode(Node):
     
     def _init_critics(self):
         """Initialize critic functions"""
-        # Obstacle critic (costmap-based)
+        # Obstacle critic (costmap-based, footprint-sampled)
         obstacle_params = {
             'weight': self.critic_weights['obstacle_weight'],
-            'collision_cost': 1000.0,
+            'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
             'repulsion_factor': 2.0,
-            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50       # Costmap values >= 50 are inflation zone
+            'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
+            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
+            'footprint': list(self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value),
+            'footprint_padding': self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)
         
-        # Goal critic
+        # Goal critic (carrot lookahead)
         goal_params = {
             'weight': self.critic_weights['goal_weight'],
             'xy_goal_tolerance': 0.25,
             'yaw_goal_tolerance': 0.25,
             'distance_scale': 1.0,
-            'angle_scale': 1.0,
-            # Lookahead parameters
+            # Lookahead parameters (static distance = clamp(base, min, max))
             'lookahead_base_distance': self.lookahead_params['base_distance'],
-            'lookahead_velocity_factor': self.lookahead_params['velocity_factor'],
             'lookahead_min_distance': self.lookahead_params['min_distance'],
             'lookahead_max_distance': self.lookahead_params['max_distance'],
-            # Debug parameters
-            'debug': self.get_parameter('costs.debug').get_parameter_value().bool_value if self.has_parameter('costs.debug') else False,
-            'debug_level': self.get_parameter('costs.debug_level').get_parameter_value().integer_value if self.has_parameter('costs.debug_level') else 1,
         }
         self.goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(self.goal_critic)
@@ -333,10 +334,16 @@ class MPPIMainNode(Node):
         """Receive costmap for grid-based collision detection"""
         self.latest_costmap = msg
 
-        # Update ObstacleCritic with costmap info
-        if self.latest_costmap is not None:
+        # Update critics with costmap info
+        if self.latest_costmap is not None and \
+                hasattr(self, 'optimizer') and self.optimizer is not None:
             costmap_data = np.array(msg.data, dtype=np.int8).reshape(
                 (msg.info.height, msg.info.width))
+
+            # One on-device tensor per costmap, shared by all critics
+            # (no per-iteration CPU<->GPU copies)
+            costmap_tensor = torch.as_tensor(
+                costmap_data, device=self.optimizer.device, dtype=self.optimizer.dtype)
 
             costmap_info = {
                 'resolution': msg.info.resolution,
@@ -344,14 +351,14 @@ class MPPIMainNode(Node):
                 'origin_y': msg.info.origin.position.y,
                 'width': msg.info.width,
                 'height': msg.info.height,
-                'data': costmap_data
+                'data': costmap_data,
+                'costmap_tensor': costmap_tensor
             }
 
-            # Set costmap info for all obstacle critics
-            if hasattr(self, 'optimizer') and self.optimizer is not None:
-                for critic in self.optimizer.critics:
-                    if hasattr(critic, 'set_costmap_info'):
-                        critic.set_costmap_info(costmap_info)
+            # Set costmap info for all critics that consume it
+            for critic in self.optimizer.critics:
+                if hasattr(critic, 'set_costmap_info'):
+                    critic.set_costmap_info(costmap_info)
     
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""
@@ -489,7 +496,13 @@ class MPPIMainNode(Node):
         """Main control loop callback"""
         if not self.is_ready():
             return
-        
+
+        # No goal yet: hold still. Without this the optimizer free-runs on
+        # sampling noise and publishes small nonzero commands (robot creep).
+        if self.goal_state is None:
+            self.cmd_pub.publish(Twist())
+            return
+
         # Check pause state first (highest priority)
         if self.is_paused:
             current_time = time.time()
@@ -973,22 +986,69 @@ class MPPIMainNode(Node):
         
         return cmd_vel
 
+    def _check_goal_passed(self, distance_to_goal: float) -> bool:
+        """
+        통과 판정: 회피 기동 등으로 goal 옆을 지나친 경우도 도달로 인정.
+
+        goal 의 진입 방향(waypoint orientation = 이전노드->goal heading)에
+        수직인 평면을 로봇이 넘었고 distance <= passed_max 이면 통과.
+        진입 방향 기준이라 급커브(>90°, 예: 헤어핀)에서 접근 중 오발하지 않음.
+
+        거리 판정만 쓰는 예외:
+          - 단일 goal 모드 (waypoint 정보 없음)
+          - 최종 waypoint (도착 정밀도 유지)
+          - pause 노드 type 7/8 (정지 트리거를 위해 정확히 접근해야 함)
+          - behavior group 전환 노드 (조기 행동 전환 방지)
+        """
+        if self.passed_goal_max_distance <= 0.0:
+            return False
+
+        wp = self.multiple_waypoints
+        if wp is None or self.robot_state is None:
+            return False
+        if wp.is_final_waypoint:
+            return False
+
+        node_type = wp.current_goal_node_type
+        if node_type in (7, 8):
+            return False
+
+        next_types = list(wp.next_waypoints_node_types)
+        if next_types and GoalCritic._get_behavior_group(next_types[0]) != \
+                GoalCritic._get_behavior_group(node_type):
+            return False
+
+        # 런타임 threshold 변경으로 상한이 역전되지 않도록 묶음
+        passed_max = max(self.passed_goal_max_distance, self.goal_reached_threshold)
+        if distance_to_goal > passed_max:
+            return False
+
+        # 진입 방향 기준 통과 평면: dot(robot - goal, heading) > 0
+        gp = wp.current_goal.pose
+        q = gp.orientation
+        heading = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        rx = self.robot_state.state_vector[0] - gp.position.x
+        ry = self.robot_state.state_vector[1] - gp.position.y
+        return (rx * math.cos(heading) + ry * math.sin(heading)) > 0.0
+
     def publish_goal_status(self, distance_to_goal: float):
         """Publish goal status information"""
         if self.latest_goal is None:
             return
-            
+
         status_msg = ControllerGoalStatus()
         status_msg.header = Header()
         status_msg.header.stamp = self.get_clock().now().to_msg()
         status_msg.header.frame_id = 'odom'
-        
+
         # Set goal information
         status_msg.goal_id = self.current_goal_id
         status_msg.distance_to_goal = distance_to_goal
-        
-        # Determine status
-        if distance_to_goal <= self.goal_reached_threshold:
+
+        # Determine status (거리 도달 OR 통과)
+        if distance_to_goal <= self.goal_reached_threshold or \
+                self._check_goal_passed(distance_to_goal):
             status_msg.goal_reached = True
             status_msg.status_code = 1  # SUCCEEDED
         else:

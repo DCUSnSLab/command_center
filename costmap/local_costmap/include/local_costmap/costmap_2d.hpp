@@ -25,6 +25,7 @@ public:
 
   // Coordinate conversions
   bool worldToMap(double wx, double wy, int& mx, int& my) const;
+  void worldToMapNoBounds(double wx, double wy, int& mx, int& my) const;
   void mapToWorld(int mx, int my, double& wx, double& wy) const;
 
   // Cost access
@@ -32,8 +33,21 @@ public:
   int8_t getCost(int mx, int my) const;
   void setCostWorld(double wx, double wy, int8_t cost);
 
-  // Update origin (for rolling window)
+  // Set the origin directly (cells are NOT moved; use after reset())
   void updateOrigin(double new_origin_x, double new_origin_y);
+
+  // Shift the rolling window origin, preserving cells that overlap the
+  // previous window; newly exposed cells are filled with fill_value.
+  // The shift is snapped to whole cells so existing data is not resampled.
+  void shiftOrigin(double new_origin_x, double new_origin_y, int8_t fill_value);
+
+  // Set cells along the line from (x0,y0) to (x1,y1) to `value`, excluding
+  // the endpoint cell. Stops at the map boundary. (x1,y1) may lie outside
+  // the map; (x0,y0) must be inside or nothing is traced.
+  void raytraceSetLine(int x0, int y0, int x1, int y1, int8_t value);
+
+  // Copy origin and cell data from another costmap of identical dimensions
+  void copyFrom(const Costmap2D& other);
 
   // Data access
   int8_t* getData() { return data_.data(); }
