@@ -17,6 +17,7 @@
 #include "local_costmap/costmap_2d.hpp"
 #include "local_costmap/point_cloud_processor.hpp"
 #include "local_costmap/inflation_layer.hpp"
+#include "local_costmap/denoise_layer.hpp"
 
 namespace local_costmap
 {
@@ -72,6 +73,10 @@ private:
   double inflation_radius_;
   double cost_scaling_factor_;
   double sensor_timeout_;
+  double raytrace_max_range_;
+  double obstacle_max_range_;
+  bool track_unknown_space_;
+  int denoise_minimal_group_size_;
   std::vector<double> robot_footprint_;
 
   // ROS interfaces
@@ -85,13 +90,17 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // Core components
-  std::unique_ptr<Costmap2D> costmap_;
+  std::unique_ptr<Costmap2D> obstacle_map_;  // persistent marking/clearing grid
+  std::unique_ptr<Costmap2D> costmap_;       // published grid (obstacles + inflation)
   std::unique_ptr<PointCloudProcessor> pc_processor_;
   std::unique_ptr<InflationLayer> inflation_layer_;
+  DenoiseLayer denoise_layer_;
 
   // State
   std::mutex pc_mutex_;
-  std::vector<Point3D> latest_points_;
+  ProcessedCloud latest_cloud_;
+  double sensor_origin_x_;
+  double sensor_origin_y_;
   std::atomic<bool> has_new_points_;
   bool cloud_received_;
   rclcpp::Time last_cloud_time_;

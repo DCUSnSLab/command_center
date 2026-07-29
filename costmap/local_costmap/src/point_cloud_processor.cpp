@@ -201,24 +201,29 @@ void PointCloudProcessor::filterByFootprint(
   points.erase(new_end, points.end());
 }
 
-std::vector<Point3D> PointCloudProcessor::processCloud(
+ProcessedCloud PointCloudProcessor::processCloud(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud,
   const geometry_msgs::msg::TransformStamped& transform,
   double robot_x, double robot_y, double robot_z, double robot_yaw)
 {
+  ProcessedCloud result;
   std::vector<Point3D> points;
 
   // Parse point cloud (zero-copy from raw data)
   if (!parsePointCloud(cloud, points)) {
     last_point_count_ = 0;
     last_filtered_count_ = 0;
-    return points;
+    return result;
   }
 
   last_point_count_ = points.size();
 
   // Transform to target frame
   transformPoints(points, transform);
+
+  // Every finite return is a clearing endpoint: the beam that produced it
+  // passed through free space, regardless of the obstacle height band
+  result.clearing = points;
 
   // Apply height filter
   filterByHeight(points, robot_z);
@@ -228,7 +233,8 @@ std::vector<Point3D> PointCloudProcessor::processCloud(
 
   last_filtered_count_ = points.size();
 
-  return points;
+  result.marking = std::move(points);
+  return result;
 }
 
 }  // namespace local_costmap

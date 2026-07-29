@@ -384,6 +384,19 @@ class SimpleBehaviorPlannerNode(Node):
 
     def _handle_goal_success(self, msg: ControllerGoalStatus):
         """목표 성공 처리"""
+        # pause 노드(7/8)인데 아직 pause 미발동이면 노드를 넘기기 전에 발동.
+        # (goal_reached_threshold > pause_trigger_distance 면 거리 트리거가
+        #  발동하기 전에 SUCCEEDED 가 먼저 와서 정지 없이 통과되는 문제 방지)
+        current_target = self.path_manager.get_current_target_node()
+        if current_target and not self.pause_signal_sent:
+            node_type = current_target.get('node_type', 1)
+            if node_type in [7, 8]:
+                pause_duration = 2.0 if node_type == 7 else 4.0
+                self._send_pause_command(pause_duration, current_target['id'],
+                                         f"Node type {node_type} pause (on reach)")
+                self.get_logger().info(
+                    f"Pause command sent on reach: {pause_duration}s for node {msg.goal_id}")
+
         self.path_manager.mark_goal_completed(msg.goal_id)
         self.pause_signal_sent = False
         self.subgoal_published = False

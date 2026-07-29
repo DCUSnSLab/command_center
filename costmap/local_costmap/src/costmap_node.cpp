@@ -1,6 +1,7 @@
 #include "local_costmap/costmap_node.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <functional>
 
 using namespace std::chrono_literals;
@@ -11,6 +12,8 @@ namespace local_costmap
 
 CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   : Node("local_costmap_node", options),
+    sensor_origin_x_(0.0),
+    sensor_origin_y_(0.0),
     has_new_points_(false),
     cloud_received_(false)
 {
@@ -25,9 +28,13 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-  // Initialize costmap
+  // Initialize costmaps: persistent obstacle grid + published grid
   double origin_x = -costmap_width_ / 2.0;
   double origin_y = -costmap_height_ / 2.0;
+  obstacle_map_ = std::make_unique<Costmap2D>(
+    costmap_width_, costmap_height_, costmap_resolution_,
+    origin_x, origin_y);
+  obstacle_map_->reset(track_unknown_space_ ? Costmap2D::UNKNOWN : Costmap2D::FREE_SPACE);
   costmap_ = std::make_unique<Costmap2D>(
     costmap_width_, costmap_height_, costmap_resolution_,
     origin_x, origin_y);
@@ -40,6 +47,9 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   // Initialize inflation layer
   inflation_layer_ = std::make_unique<InflationLayer>();
   inflation_layer_->initialize(inflation_radius_, cost_scaling_factor_, costmap_resolution_);
+
+  // Initialize denoise layer
+  denoise_layer_.initialize(denoise_minimal_group_size_);
 
   // QoS settings
   rclcpp::QoS qos(10);
@@ -108,6 +118,14 @@ void CostmapNode::declareParameters()
   // the costmap is cleared to UNKNOWN instead of publishing stale data
   this->declare_parameter("sensor_timeout", 1.0);
 
+  // Raytracing / persistence (Nav2 obstacle_layer semantics)
+  this->declare_parameter("raytrace_max_range", 20.0);
+  this->declare_parameter("obstacle_max_range", 20.0);
+  this->declare_parameter("track_unknown_space", false);
+
+  // Denoise: remove obstacle groups smaller than this (<= 1 disables)
+  this->declare_parameter("denoise_minimal_group_size", 2);
+
   // Robot footprint
   this->declare_parameter("robot_footprint",
     std::vector<double>{0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725});
@@ -136,6 +154,13 @@ void CostmapNode::loadParameters()
   update_frequency_ = this->get_parameter("update_frequency").as_double();
 
   sensor_timeout_ = this->get_parameter("sensor_timeout").as_double();
+
+  raytrace_max_range_ = this->get_parameter("raytrace_max_range").as_double();
+  obstacle_max_range_ = this->get_parameter("obstacle_max_range").as_double();
+  track_unknown_space_ = this->get_parameter("track_unknown_space").as_bool();
+
+  denoise_minimal_group_size_ = static_cast<int>(
+    this->get_parameter("denoise_minimal_group_size").as_int());
 
   robot_footprint_ = this->get_parameter("robot_footprint").as_double_array();
 
@@ -199,12 +224,14 @@ void CostmapNode::pointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstS
   }
 
   // Process point cloud
-  auto points = pc_processor_->processCloud(msg, transform, pose.x, pose.y, pose.z, pose.yaw);
+  auto processed = pc_processor_->processCloud(msg, transform, pose.x, pose.y, pose.z, pose.yaw);
 
-  // Store processed points
+  // Store processed points and the sensor origin (raytrace start)
   {
     std::lock_guard<std::mutex> lock(pc_mutex_);
-    latest_points_ = std::move(points);
+    latest_cloud_ = std::move(processed);
+    sensor_origin_x_ = transform.transform.translation.x;
+    sensor_origin_y_ = transform.transform.translation.y;
     has_new_points_ = true;
     cloud_received_ = true;
     last_cloud_time_ = this->now();
@@ -251,7 +278,9 @@ void CostmapNode::updateCostmap()
   }
 
   // Get latest points
-  std::vector<Point3D> points;
+  ProcessedCloud cloud;
+  double sensor_x = 0.0;
+  double sensor_y = 0.0;
   bool new_points = false;
   bool cloud_received = false;
   rclcpp::Time last_cloud_time;
@@ -261,10 +290,15 @@ void CostmapNode::updateCostmap()
     cloud_received = cloud_received_;
     last_cloud_time = last_cloud_time_;
     if (new_points) {
-      points = std::move(latest_points_);
+      cloud = std::move(latest_cloud_);
+      sensor_x = sensor_origin_x_;
+      sensor_y = sensor_origin_y_;
       has_new_points_ = false;
     }
   }
+
+  const double origin_x = pose.x - costmap_width_ / 2.0;
+  const double origin_y = pose.y - costmap_height_ / 2.0;
 
   if (!new_points) {
     if (!cloud_received) {
@@ -272,9 +306,9 @@ void CostmapNode::updateCostmap()
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
         "Waiting for first point cloud on %s, publishing UNKNOWN costmap",
         point_cloud_topic_.c_str());
-      costmap_->reset(Costmap2D::UNKNOWN);
-      costmap_->updateOrigin(pose.x - costmap_width_ / 2.0,
-                             pose.y - costmap_height_ / 2.0);
+      obstacle_map_->reset(Costmap2D::UNKNOWN);
+      obstacle_map_->updateOrigin(origin_x, origin_y);
+      costmap_->copyFrom(*obstacle_map_);
       return;
     }
 
@@ -284,30 +318,57 @@ void CostmapNode::updateCostmap()
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
         "No point cloud for %.1f s (timeout %.1f s), clearing costmap to UNKNOWN",
         (this->now() - last_cloud_time).seconds(), sensor_timeout_);
-      costmap_->reset(Costmap2D::UNKNOWN);
-      costmap_->updateOrigin(pose.x - costmap_width_ / 2.0,
-                             pose.y - costmap_height_ / 2.0);
+      obstacle_map_->reset(Costmap2D::UNKNOWN);
+      obstacle_map_->updateOrigin(origin_x, origin_y);
+      costmap_->copyFrom(*obstacle_map_);
     }
     return;
   }
 
-  // Reset costmap
-  costmap_->reset(Costmap2D::FREE_SPACE);
+  // Shift the rolling window, keeping previously observed cells
+  const int8_t fill = track_unknown_space_ ? Costmap2D::UNKNOWN : Costmap2D::FREE_SPACE;
+  obstacle_map_->shiftOrigin(origin_x, origin_y, fill);
 
-  // Update rolling window origin
-  double origin_x = pose.x - costmap_width_ / 2.0;
-  double origin_y = pose.y - costmap_height_ / 2.0;
-  costmap_->updateOrigin(origin_x, origin_y);
-
-  // Mark obstacles
-  for (const auto& p : points) {
-    int mx, my;
-    if (costmap_->worldToMap(p.x, p.y, mx, my)) {
-      costmap_->setCost(mx, my, Costmap2D::OCCUPIED);
+  // Raytrace clearing: free every cell each beam passed through
+  int sensor_mx, sensor_my;
+  if (obstacle_map_->worldToMap(sensor_x, sensor_y, sensor_mx, sensor_my)) {
+    for (const auto& p : cloud.clearing) {
+      double ex = p.x;
+      double ey = p.y;
+      const double dx = ex - sensor_x;
+      const double dy = ey - sensor_y;
+      const double range = std::hypot(dx, dy);
+      if (range < 1e-6) {
+        continue;
+      }
+      if (range > raytrace_max_range_) {
+        const double scale = raytrace_max_range_ / range;
+        ex = sensor_x + dx * scale;
+        ey = sensor_y + dy * scale;
+      }
+      int end_mx, end_my;
+      obstacle_map_->worldToMapNoBounds(ex, ey, end_mx, end_my);
+      obstacle_map_->raytraceSetLine(sensor_mx, sensor_my, end_mx, end_my,
+                                     Costmap2D::FREE_SPACE);
     }
   }
 
-  // Apply inflation
+  // Mark obstacles (after clearing, so marks from this scan survive)
+  for (const auto& p : cloud.marking) {
+    if (std::hypot(p.x - sensor_x, p.y - sensor_y) > obstacle_max_range_) {
+      continue;
+    }
+    int mx, my;
+    if (obstacle_map_->worldToMap(p.x, p.y, mx, my)) {
+      obstacle_map_->setCost(mx, my, Costmap2D::OCCUPIED);
+    }
+  }
+
+  // Remove isolated noise cells before they get inflated
+  denoise_layer_.apply(*obstacle_map_);
+
+  // Build the published grid: obstacles + inflation
+  costmap_->copyFrom(*obstacle_map_);
   if (inflation_layer_->isInitialized()) {
     inflation_layer_->inflate(*costmap_);
   }

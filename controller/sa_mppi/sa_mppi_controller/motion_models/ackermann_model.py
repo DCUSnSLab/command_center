@@ -185,24 +185,30 @@ class AckermannModel:
             trajectories: [K, T+1, 3] full trajectories
         """
         batch_size, time_steps, _ = controls.shape
-        trajectories = torch.zeros(
-            batch_size, time_steps + 1, 3, 
-            device=self.device, dtype=self.dtype
-        )
-        
-        # Set initial states
-        trajectories[:, 0, :] = initial_states
-        
-        # Forward integrate
-        for t in range(time_steps):
-            current_states = trajectories[:, t, :]
-            current_controls = controls[:, t, :]
-            
-            # Validate controls
-            valid_controls = self.validate_controls(current_controls)
-            
-            # Forward step
-            next_states = self.forward(current_states, valid_controls, dt)
-            trajectories[:, t + 1, :] = next_states
-        
-        return trajectories
+
+        # Validate ALL controls ONCE (vectorized over K*T) instead of per-step.
+        # validate_controls is elementwise (clamps only), so validating the whole
+        # [K,T,2] up front is identical to per-step.
+        valid_controls = self.validate_controls(
+            controls.reshape(-1, 2)
+        ).reshape(batch_size, time_steps, 2)
+
+        # Closed-form Euler rollout (no sequential T-loop):
+        # theta depends only on cumsum(omega*dt); x/y use theta at the START of
+        # each step, so they are cumsums too. Identical to the step-by-step
+        # recursion up to float rounding (~1e-7), but ~T x fewer kernel launches.
+        v = valid_controls[:, :, 0]                                  # [K, T]
+        delta = valid_controls[:, :, 1]
+        w = v * torch.tan(delta) / self.wheelbase
+
+        theta0 = initial_states[:, 2:3]
+        theta = torch.cat([theta0, theta0 + torch.cumsum(w * dt, dim=1)], dim=1)  # [K, T+1]
+
+        step_theta = theta[:, :-1]                                   # theta at step start
+        x0 = initial_states[:, 0:1]
+        y0 = initial_states[:, 1:2]
+        x = torch.cat([x0, x0 + torch.cumsum(v * torch.cos(step_theta) * dt, dim=1)], dim=1)
+        y = torch.cat([y0, y0 + torch.cumsum(v * torch.sin(step_theta) * dt, dim=1)], dim=1)
+
+        theta = self.normalize_angle(theta)
+        return torch.stack([x, y, theta], dim=2)                     # [K, T+1, 3]

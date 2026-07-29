@@ -11,7 +11,7 @@ InflationLayer::InflationLayer()
     cost_scaling_factor_(10.0),
     resolution_(0.1),
     initialized_(false),
-    inflation_cells_(0)
+    cell_inflation_radius_(0)
 {
 }
 
@@ -22,7 +22,8 @@ void InflationLayer::initialize(double inflation_radius, double cost_scaling_fac
   resolution_ = resolution;
 
   if (inflation_radius_ > 0.0) {
-    computeKernel();
+    cell_inflation_radius_ = static_cast<int>(std::ceil(inflation_radius_ / resolution_));
+    computeCaches();
     initialized_ = true;
   } else {
     initialized_ = false;
@@ -49,47 +50,52 @@ int8_t InflationLayer::computeCost(double distance) const
   return std::max(static_cast<int8_t>(1), std::min(static_cast<int8_t>(Costmap2D::OCCUPIED - 1), result));
 }
 
-void InflationLayer::computeKernel()
+void InflationLayer::computeCaches()
 {
-  kernel_.clear();
+  const int size = cell_inflation_radius_ + 2;
 
-  inflation_cells_ = static_cast<int>(std::ceil(inflation_radius_ / resolution_));
+  cached_distances_.assign(size, std::vector<double>(size, 0.0));
+  cached_costs_.assign(size, std::vector<int8_t>(size, 0));
 
-  // Pre-compute all cells within inflation radius
-  std::vector<std::pair<double, InflationCell>> temp_kernel;
-
-  for (int dy = -inflation_cells_; dy <= inflation_cells_; ++dy) {
-    for (int dx = -inflation_cells_; dx <= inflation_cells_; ++dx) {
-      // Skip center (obstacle cell itself)
-      if (dx == 0 && dy == 0) {
-        continue;
-      }
-
-      double distance = std::hypot(dx, dy) * resolution_;
-
-      if (distance <= inflation_radius_) {
-        int8_t cost = computeCost(distance);
-        if (cost > 0) {
-          temp_kernel.push_back({distance, {dx, dy, cost}});
-        }
-      }
+  for (int dy = 0; dy < size; ++dy) {
+    for (int dx = 0; dx < size; ++dx) {
+      const double distance_cells = std::hypot(dx, dy);
+      cached_distances_[dy][dx] = distance_cells;
+      cached_costs_[dy][dx] = computeCost(distance_cells * resolution_);
     }
   }
 
-  // Sort by distance (closest first) - helps with cache locality
-  std::sort(temp_kernel.begin(), temp_kernel.end(),
-    [](const auto& a, const auto& b) { return a.first < b.first; });
+  // Half-cell quantized distance bins for BFS processing order
+  bins_.resize(2 * (cell_inflation_radius_ + 2));
+}
 
-  // Extract sorted cells
-  kernel_.reserve(temp_kernel.size());
-  for (const auto& item : temp_kernel) {
-    kernel_.push_back(item.second);
+void InflationLayer::enqueue(int x, int y, int sx, int sy, int width)
+{
+  const int idx = y * width + x;
+  if (seen_[idx]) {
+    return;
+  }
+
+  const int adx = std::abs(x - sx);
+  const int ady = std::abs(y - sy);
+  if (adx > cell_inflation_radius_ + 1 || ady > cell_inflation_radius_ + 1) {
+    return;
+  }
+
+  const double distance_cells = cached_distances_[ady][adx];
+  if (distance_cells > cell_inflation_radius_) {
+    return;
+  }
+
+  const size_t bin = static_cast<size_t>(distance_cells * 2.0);
+  if (bin < bins_.size()) {
+    bins_[bin].push_back({x, y, sx, sy});
   }
 }
 
 void InflationLayer::inflate(Costmap2D& costmap)
 {
-  if (!initialized_ || kernel_.empty()) {
+  if (!initialized_) {
     return;
   }
 
@@ -97,34 +103,54 @@ void InflationLayer::inflate(Costmap2D& costmap)
   const int height = costmap.getHeightCells();
   int8_t* data = costmap.getData();
 
-  // First pass: find all obstacle cells
-  std::vector<std::pair<int, int>> obstacles;
-  obstacles.reserve(1000);  // Pre-allocate for typical case
+  seen_.assign(static_cast<size_t>(width) * height, 0);
+  for (auto& bin : bins_) {
+    bin.clear();
+  }
 
+  // Seed the wavefront with all obstacle cells
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       if (data[y * width + x] >= Costmap2D::OCCUPIED) {
-        obstacles.emplace_back(x, y);
+        bins_[0].push_back({x, y, x, y});
       }
     }
   }
 
-  // Second pass: apply inflation kernel around each obstacle
-  for (const auto& obs : obstacles) {
-    int ox = obs.first;
-    int oy = obs.second;
+  // Expand in order of increasing distance; each cell is finalized on first
+  // visit, which is (approximately) from its nearest obstacle
+  for (size_t bin = 0; bin < bins_.size(); ++bin) {
+    // Bins grow while being processed, so index instead of iterating
+    for (size_t i = 0; i < bins_[bin].size(); ++i) {
+      const CellData cell = bins_[bin][i];
+      const int idx = cell.y * width + cell.x;
 
-    for (const auto& cell : kernel_) {
-      int nx = ox + cell.dx;
-      int ny = oy + cell.dy;
+      if (seen_[idx]) {
+        continue;
+      }
+      seen_[idx] = 1;
 
-      // Bounds check
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-        int idx = ny * width + nx;
-        // Take maximum of existing cost and inflated cost
-        if (cell.cost > data[idx]) {
-          data[idx] = cell.cost;
-        }
+      const int adx = std::abs(cell.x - cell.sx);
+      const int ady = std::abs(cell.y - cell.sy);
+      const int8_t cost = cached_costs_[ady][adx];
+
+      // Take max with existing cost; never touch UNKNOWN cells
+      if (data[idx] >= 0 && cost > data[idx]) {
+        data[idx] = cost;
+      }
+
+      // Expand 4-connected neighbors from the same source obstacle
+      if (cell.x > 0) {
+        enqueue(cell.x - 1, cell.y, cell.sx, cell.sy, width);
+      }
+      if (cell.x < width - 1) {
+        enqueue(cell.x + 1, cell.y, cell.sx, cell.sy, width);
+      }
+      if (cell.y > 0) {
+        enqueue(cell.x, cell.y - 1, cell.sx, cell.sy, width);
+      }
+      if (cell.y < height - 1) {
+        enqueue(cell.x, cell.y + 1, cell.sx, cell.sy, width);
       }
     }
   }

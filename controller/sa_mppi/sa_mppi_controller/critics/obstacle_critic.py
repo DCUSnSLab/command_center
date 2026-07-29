@@ -49,8 +49,11 @@ class ObstacleCritic(BaseCritic):
         self.unknown_is_lethal = params.get('unknown_is_lethal', True)
 
         # Vehicle footprint polygon [x1,y1,x2,y2,...] in base frame
-        self.footprint = params.get(
-            'footprint', [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725])
+        default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+        self.footprint = list(params.get('footprint', default_footprint))
+        if len(self.footprint) < 6 or len(self.footprint) % 2 != 0:
+            print(f"[ObstacleCritic] Invalid footprint {self.footprint}, using default")
+            self.footprint = default_footprint
         self.footprint_padding = params.get('footprint_padding', 0.0)
 
         # Perimeter sample spacing; half the costmap resolution so no cell
@@ -126,7 +129,6 @@ class ObstacleCritic(BaseCritic):
         if not self.enabled or info is None:
             return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
 
-        costmap = info['costmap_tensor']  # [H, W] on device
         width = info['width']
         height = info['height']
 
@@ -144,26 +146,25 @@ class ObstacleCritic(BaseCritic):
 
         inside = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)  # [K, T+1, P]
 
-        # Clamped lookup; out-of-bounds samples are overridden below
-        values = costmap[gy.clamp(0, height - 1), gx.clamp(0, width - 1)]  # [K, T+1, P]
+        # Clamped index; out-of-bounds samples are overridden below.
+        # SINGLE gather from the packed grid (see set_costmap_info encoding)
+        g = info['packed_grid'][gy.clamp(0, height - 1), gx.clamp(0, width - 1)]
 
-        unknown = values < 0
-        collision = ~inside | (values >= self.collision_value_threshold)
         if self.unknown_is_lethal:
-            collision = collision | unknown
+            collision = ~inside | (g >= 10.0)              # collision or unknown
+        else:
+            collision = ~inside | ((g >= 10.0) & (g < 20.0))  # collision only
 
         pose_collision = collision.any(dim=2)  # [K, T+1]
 
         # Continuous repulsion over the inflation gradient: max sample value
-        # per pose (most conservative), zeroed on colliding poses since the
-        # collision penalty already dominates there
-        sample_vals = torch.where(collision | unknown,
-                                  torch.zeros_like(values),
-                                  values.clamp(min=0.0))
-        pose_max = sample_vals.max(dim=2).values / 100.0  # [K, T+1]
+        # per pose (most conservative). Sentinel cells (>= 10) contribute 0;
+        # colliding poses are zeroed since the collision penalty dominates
+        sample_rep = torch.where(g < 10.0, g, torch.zeros_like(g))
+        pose_max = sample_rep.max(dim=2).values  # [K, T+1], already squared
         repulsion = torch.where(pose_collision,
                                 torch.zeros_like(pose_max),
-                                self.repulsion_factor * pose_max.square() * 100.0)
+                                self.repulsion_factor * pose_max * 100.0)
 
         total_costs = repulsion.sum(dim=1)
         total_costs = total_costs + pose_collision.any(dim=1).to(total_costs.dtype) * self.collision_cost
@@ -188,9 +189,25 @@ class ObstacleCritic(BaseCritic):
         tensor = info.get('costmap_tensor')
         if tensor is None:
             tensor = torch.as_tensor(np.ascontiguousarray(info['data']))
-        info['costmap_tensor'] = tensor.to(device=self.device, dtype=self.dtype)
+        tensor = tensor.to(device=self.device, dtype=self.dtype)
+        info['costmap_tensor'] = tensor
+
+        # Precompute ONE packed grid per costmap (40k cells at ~10 Hz) so the
+        # per-cycle lookup over K*T*P (millions of) sample points is a SINGLE
+        # random-access gather. Encoding:
+        #   [0, 1):  repulsion (value/100)^2, squared so per-pose reduce is max()
+        #   10.0:    collision cell (value >= collision_value_threshold)
+        #   20.0:    unknown cell (value < 0)
+        info['packed_grid'] = self._build_packed_grid(tensor)
 
         self.costmap_info = info
+
+    def _build_packed_grid(self, tensor: torch.Tensor) -> torch.Tensor:
+        packed = (tensor.clamp(min=0.0) / 100.0).square()
+        packed = torch.where(tensor >= self.collision_value_threshold,
+                             torch.full_like(packed, 10.0), packed)
+        packed = torch.where(tensor < 0, torch.full_like(packed, 20.0), packed)
+        return packed
 
     def update_parameters(self, params: dict):
         """
@@ -210,6 +227,11 @@ class ObstacleCritic(BaseCritic):
             self.repulsion_factor = params['repulsion_factor']
         if 'collision_value_threshold' in params:
             self.collision_value_threshold = params['collision_value_threshold']
+            # packed_grid was precomputed with the old threshold
+            if self.costmap_info is not None:
+                info = dict(self.costmap_info)
+                info['packed_grid'] = self._build_packed_grid(info['costmap_tensor'])
+                self.costmap_info = info
         if 'unknown_is_lethal' in params:
             self.unknown_is_lethal = params['unknown_is_lethal']
 

@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>loop_manager</name>
+  <version>0.1.0</version>
+  <description>
+    임시 순찰 매니저: 노드 목록을 순환하며 goal 을 발행해 반복 주행.
+    (graph 폐루프 링크 필요 — scvmap_d2_0723 의 N0053->N0032 참조)
+  </description>
+  <maintainer email="min81800@cu.ac.kr">scv</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>map_interfaces</depend>
+  <depend>command_center_interfaces</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

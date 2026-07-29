@@ -125,6 +125,13 @@ class SMPPIOptimizer:
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
             self.control_sequence = self.control_sequence + dU
 
+            # Anti-windup: U 는 미분 공간이라 무제약 업데이트가 적분 속도를
+            # 클램프 밖(예: 음수 v)으로 밀 수 있다. 정지 상황에서는 음수 방향이
+            # 비용 페널티를 안 받아 U 가 계속 아래로 쌓이고(windup), 샘플 분포가
+            # 전부 v=0 클램프에 붙어 탐색이 죽으며 재출발이 지연된다.
+            # 명목 A 를 적분->클램프->역차분해 U 를 유효 영역으로 사영한다.
+            self._project_control_sequence(self._a0_last)
+
             # ====== DEBUG METRICS (gated) ======
             # Each metric below calls .item()/float() -> a GPU->CPU sync. They are
             # only consumed by the monitoring log (every ~10 cycles), so compute
@@ -183,6 +190,7 @@ class SMPPIOptimizer:
         # print(f"[SMPPI] w_min: {self.w_min}, w_max: {self.w_max}")
         a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
+        self._a0_last = a0  # 업데이트 후 U 사영(anti-windup)에 사용
         A_samples = self._integrate_U_to_A(a0, U_samples)
         
         # 속도 한계 적용
@@ -190,6 +198,14 @@ class SMPPIOptimizer:
         A_samples[..., 1] = torch.clamp(A_samples[..., 1], self.w_min, self.w_max)
         
         return U_samples, A_samples, eps
+
+    def _project_control_sequence(self, a0: torch.Tensor):
+        """명목 U 를 '적분한 A 가 [v/w 한계] 안'이 되도록 사영 (anti-windup)"""
+        A = self._integrate_U_to_A(a0, self.control_sequence.unsqueeze(0))[0]  # [T,2]
+        A[:, 0].clamp_(self.v_min, self.v_max)
+        A[:, 1].clamp_(self.w_min, self.w_max)
+        prev = torch.cat([a0.view(1, 2), A[:-1]], dim=0)
+        self.control_sequence = (A - prev) / self.dt
 
     def _integrate_U_to_A(self, a0: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
         # A[:, t] = a0 + sum_{i<=t} U[i]*dt  ==  a0 + cumsum(U*dt, dim=1).
@@ -366,6 +382,9 @@ class SMPPIOptimizer:
         a0 = self.last_cmd_applied
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)
+        # 실제 명령과 동일한 한계 적용 (없으면 음수 v로 후진 경로가 표시됨)
+        A[..., 0] = torch.clamp(A[..., 0], self.v_min, self.v_max)
+        A[..., 1] = torch.clamp(A[..., 1], self.w_min, self.w_max)
         traj = self._simulate_from_A(A)
         return traj[0]
 
