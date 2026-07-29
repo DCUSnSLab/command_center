@@ -15,7 +15,7 @@ def generate_launch_description():
     map_file = PathJoinSubstitution([
                     FindPackageShare('gmserver'),
                     'maps',
-                    'generated_map.json'
+                    '1_5_map hard_relocated.json'
                 ])
 
     return LaunchDescription([
