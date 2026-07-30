@@ -255,11 +255,33 @@ class SimpleBehaviorPlannerNode(Node):
         pose_stamped.header = msg.header
         pose_stamped.pose = msg.pose.pose
         self.current_pose = pose_stamped
+        if getattr(self, '_pending_align', False) and self._align_start_to_pose():
+            self._pending_align = False
+
+    def _align_start_to_pose(self) -> bool:
+        """현재 위치(map 프레임) 최근접 경로 노드를 시작 목표로 정렬."""
+        if self.current_pose is None or not self.path_manager.path_nodes:
+            return False
+        idx = self.path_manager.align_to_position(
+            self.current_pose.pose.position.x,
+            self.current_pose.pose.position.y)
+        node = self.path_manager.get_current_target_node()
+        self.get_logger().info(
+            f'start node unspecified -> nearest node idx {idx}'
+            f' ({node["id"] if node else "?"})')
+        return True
 
     def planned_path_callback(self, msg: PlannedPath):
         """경로 계획 콜백"""
         self.path_manager.update_path(msg)
         self.subgoal_published = False
+
+        # 시작 노드 미지정(start_node_id == '') 운용: 경로의 첫 노드가 아니라
+        # 현재 위치의 최근접 노드부터 추종 시작 (2026-07-30 필드 운용 변경).
+        # 명시된 start_node_id가 있으면 종전대로 첫 노드부터.
+        if not msg.start_node_id:
+            if not self._align_start_to_pose():
+                self._pending_align = True
 
         # Update last goal node ID for replanning
         self._update_last_goal_node_id(msg)

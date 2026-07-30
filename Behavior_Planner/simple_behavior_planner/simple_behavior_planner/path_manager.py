@@ -45,6 +45,14 @@ class PathManager:
         self.is_path_following = True
         self.last_completed_goal_id = None
 
+    def align_to_position(self, x: float, y: float) -> int:
+        """시작 노드 미지정 시: 현재 위치(map 프레임) 최근접 노드를 시작 목표로 설정."""
+        if not self.path_nodes:
+            return 0
+        d2 = [(n['x'] - x) ** 2 + (n['y'] - y) ** 2 for n in self.path_nodes]
+        self.current_target_index = d2.index(min(d2))
+        return self.current_target_index
+
     def get_current_target_node(self) -> Optional[Dict[str, Any]]:
         """현재 목표 노드 반환"""
         if not self.path_nodes or self.current_target_index >= len(self.path_nodes):
