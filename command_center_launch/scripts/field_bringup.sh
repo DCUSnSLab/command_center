@@ -53,11 +53,20 @@ echo "[bringup] launch pid $LAUNCH_PID"
 if [ "$RECORD" = 1 ]; then
   echo "[bringup] 스택 기동 대기 20 s 후 기록 시작"
   sleep 20
+  # 토픽 목록은 field_20260730/record.sh 에서 가져왔다(실주행으로 검증된 이름).
+  # 추측한 이름을 쓰면 ros2 bag record 가 조용히 아무것도 안 남긴다 — 실제로
+  # /gps/fix, /behavior_state, /odometry/filtered 는 존재하지 않는 이름이었다.
+  # 여기에 경로 추종 진단용 토픽 셋을 더했다.
   nohup ros2 bag record -o "$LOGDIR/bag" \
-    /clock /tf /tf_static /odom /odometry/global /odometry/filtered \
-    /gps/fix /gps/filtered /vectornav/imu /velodyne_points /velodyne_points_curb \
-    /costmap /costmap_keepout /planned_path_detailed /cmd_vel \
-    /hunter_status /joint_states /behavior_state \
+    /vectornav/imu /vectornav/pose /ublox_gps_node/fix /ublox_gps_node/fix_velocity \
+    /tf /tf_static /robot_description \
+    /camera/camera/color/camera_info /camera/camera/color/image_raw \
+    /camera/camera/depth/camera_info /camera/camera/depth/image_rect_raw \
+    /cmd_vel /current_speed /current_steer_angle /front/scan /rear/scan \
+    /hunter/velocity /hunter_status /velodyne_points \
+    /gps/fix_gated /odometry/global /map_anchor/mode /odom /odometry/fast_lio \
+    /costmap /costmap_keepout /behavior_status \
+    /planned_path_detailed /multiple_waypoints \
     > "$LOGDIR/record.log" 2>&1 &
   echo "[bringup] record pid $!"
 fi
