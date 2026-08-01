@@ -16,7 +16,15 @@ endif()
 # Install launch files
 install(DIRECTORY
   launch
+  config
   DESTINATION share/${PROJECT_NAME}
+)
+
+# Bring-up / teardown helpers (field_bringup.sh raises can0 then launches)
+install(PROGRAMS
+  scripts/field_bringup.sh
+  scripts/teardown.sh
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()

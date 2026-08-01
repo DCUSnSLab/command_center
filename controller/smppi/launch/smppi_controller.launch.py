@@ -10,6 +10,7 @@ Modular 3-node architecture for optimal performance:
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.conditions import IfCondition
@@ -43,7 +44,16 @@ def generate_launch_description():
         default_value='smppi',
         description='Node namespace'
     )
-    
+
+    # Overrides the value in smppi_params.yaml. Field runs sometimes need a
+    # wider corridor than the mapped sidewalk (the route can sit off-map), and
+    # editing the installed yaml to do it loses the change on the next build.
+    corridor_half_width_arg = DeclareLaunchArgument(
+        'corridor_half_width',
+        default_value='1.4',
+        description='Keepout corridor half-width in metres'
+    )
+
     # Get configuration
     use_sim_time = LaunchConfiguration('use_sim_time')
     enable_visualization = LaunchConfiguration('enable_visualization')
@@ -83,6 +93,8 @@ def generate_launch_description():
             default_config_path,
             {
                 'use_sim_time': use_sim_time,
+                'corridor_half_width': ParameterValue(
+                    LaunchConfiguration('corridor_half_width'), value_type=float),
             }
         ],
         output='screen',
@@ -137,6 +149,7 @@ def generate_launch_description():
         enable_visualization_arg,
         config_file_arg,
         namespace_arg,
+        corridor_half_width_arg,
         
         # Group all nodes
         GroupAction([

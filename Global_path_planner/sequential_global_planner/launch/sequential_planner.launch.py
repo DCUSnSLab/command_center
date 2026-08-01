@@ -5,6 +5,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -47,7 +48,15 @@ def generate_launch_description():
             default_value='/gps/fix',
             description='GPS topic name for reference point'
         ),
-        
+
+        DeclareLaunchArgument(
+            'explicit_endpoints',
+            default_value='false',
+            description='Pin start/goal node IDs into the path. Off by default '
+                        'so the behavior planner starts from the node nearest '
+                        'the robot instead of the route head.'
+        ),
+
         # Sequential planner node
         Node(
             package='sequential_global_planner',
@@ -60,6 +69,8 @@ def generate_launch_description():
                 'loop_path': LaunchConfiguration('loop_path'),
                 'publish_frequency': LaunchConfiguration('publish_frequency'),
                 'gps_topic': LaunchConfiguration('gps_topic'),
+                'explicit_endpoints': ParameterValue(
+                    LaunchConfiguration('explicit_endpoints'), value_type=bool),
                 'use_sim_time': use_sim_time
             }],
             remappings=[

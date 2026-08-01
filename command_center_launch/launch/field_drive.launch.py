@@ -10,7 +10,9 @@ mission needs, including the curb-safety layers:
   t= 5s  localization   robot_localization dual-EKF + FAST-LIO + navsat
                         (odom->base_link & map->odom TF, /odom;
                         replaces tiny_localization — see scv_dual_ekf.yaml)
-  t= 7s  global plan    scv_global_planner
+  t= 7s  route          sequential_global_planner (whole ordered route, no
+                        start/goal pinned) or scv_global_planner A* when
+                        route_source:=graph
   t= 9s  curb safety    pcd_ground_filter/curb_costmap
                         (L1 below-grade curb detection -> local_costmap on
                         /velodyne_points_curb)
@@ -33,10 +35,21 @@ Field checklist before launch:
     so far use node_type=1 only -- no gates will open).
   * hunter_teleop_mux keeps manual override priority over /cmd_vel.
 
+Route endpoints are deliberately NOT named. sequential_global_planner
+publishes the whole ordered route with start_node_id/goal_node_id empty, and
+simple_behavior_planner then joins at the node nearest the robot rather than
+driving back to the route head. Pass route_source:=graph (or
+explicit_endpoints:=true on the planner) for the old named-endpoint behaviour.
+
+can0 must be up before launching; use field_bringup.sh, which raises it and
+then calls this file.
+
 Usage:
   ros2 launch command_center_launch field_drive.launch.py
   ros2 launch command_center_launch field_drive.launch.py \
       map_file_path:=/path/to/map.json with_gnss:=false enable_visualization:=true
+  ros2 launch command_center_launch field_drive.launch.py \
+      route_source:=graph corridor_half_width:=7.0 max_slew_mps:=0
 """
 
 import os
@@ -45,7 +58,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
+                                  PythonExpression)
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -69,6 +83,11 @@ def generate_launch_description():
     with_sensors = LaunchConfiguration('with_sensors', default='true')
     with_gnss = LaunchConfiguration('with_gnss', default='true')
     enable_visualization = LaunchConfiguration('enable_visualization', default='false')
+    route_source = LaunchConfiguration('route_source', default='sequential')
+    with_fastlio = LaunchConfiguration('with_fastlio', default='true')
+    max_slew_mps = LaunchConfiguration('max_slew_mps', default='0.5')
+    cov_ref_m2 = LaunchConfiguration('cov_ref_m2', default='1.0')
+    corridor_half_width = LaunchConfiguration('corridor_half_width', default='1.4')
 
     # Map must contain UtmInfo (F2: UtmInfo-less maps yield zeroed
     # waypoints) and its node[0] must equal the navsat datum in
@@ -96,6 +115,26 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_visualization', default_value='false',
             description='SMPPI RViz marker node (leave off for field runs)'),
+        DeclareLaunchArgument(
+            'route_source', default_value='sequential',
+            description="'sequential' publishes the whole ordered route with no "
+                        "start/goal pinned (drive on from wherever you are); "
+                        "'graph' uses gmserver + A* between named endpoints."),
+        DeclareLaunchArgument(
+            'with_fastlio', default_value='true',
+            description='FAST-LIO odometry source for the odom EKF'),
+        DeclareLaunchArgument(
+            'max_slew_mps', default_value='0.5',
+            description='Absolute rate ceiling on map-anchor motion. 0 disables '
+                        '(the 2026-07-30 failure mode: the anchor slid at 5 m/s, '
+                        'four times the vehicle top speed).'),
+        DeclareLaunchArgument(
+            'cov_ref_m2', default_value='1.0',
+            description='Reference GPS covariance for inverse-variance anchor gain'),
+        DeclareLaunchArgument(
+            'corridor_half_width', default_value='1.4',
+            description='SMPPI keepout corridor half-width (m). Widen only when '
+                        'the route is known to run off the mapped sidewalk.'),
 
         # --- t=0: hardware -------------------------------------------------
         _include('bring_up', 'sensors_start.launch.py',
@@ -105,23 +144,41 @@ def generate_launch_description():
         _include('bring_up', 'gnss_start.launch.py',
                  condition=IfCondition(with_gnss)),
 
-        # --- t=3: map service (serves /load_map) ---------------------------
+        # --- t=3: map service (serves /load_map, used by replan requests) ---
         TimerAction(period=3.0, actions=[
             _include('gmserver', 'map_service.launch.py', sim_args),
         ]),
 
         # --- t=5: localization (FAST-LIO + dual-EKF + navsat) --------------
         # Owns odom->base_link AND map->odom TF; datum = graph-map node[0].
+        # The anchor rate/covariance limits are the 2026-07-30 field fix and
+        # must be passed through, not left to the include's own defaults.
         TimerAction(period=5.0, actions=[
-            _include('robot_localization', 'scv_dual_ekf.launch.py', sim_args),
+            _include('robot_localization', 'scv_dual_ekf.launch.py', {
+                'use_sim_time': use_sim_time,
+                'with_fastlio': with_fastlio,
+                'map_anchor_pcd': '0',
+                'max_slew_mps': max_slew_mps,
+                'cov_ref_m2': cov_ref_m2,
+            }),
         ]),
 
-        # --- t=7: global planner (calls /load_map with map_file_path) ------
+        # --- t=7: route source ---------------------------------------------
+        # Default: publish the entire ordered route with start/goal left blank,
+        # so the behavior planner joins at the node nearest the robot. The A*
+        # planner is kept for runs that really do name two endpoints.
         TimerAction(period=7.0, actions=[
+            _include('sequential_global_planner', 'sequential_planner.launch.py', {
+                'use_sim_time': use_sim_time,
+                'map_file': map_file_path,
+                'explicit_endpoints': 'false',
+            }, condition=IfCondition(
+                PythonExpression(["'", route_source, "' == 'sequential'"]))),
             _include('scv_global_planner', 'path_planner.launch.py', {
                 'use_sim_time': use_sim_time,
                 'map_file_path': map_file_path,
-            }),
+            }, condition=IfCondition(
+                PythonExpression(["'", route_source, "' == 'graph'"]))),
         ]),
 
         # --- t=9: curb-safety perception (L1) ------------------------------
@@ -138,12 +195,19 @@ def generate_launch_description():
             _include('smppi', 'smppi_controller.launch.py', {
                 'use_sim_time': use_sim_time,
                 'enable_visualization': enable_visualization,
+                'corridor_half_width': corridor_half_width,
             }),
         ]),
 
         # --- t=15: behavior planner (L3) ------------------------------------
+        # /odometry/global, not the package default /odom: the graph nodes are
+        # map-frame, and /odom drifts away from map by however much the anchor
+        # has corrected. Matching against /odom picks the wrong nearest node.
         TimerAction(period=15.0, actions=[
             _include('simple_behavior_planner',
-                     'simple_behavior_planner.launch.py', sim_args),
+                     'simple_behavior_planner.launch.py', {
+                         'use_sim_time': use_sim_time,
+                         'current_position_topic': '/odometry/global',
+                     }),
         ]),
     ])

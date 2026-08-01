@@ -43,19 +43,35 @@ class SequentialPlannerNode(Node):
         
         # GPS subscription parameter
         self.declare_parameter('gps_topic', '/gps/fix')
-        
+
+        # 시작/종료 노드를 경로에 박아 넣을지. 기본은 False — 즉 빈 문자열을 보낸다.
+        # 그러면 behavior planner 가 경로의 첫 노드가 아니라 **로봇에 가장 가까운
+        # 노드**부터 따라간다(simple_behavior_planner_node.py:282). 경로 위 아무
+        # 지점에서나 출발할 수 있어야 하는데, 첫 노드를 강제하면 멀리 있는 시작점
+        # 으로 되돌아가려 한다.
+        self.declare_parameter('explicit_endpoints', False)
+
+        # 'first_node'          — 경로 첫 노드의 UtmInfo 를 map 원점으로 (기본)
+        # 'tiny_localization'   — 구 tiny_localization 노드에 파라미터 질의 (레거시)
+        self.declare_parameter('map_origin_source', 'first_node')
+
         # Get parameters
         self.map_file = self.get_parameter('map_file').get_parameter_value().string_value
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
         self.loop_path = self.get_parameter('loop_path').get_parameter_value().bool_value
         self.publish_freq = self.get_parameter('publish_frequency').get_parameter_value().double_value
         self.gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
+        self.explicit_endpoints = self.get_parameter(
+            'explicit_endpoints').get_parameter_value().bool_value
+        self.origin_source = self.get_parameter(
+            'map_origin_source').get_parameter_value().string_value
         
         # Map origin - will be set from localization map_origin topic
         self.map_origin_utm_easting = 0.0
         self.map_origin_utm_northing = 0.0
         self.map_origin_set = False
-        
+        self._max_sub_seen = 0
+
         # QoS profiles
         reliable_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -63,9 +79,21 @@ class SequentialPlannerNode(Node):
             depth=10
         )
         
+        # 경로는 딱 한 번 발행되므로 반드시 latched(TRANSIENT_LOCAL) 여야 한다.
+        # 기동 순서상 플래너(t=7s)가 소비자(smppi t=12s, behavior t=15s)보다
+        # 먼저 뜨고 t~9s 에 발행해버리는데, VOLATILE 이면 그 뒤에 구독한 쪽은
+        # 경로를 영영 못 받는다 — corridor_keepout 이 "No route yet" 을 무한
+        # 반복하며 keepout 없이 코스트맵을 통과시키던 원인.
+        # TRANSIENT_LOCAL 제공은 VOLATILE 요청과도 호환되므로 구독자 수정 불필요.
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1
+        )
+
         # Publishers
         self.path_pub = self.create_publisher(
-            PlannedPath, '/planned_path_detailed', reliable_qos)
+            PlannedPath, '/planned_path_detailed', latched_qos)
         self.nav_path_pub = self.create_publisher(
             Path, '/sequential_path_nav', reliable_qos)
         self.marker_pub = self.create_publisher(
@@ -214,8 +242,12 @@ class SequentialPlannerNode(Node):
         
         # Path metadata
         planned_path.path_id = "sequential_path"
-        planned_path.start_node_id = self.ordered_nodes[0] if self.ordered_nodes else ""
-        planned_path.goal_node_id = self.ordered_nodes[-1] if self.ordered_nodes else ""
+        if self.explicit_endpoints and self.ordered_nodes:
+            planned_path.start_node_id = self.ordered_nodes[0]
+            planned_path.goal_node_id = self.ordered_nodes[-1]
+        else:
+            planned_path.start_node_id = ""
+            planned_path.goal_node_id = ""
         planned_path.total_distance = 0.0  # Can calculate if needed
         planned_path.total_time = 0.0      # Can calculate if needed
         
@@ -249,9 +281,21 @@ class SequentialPlannerNode(Node):
             map_node.gps_info.longitude = node_data['GpsInfo']['Long']
             map_node.gps_info.alt = node_data['GpsInfo']['Alt']
             
-            # UTM info - use absolute coordinates in map frame
-            map_node.utm_info.easting = node_data['UtmInfo']['Easting']
-            map_node.utm_info.northing = node_data['UtmInfo']['Northing'] 
+            # PlannedPath 의 utm_info 는 **map 원점 상대 좌표**다. 절대 UTM 이
+            # 아니다 — A* 플래너도 발행 직전에 node[0] UTM 을 빼고
+            # (path_planner_node.cpp:1361), 소비자인 behavior planner 는 이 값을
+            # 그대로 map 프레임 x/y 로 써서 /odometry/global 과 거리 비교를 한다
+            # (path_manager.py:33,52).
+            #
+            # 여기서만 절대 UTM 을 넣고 있었다. 그러면 48만 대 −35 를 비교하게
+            # 되어 "최근접 노드"가 기하와 무관해진다 — 실측: 로봇을 B060 위에
+            # 놓았는데 28.6 m 떨어진 B032 를 골랐다. 같은 파일의
+            # create_nav_path_message 는 이미 원점을 빼고 있어 한 파일 안에서
+            # 두 메시지가 서로 다른 프레임을 쓰고 있었다.
+            map_node.utm_info.easting = (
+                node_data['UtmInfo']['Easting'] - self.map_origin_utm_easting)
+            map_node.utm_info.northing = (
+                node_data['UtmInfo']['Northing'] - self.map_origin_utm_northing)
             map_node.utm_info.zone = node_data['UtmInfo']['Zone']
             
             map_data.nodes.append(map_node)
@@ -334,13 +378,28 @@ class SequentialPlannerNode(Node):
         """Timer callback to publish path and visualization"""
         if not self.is_loaded or not self.auto_start or not self.map_origin_set:
             return
-        # Publish PlannedPath only once
-        if not self.path_published:
+        # 한 번만 발행하되, **구독자가 새로 붙으면 다시 발행한다.**
+        #
+        # latched(TRANSIENT_LOCAL) 만으로는 부족하다: QoS 호환성과 이력 전달은
+        # 별개라, VOLATILE 로 구독하는 쪽(behavior planner)은 자기가 붙기 전에
+        # 발행된 샘플을 받지 못한다. 기동 순서상 플래너(t=7s)가 소비자
+        # (behavior t=15s)보다 먼저 발행하므로, 고치지 않으면 경로가 아무에게도
+        # 도달하지 않는다. 구독자를 TRANSIENT_LOCAL 로 바꾸는 방법은 쓸 수 없다 —
+        # A* 플래너는 VOLATILE 로 발행해서 그쪽과 연결이 아예 끊긴다.
+        #
+        # 매 주기 재발행하지 않는 이유: 콜백이 최근접 노드 재정렬과 subgoal
+        # 재발행을 유발하므로 주행 중 계속 때리면 진행을 방해한다.
+        n_sub = self.path_pub.get_subscription_count()
+        if not self.path_published or n_sub > self._max_sub_seen:
             planned_path = self.create_planned_path_message()
             self.path_pub.publish(planned_path)
+            first = not self.path_published
             self.path_published = True
-            self.publish_status("Published sequential path once to behavior_planner")
-        
+            self._max_sub_seen = max(self._max_sub_seen, n_sub)
+            self.publish_status(
+                f"Published sequential path to {n_sub} subscriber(s)"
+                f"{' (first)' if first else ' (new subscriber joined)'}")
+
         # Continue publishing visualization for RViz
         nav_path = self.create_nav_path_message()
         self.nav_path_pub.publish(nav_path)
@@ -349,9 +408,43 @@ class SequentialPlannerNode(Node):
         markers = self.create_visualization_markers()
         self.marker_pub.publish(markers)
 
+    def set_origin_from_first_node(self) -> bool:
+        """Take the map frame origin from the route's first node.
+
+        The old path asked /localization/tiny_localization_node for the origin,
+        but that node is gone — robot_localization replaced it — so the query
+        never succeeded and publish_callback's map_origin_set gate stayed shut
+        forever. The planner loaded the map, reported success, and silently
+        published nothing.
+
+        node[0] is the right answer anyway, not a workaround: the navsat datum
+        in scv_dual_ekf.yaml is *defined* as the graph map's node[0], so the
+        map frame's origin already is this point. Reading it back from the map
+        keeps one source of truth instead of a constant copied into two files.
+        """
+        if not self.ordered_nodes:
+            return False
+        n = self.nodes_data.get(self.ordered_nodes[0], {})
+        utm = n.get('UtmInfo') or {}
+        if 'Easting' not in utm or 'Northing' not in utm:
+            self.get_logger().warn(
+                'first node has no UtmInfo — cannot set map origin')
+            return False
+        self.map_origin_utm_easting = float(utm['Easting'])
+        self.map_origin_utm_northing = float(utm['Northing'])
+        self.map_origin_set = True
+        self.get_logger().info(
+            f'map origin from first node {self.ordered_nodes[0]}: '
+            f'({self.map_origin_utm_easting:.2f}, '
+            f'{self.map_origin_utm_northing:.2f})')
+        return True
+
     def check_map_origin_params(self) -> None:
         """Check if map origin parameters are available from localization node"""
-        if not self.map_origin_set:
+        if not self.map_origin_set and self.origin_source == 'first_node':
+            if self.set_origin_from_first_node():
+                return
+        if not self.map_origin_set and self.origin_source == 'tiny_localization':
             try:
                 # Create a parameter client for the localization node
                 from rclpy.parameter import Parameter
