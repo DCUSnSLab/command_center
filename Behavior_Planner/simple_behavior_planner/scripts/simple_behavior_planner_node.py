@@ -254,12 +254,58 @@ class SimpleBehaviorPlannerNode(Node):
         pose_stamped = PoseStamped()
         pose_stamped.header = msg.header
         pose_stamped.pose = msg.pose.pose
+
+        # 순간이동 감지 → 재정렬. 최초 정렬은 위치추정이 수렴하기 전에 일어날
+        # 수 있다: map_anchor 부트스트랩은 (0,0)=datum=B000 이므로, 경로가
+        # 포즈보다 먼저 도착하면 정렬이 항상 B000 을 고르고 첫 GPS 스냅과
+        # 동시에 '도달 처리'까지 된다(bag 재생으로 실측: 정렬 0.2 s 뒤 3.9 m
+        # 스냅). 차량 최고속은 1.3 m/s 라 연속 포즈 간 점프가 임계를 넘으면
+        # 주행이 아니라 앵커 스냅/FAST-LIO 재초기화다 — 그때만 다시 정렬한다.
+        prev = self.current_pose
         self.current_pose = pose_stamped
+        if prev is not None and getattr(self, '_unpinned_route', False):
+            dt = ((msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+                  - (prev.header.stamp.sec + prev.header.stamp.nanosec * 1e-9))
+            dx = pose_stamped.pose.position.x - prev.pose.position.x
+            dy = pose_stamped.pose.position.y - prev.pose.position.y
+            jump = (dx * dx + dy * dy) ** 0.5
+            if jump > max(2.0, 5.0 * max(dt, 0.0)):
+                self.get_logger().warn(
+                    f'pose teleport {jump:.1f} m (dt={dt:.2f}s) — '
+                    're-aligning start node to converged position')
+                self._pending_align = True
+
+        if getattr(self, '_pending_align', False) and self._align_start_to_pose():
+            self._pending_align = False
+            # 정렬로 목표가 바뀌었으니 웨이포인트를 다시 내보낸다. 이걸 리셋하지
+            # 않으면 부트스트랩 때 낸 옛 목표(B000)가 제어기에 남아 있는다.
+            self.subgoal_published = False
+
+    def _align_start_to_pose(self) -> bool:
+        """현재 위치(map 프레임) 최근접 경로 노드를 시작 목표로 정렬."""
+        if self.current_pose is None or not self.path_manager.path_nodes:
+            return False
+        idx = self.path_manager.align_to_position(
+            self.current_pose.pose.position.x,
+            self.current_pose.pose.position.y)
+        node = self.path_manager.get_current_target_node()
+        self.get_logger().info(
+            f'start node unspecified -> nearest node idx {idx}'
+            f' ({node["id"] if node else "?"})')
+        return True
 
     def planned_path_callback(self, msg: PlannedPath):
         """경로 계획 콜백"""
         self.path_manager.update_path(msg)
         self.subgoal_published = False
+
+        # 시작 노드 미지정(start_node_id == '') 운용: 경로의 첫 노드가 아니라
+        # 현재 위치의 최근접 노드부터 추종 시작 (2026-07-30 필드 운용 변경).
+        # 명시된 start_node_id가 있으면 종전대로 첫 노드부터.
+        self._unpinned_route = not msg.start_node_id
+        if not msg.start_node_id:
+            if not self._align_start_to_pose():
+                self._pending_align = True
 
         # Update last goal node ID for replanning
         self._update_last_goal_node_id(msg)
