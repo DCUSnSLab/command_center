@@ -569,7 +569,10 @@ class MPPIMainNode(Node):
                 self.get_logger().info(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
         
         start_time = time.perf_counter()
-        
+
+        # 회두(K-turn) 게이트 — 목표가 등 뒤일 때만 후진을 허용한다.
+        self._turnaround_gate()
+
         try:
             # Convert MPPIState to internal format
             robot_pose = PoseStamped()
@@ -1016,6 +1019,63 @@ class MPPIMainNode(Node):
                     
         self.get_logger().info("Debug parameters updated")
     
+    def _turnaround_gate(self):
+        """목표가 '크게 뒤'에 있는 동안만 후진을 허용해 3점 회전을 가능하게 한다.
+
+        왜 필요한가 (2026-08-02 챔버 D1 실측): 모델이 Ackermann 이라 v=0 이면
+        yaw 이 변하지 않고(제자리 회전 불가), 최소 회전반경 1.69 m 로는 보도 폭
+        안에서 한 호 유턴이 물리적으로 불가하다. 전진 전용 속도범위에서 뒤쪽
+        목표는 '정지'가 국소최소가 된다. goal critic 의 회두 항이 방향 유인을
+        주고, 이 게이트가 후진을 풀어 K-turn 해를 탐색 가능하게 만든다.
+
+        · 켜짐: 목표 방위각 오차 > 100도  /  꺼짐: < 55도 (히스테리시스)
+        · 활성 중 속도범위 [-turnaround_rev_v, +turnaround_fwd_v] (저속),
+          해제 시 원래 범위 복원. 전환 시 제어열 reset 으로 동결 탈출.
+        """
+        if self.goal_state is None or self.robot_state is None:
+            return
+        sv = self.robot_state.state_vector
+        dx = float(self.goal_state[0]) - sv[0]
+        dy = float(self.goal_state[1]) - sv[1]
+        if dx * dx + dy * dy < 1.0:      # 목표 1 m 이내 — 회두 불필요/불안정 영역
+            err = 0.0
+        else:
+            import math as _m
+            err = abs(_m.atan2(_m.sin(_m.atan2(dy, dx) - sv[2]),
+                               _m.cos(_m.atan2(dy, dx) - sv[2])))
+        on_rad, off_rad = 1.745, 0.960   # 100도 / 55도
+        active = getattr(self, '_ta_active', False)
+        new_active = True if err > on_rad else (False if err < off_rad else active)
+        if new_active == active:
+            return
+        self._ta_active = new_active
+        base_min = self.vehicle_params.get('min_linear_velocity', 0.0)
+        base_max = self.vehicle_params.get('max_linear_velocity', 2.0)
+        min_w = self.vehicle_params.get('min_angular_velocity', -1.16)
+        max_w = self.vehicle_params.get('max_angular_velocity', 1.16)
+        if new_active:
+            v_lo, v_hi = -0.4, min(0.5, base_max)
+        else:
+            v_lo, v_hi = base_min, base_max
+        if hasattr(self.optimizer, 'update_velocity_limits'):
+            self.optimizer.update_velocity_limits(min_v=v_lo, max_v=v_hi,
+                                                  min_w=min_w, max_w=max_w)
+        elif hasattr(self.optimizer, 'set_action_bounds'):
+            self.optimizer.set_action_bounds(v_bounds=[v_lo, v_hi],
+                                             w_bounds=[min_w, max_w])
+        # 모션 모델의 자체 클램프도 같이 풀어야 한다 (옵티마이저와 별도 저장)
+        mm = getattr(self, 'motion_model', None)
+        if mm is not None:
+            if hasattr(mm, 'min_linear_velocity'):
+                mm.min_linear_velocity = v_lo
+            if hasattr(mm, 'max_linear_velocity'):
+                mm.max_linear_velocity = v_hi
+        if hasattr(self.optimizer, 'reset'):
+            self.optimizer.reset()
+        self.get_logger().warn(
+            f'[TURNAROUND] {"ON" if new_active else "OFF"} '
+            f'(bearing err {err:.2f} rad) -> v range [{v_lo:.1f},{v_hi:.1f}]')
+
     def _apply_velocity_limits(self, cmd_vel: Twist) -> Twist:
         """Apply velocity limits to command - MPPI already applies internal limits, so this is just a safety check"""
         # MPPI optimizer already applies proper velocity limits internally including reverse mode

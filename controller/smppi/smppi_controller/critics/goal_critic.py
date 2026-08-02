@@ -42,6 +42,11 @@ class GoalCritic(BaseCritic):
         # Behavior options
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', True)
         self.respect_reverse_heading = params.get('respect_reverse_heading', False)
+        # 회두 항 (compute_cost 말미 참조 — 목표가 등 뒤일 때만 활성)
+        self.turnaround_enabled = params.get('turnaround_enabled', True)
+        self.turnaround_on_deg = params.get('turnaround_on_deg', 100.0)
+        self.turnaround_off_deg = params.get('turnaround_off_deg', 55.0)
+        self.turnaround_weight = params.get('turnaround_weight', 2.0)
         self.yaw_blend_distance = params.get('yaw_blend_distance', 1.5)  # near-goal 헤딩 블렌딩
 
         # Debug
@@ -211,6 +216,38 @@ class GoalCritic(BaseCritic):
         
         # SIMPLIFIED: Only distance and progress terms active
         total_cost = distance_term + progress_term_scaled
+
+        # --- 회두(turn-around) 항: 목표가 '크게 뒤'에 있을 때만 켠다 ----------
+        # 거리-전용 비용의 구조적 함정: 전진 전용 속도범위에서 목표가 등 뒤면
+        # 어떤 전진 호도 당장은 거리를 늘리므로 '정지'가 국소최소가 된다
+        # (2026-08-02 챔버 D1 실측: Cmd v=0 ω=0 로 400 s 동결). 위에서 주석
+        # 처리된 전역 헤딩 항은 정상 추종 중 진동을 일으켜 꺼진 것이므로
+        # 되살리지 않는다 — 대신 게이트를 둔다:
+        #   · 켜짐: 현재 로봇 기준 목표 방위각 오차 > turnaround_on (기본 100도)
+        #   · 꺼짐: 오차 < turnaround_off (기본 55도, 히스테리시스로 채터링 방지)
+        # 게이트는 '현재 상태'로만 판정하므로 한 사이클의 K개 샘플이 전부 같은
+        # 항을 받는다(샘플 간 불연속 없음). 정상 추종 영역(목표가 전방)에서는
+        # 이 항이 0이라 기존 거동이 완전히 보존된다.
+        if getattr(self, 'turnaround_enabled', True):
+            on_rad = math.radians(getattr(self, 'turnaround_on_deg', 100.0))
+            off_rad = math.radians(getattr(self, 'turnaround_off_deg', 55.0))
+            w_turn = getattr(self, 'turnaround_weight', 2.0)
+            bearing = torch.atan2(lookahead_point[1] - current_pos[1],
+                                  lookahead_point[0] - current_pos[0])
+            err_now = torch.abs(torch.atan2(
+                torch.sin(bearing - robot_state[2]),
+                torch.cos(bearing - robot_state[2])))
+            active = getattr(self, '_turnaround_active', False)
+            if err_now > on_rad:
+                active = True
+            elif err_now < off_rad:
+                active = False
+            self._turnaround_active = active
+            if active:
+                final_yaws = traj_yaws[:, -1]
+                yaw_err = torch.abs(torch.atan2(torch.sin(final_yaws - bearing),
+                                                torch.cos(final_yaws - bearing)))
+                total_cost = total_cost + w_turn * self._huber(yaw_err, delta=0.5)
         
         # === DEBUG OUTPUT (simplified for distance-only tracking) ===
         lookahead_cpu = lookahead_point.detach().cpu().numpy()

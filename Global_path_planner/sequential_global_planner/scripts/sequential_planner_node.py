@@ -21,7 +21,7 @@ from utils.visualization import PathVisualizer
 from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import Header, String
 from visualization_msgs.msg import Marker, MarkerArray
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import NavSatFix
 
 # Custom messages
@@ -55,6 +55,13 @@ class SequentialPlannerNode(Node):
         # 'tiny_localization'   — 구 tiny_localization 노드에 파라미터 질의 (레거시)
         self.declare_parameter('map_origin_source', 'first_node')
 
+        # 임의 목적지 라우팅: goal_topic 으로 노드 ID(String)가 오면 현재 위치
+        # 최근접 노드→목적지의 링크 최단 경로를 계산해 그 구간만 발행한다.
+        # 링크는 **무방향**으로 본다 — 그래프 나열 순서와 반대여도 목적지까지
+        # 최단이면 그 방향으로 간다 (2026-08-02 운용 변경).
+        self.declare_parameter('goal_topic', '/goal_node_id')
+        self.declare_parameter('position_topic', '/odometry/global')
+
         # Get parameters
         self.map_file = self.get_parameter('map_file').get_parameter_value().string_value
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
@@ -65,6 +72,17 @@ class SequentialPlannerNode(Node):
             'explicit_endpoints').get_parameter_value().bool_value
         self.origin_source = self.get_parameter(
             'map_origin_source').get_parameter_value().string_value
+        goal_topic = self.get_parameter(
+            'goal_topic').get_parameter_value().string_value
+        position_topic = self.get_parameter(
+            'position_topic').get_parameter_value().string_value
+
+        # 임의 목적지 라우팅 상태
+        self.active_route: Optional[List[str]] = None  # None = 전체 체인 발행
+        self.current_xy: Optional[tuple] = None        # map 프레임 현재 위치
+        self.create_subscription(String, goal_topic, self.goal_callback, 10)
+        self.create_subscription(Odometry, position_topic,
+                                 self.position_callback, 10)
         
         # Map origin - will be set from localization map_origin topic
         self.map_origin_utm_easting = 0.0
@@ -233,6 +251,109 @@ class SequentialPlannerNode(Node):
                         f'Calculated heading for node {node.id}: {calculated_heading:.2f} degrees'
                     )
     
+    # ===== 임의 목적지 라우팅 =====
+
+    def _node_rel_xy(self, node_id: str) -> tuple:
+        """노드의 map 원점 상대 좌표 (behavior planner 가 보는 프레임과 동일)."""
+        u = self.nodes_data[node_id]['UtmInfo']
+        return (u['Easting'] - self.map_origin_utm_easting,
+                u['Northing'] - self.map_origin_utm_northing)
+
+    def position_callback(self, msg: Odometry) -> None:
+        self.current_xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+    def _nearest_node_id(self, x: float, y: float) -> Optional[str]:
+        best, best_d = None, float('inf')
+        for nid in self.nodes_data:
+            nx, ny = self._node_rel_xy(nid)
+            d = (nx - x) ** 2 + (ny - y) ** 2
+            if d < best_d:
+                best, best_d = nid, d
+        return best
+
+    def _shortest_route(self, src: str, dst: str) -> Optional[List[str]]:
+        """링크 그래프 무방향 Dijkstra. 간선 가중치는 노드 간 유클리드 거리.
+
+        Link 의 Length 필드를 쓰지 않는 이유: 이 지도들의 Length 는 자리채움
+        (전부 0.001)이라 최단 '홉 수' 경로가 돼버린다. 좌표에서 직접 잰다.
+        """
+        import heapq
+        adj: Dict[str, List[tuple]] = {}
+        for link in self.links_data:
+            a, b = link['FromNodeID'], link['ToNodeID']
+            if a not in self.nodes_data or b not in self.nodes_data:
+                continue
+            ax, ay = self._node_rel_xy(a)
+            bx, by = self._node_rel_xy(b)
+            w = math.hypot(ax - bx, ay - by)
+            adj.setdefault(a, []).append((b, w))
+            adj.setdefault(b, []).append((a, w))   # 무방향
+
+        dist = {src: 0.0}
+        prev: Dict[str, str] = {}
+        pq = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if u == dst:
+                break
+            if d > dist.get(u, float('inf')):
+                continue
+            for v, w in adj.get(u, []):
+                nd = d + w
+                if nd < dist.get(v, float('inf')):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(pq, (nd, v))
+        if dst not in dist:
+            return None
+        route = [dst]
+        while route[-1] != src:
+            route.append(prev[route[-1]])
+        return route[::-1]
+
+    def goal_callback(self, msg: String) -> None:
+        goal = msg.data.strip()
+        if goal not in self.nodes_data:
+            self.get_logger().error(f"goal '{goal}' 은 지도에 없는 노드")
+            return
+        if self.current_xy is None:
+            # 위치를 아직 못 받았으면 라우팅 불가. 대기 큐를 두지 않는 이유:
+            # 부트스트랩 (0,0)=datum 포즈로 라우팅하면 조용히 엉뚱한 출발
+            # 노드가 잡힌다(2단계에서 실측한 레이스와 동일 유형). 명시적으로
+            # 거절하고 운용자가 위치추정 수렴 후 다시 보내게 한다.
+            self.get_logger().error(
+                f"goal '{goal}': 현재 위치 미수신 — 위치추정 수렴 후 재전송 요망")
+            return
+        src = self._nearest_node_id(*self.current_xy)
+        route = self._shortest_route(src, goal)
+        if route is None:
+            self.get_logger().error(f'{src} → {goal} 경로 없음 (링크 단절)')
+            return
+        self.active_route = route
+        self.path_published = False        # publish_callback 이 즉시 재발행
+        self.get_logger().info(
+            f'goal {goal}: {src} 에서 {len(route)}개 노드 경유 '
+            f'({" ".join(route[:6])}{" ..." if len(route) > 6 else ""})')
+
+    def _route_headings(self, seq: List[str]) -> Dict[str, float]:
+        """진행 방향 기준 헤딩. 지도의 Heading 은 그래프 순방향 기준이라
+        역방향 주행 구간에서는 정반대가 된다 — 저장값을 무시하고 재계산한다."""
+        out: Dict[str, float] = {}
+        for i, nid in enumerate(seq):
+            j = min(i + 1, len(seq) - 1)
+            k = i if i + 1 < len(seq) else max(0, i - 1)
+            fx, fy = self._node_rel_xy(seq[k])
+            tx, ty = self._node_rel_xy(seq[j])
+            if (fx, fy) == (tx, ty):
+                out[nid] = 0.0
+            else:
+                u_from = self.nodes_data[seq[k]]['UtmInfo']
+                u_to = self.nodes_data[seq[j]]['UtmInfo']
+                out[nid] = self.calculate_heading(
+                    u_from['Easting'], u_from['Northing'],
+                    u_to['Easting'], u_to['Northing'])
+        return out
+
     def create_planned_path_message(self) -> PlannedPath:
         """Create PlannedPath message compatible with behavior_planner"""
         planned_path = PlannedPath()
@@ -240,22 +361,30 @@ class SequentialPlannerNode(Node):
         planned_path.header.stamp = self.get_clock().now().to_msg()
         planned_path.header.frame_id = 'map'
         
+        # 발행 시퀀스: 목적지 라우팅이 활성화됐으면 그 구간, 아니면 전체 체인
+        seq = self.active_route if self.active_route else self.ordered_nodes
+        routed = self.active_route is not None
+        route_headings = self._route_headings(seq) if routed else {}
+
         # Path metadata
-        planned_path.path_id = "sequential_path"
-        if self.explicit_endpoints and self.ordered_nodes:
-            planned_path.start_node_id = self.ordered_nodes[0]
-            planned_path.goal_node_id = self.ordered_nodes[-1]
+        planned_path.path_id = (f'route_to_{seq[-1]}' if routed
+                                else 'sequential_path')
+        if self.explicit_endpoints and seq:
+            planned_path.start_node_id = seq[0]
+            planned_path.goal_node_id = seq[-1]
         else:
+            # start 는 비운다(최근접 정렬 유지). 라우팅 시 goal 은 명시해
+            # behavior planner 의 재계획 북키핑이 실제 목적지를 갖게 한다.
             planned_path.start_node_id = ""
-            planned_path.goal_node_id = ""
+            planned_path.goal_node_id = seq[-1] if routed and seq else ""
         planned_path.total_distance = 0.0  # Can calculate if needed
         planned_path.total_time = 0.0      # Can calculate if needed
-        
+
         # Create MapData with nodes and links
         map_data = MapData()
-        
+
         # Convert nodes to MapNode messages
-        for node_id in self.ordered_nodes:
+        for node_id in seq:
             node_data = self.nodes_data[node_id]
             
             map_node = MapNode()
@@ -270,7 +399,11 @@ class SequentialPlannerNode(Node):
             map_node.hist_type = node_data.get('HistType', '02A')
             map_node.hist_remark = node_data.get('HistRemark', '')
             # Handle heading field - use value if present, default to 0.0 if missing
-            if 'Heading' in node_data:
+            if routed:
+                # 저장 헤딩은 그래프 순방향 기준 — 역방향 구간에서 정반대가
+                # 되므로 진행 방향으로 재계산한 값을 쓴다.
+                map_node.heading = route_headings.get(node_id, 0.0)
+            elif 'Heading' in node_data:
                 map_node.heading = node_data['Heading']
             else:
                 map_node.heading = 0.0
@@ -305,8 +438,8 @@ class SequentialPlannerNode(Node):
             from_id = link_data['FromNodeID']
             to_id = link_data['ToNodeID']
             
-            # Only include links that are part of our sequential path
-            if from_id in self.ordered_nodes and to_id in self.ordered_nodes:
+            # Only include links that are part of the published sequence
+            if from_id in seq and to_id in seq:
                 map_link = MapLink()
                 map_link.id = link_data.get('ID', '')
                 map_link.admin_code = link_data.get('AdminCode', '110')
@@ -376,7 +509,12 @@ class SequentialPlannerNode(Node):
     
     def publish_callback(self) -> None:
         """Timer callback to publish path and visualization"""
-        if not self.is_loaded or not self.auto_start or not self.map_origin_set:
+        if not self.is_loaded or not self.map_origin_set:
+            return
+        # auto_start=false 는 '전체 체인 자동 발행'만 끈다. 목적지 라우팅
+        # (goal_topic 수신) 경로는 auto_start 와 무관하게 발행돼야 한다 —
+        # 목적지 지정 운용은 대기 상태에서 goal 을 받고 출발하는 방식이다.
+        if not self.auto_start and self.active_route is None:
             return
         # 한 번만 발행하되, **구독자가 새로 붙으면 다시 발행한다.**
         #
