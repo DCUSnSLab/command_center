@@ -1048,6 +1048,27 @@ class MPPIMainNode(Node):
         new_active = True if err > on_rad else (False if err < off_rad else active)
         if new_active == active:
             return
+
+        # 활성 전 공간 검사: 회전 기동이 들어갈 여유가 costmap 에서 확인될
+        # 때만 K-turn 을 허용한다. 여유가 없으면 critic 회두 항까지 봉인한다 —
+        # 방향 유인만 있고 공간이 없으면 전진 호가 연석 쪽으로 파고들다
+        # 모서리를 스친다(2026-08-02 D1c 실측). 둘 다 꺼지면 뒤쪽 목표에서
+        # 정지 → behavior BLOCKED 에스컬레이션이 운용자를 부른다(의도된 안전
+        # 동작). 검사는 1 s 스로틀 — 거부 상태에서 매 사이클 재검사하지 않는다.
+        if new_active:
+            now = time.monotonic()
+            if now - getattr(self, '_ta_check_t', 0.0) < 1.0:
+                return
+            self._ta_check_t = now
+            if not self._turnaround_clearance_ok():
+                self._set_critic_turnaround(False)
+                self.get_logger().warn(
+                    '[TURNAROUND] refused: insufficient clearance '
+                    f'(< {getattr(self, "turnaround_clear_radius", 1.5)} m) '
+                    '— holding position, BLOCKED escalation will follow',
+                    throttle_duration_sec=5.0)
+                return
+            self._set_critic_turnaround(True)
         self._ta_active = new_active
         base_min = self.vehicle_params.get('min_linear_velocity', 0.0)
         base_max = self.vehicle_params.get('max_linear_velocity', 2.0)
@@ -1075,6 +1096,65 @@ class MPPIMainNode(Node):
         self.get_logger().warn(
             f'[TURNAROUND] {"ON" if new_active else "OFF"} '
             f'(bearing err {err:.2f} rad) -> v range [{v_lo:.1f},{v_hi:.1f}]')
+
+    def _turnaround_clearance_ok(self) -> bool:
+        """로봇 중심 반경 turnaround_clear_radius(기본 1.8 m) 원판에 lethal
+        셀이 없어야 K-turn 을 허용한다.
+
+        1.5 m 근거: 회전 스윕(footprint 대각 반 0.62 + 패딩 0.15 = 0.77) +
+        여유 0.7. 이 값이 성립하는 전제는 **벽이 진실한 위치에 선다**는 것 —
+        curb_detection 의 그늘 경계 마킹(shadow_edge_cells)이 물리 연석선에
+        벽을 세우기 전에는 below-grade 벽이 실제 낙차보다 ~1.3 m 바깥(보이는
+        도로면 시작점)에 있어서, 검사 반경을 2.2 m 까지 키워도 근본이 안
+        잡혔다(D1e/D1f 실측: 0.75 m 옆 연석을 1.2/1.8 m 검사가 통과). 지금은
+        시작점 검사가 즉시 스윕만 막고, 기동 '중'의 보호는 진실한 벽 +
+        연석 기억이 담당한다. costmap 미수신이면 보수적으로 거부한다."""
+        g = self.latest_costmap
+        if g is None or self.robot_state is None:
+            return False
+        res = g.info.resolution
+        W, H = g.info.width, g.info.height
+        ox = g.info.origin.position.x
+        oy = g.info.origin.position.y
+        rx = float(self.robot_state.state_vector[0])
+        ry = float(self.robot_state.state_vector[1])
+        rad = float(getattr(self, 'turnaround_clear_radius', 1.5))
+        thr = int(getattr(self, 'turnaround_lethal_thr', 90))
+        ci = int((rx - ox) / res)
+        cj = int((ry - oy) / res)
+        rc = int(rad / res) + 1
+        i0, i1 = max(0, ci - rc), min(W, ci + rc + 1)
+        j0, j1 = max(0, cj - rc), min(H, cj + rc + 1)
+        if i1 <= i0 or j1 <= j0:
+            return False                     # 로봇이 costmap 밖 — 판단 불가
+        d = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        sub = d[j0:j1, i0:i1]
+        jj, ii = np.mgrid[j0:j1, i0:i1]
+        cx = (ii + 0.5) * res + ox
+        cy = (jj + 0.5) * res + oy
+        inside = (cx - rx) ** 2 + (cy - ry) ** 2 <= rad * rad
+        n_lethal = int(((sub >= thr) & inside).sum())
+        if n_lethal:
+            self.get_logger().info(
+                f'[TURNAROUND] clearance check: {n_lethal} lethal cell(s) '
+                f'within {rad:.1f} m', throttle_duration_sec=5.0)
+        return n_lethal == 0
+
+    def _set_critic_turnaround(self, enabled: bool):
+        """goal critic 의 회두 항을 켜고 끈다 (공간 검사와 연동)."""
+        crit = getattr(self, '_ta_critic', None)
+        if crit is None:
+            for c in getattr(self.optimizer, 'critics', []):
+                if hasattr(c, 'turnaround_enabled'):
+                    crit = c
+                    break
+            if crit is None:
+                return
+            self._ta_critic = crit
+        if crit.turnaround_enabled != enabled:
+            crit.turnaround_enabled = enabled
+            self.get_logger().info(
+                f'[TURNAROUND] goal-critic turn term {"ON" if enabled else "OFF"}')
 
     def _apply_velocity_limits(self, cmd_vel: Twist) -> Twist:
         """Apply velocity limits to command - MPPI already applies internal limits, so this is just a safety check"""
