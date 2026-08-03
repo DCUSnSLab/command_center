@@ -408,8 +408,33 @@ class SimpleBehaviorPlannerNode(Node):
         self._tick_blocked_monitor()
 
         # Waypoint publishing
+        #
+        # 앵커 이동 시 재발행: 웨이포인트의 odom 좌표는 발행 순간의 map→odom
+        # 변환으로 고정되는데, 앵커(특히 RTK 부재의 EMA 추종)는 계속 움직인다.
+        # 재발행 없이는 목표의 '물리' 위치가 앵커 이동량만큼 틀어진다 —
+        # 2026-08-03 필드 실측: 기동 후 정차 대기 중 map 거리 14.6 m 목표가
+        # 제어기에는 35.4 m 로 보였다(발행 후 앵커 ~20 m 이동).
+        try:
+            tr = self.waypoint_publisher.tf_buffer.lookup_transform(
+                'odom', 'map', rclpy.time.Time())
+            t = tr.transform.translation
+            cur = (t.x, t.y)
+            last = getattr(self, '_wp_tf_at_publish', None)
+            if self.subgoal_published and last is not None:
+                dx = cur[0] - last[0]
+                dy = cur[1] - last[1]
+                if (dx * dx + dy * dy) ** 0.5 > 0.5:
+                    self.get_logger().info(
+                        f'map→odom anchor moved '
+                        f'{(dx * dx + dy * dy) ** 0.5:.2f} m since last '
+                        'waypoint publish — refreshing waypoints')
+                    self.subgoal_published = False
+            self._wp_tf_now = cur
+        except Exception:
+            pass
         if not self.subgoal_published:
             self._publish_waypoints()
+            self._wp_tf_at_publish = getattr(self, '_wp_tf_now', None)
 
     def _is_ready_for_planning(self) -> bool:
         """계획 준비 상태 확인"""
