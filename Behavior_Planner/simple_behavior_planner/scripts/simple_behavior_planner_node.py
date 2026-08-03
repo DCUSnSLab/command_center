@@ -16,7 +16,7 @@ from std_msgs.msg import Bool, String, Header, Int32
 
 from command_center_interfaces.msg import (
     PlannedPath, ControllerGoalStatus, MultipleWaypoints,
-    MPPIParams, PauseCommand, RequestReplan
+    MPPIParams, PauseCommand, RequestReplan, TargetWaypoints
 )
 
 # Local modules
@@ -192,6 +192,12 @@ class SimpleBehaviorPlannerNode(Node):
         self.request_replan_pub = self.create_publisher(
             RequestReplan, self.request_replan_topic, self.reliable_qos)
 
+        # waypoint_manage 로의 의미 목표 발행 (waypoint 계층 분리; DESIGN: waypoint_manage/README)
+        #   waypoint_mode 'external' 이면 내부 odom-waypoint 발행은 생략되고
+        #   waypoint_manage 가 /multiple_waypoints 를 담당한다.
+        self.target_waypoints_pub = self.create_publisher(
+            TargetWaypoints, '/target_waypoints', self.reliable_qos)
+
     def _link_module_publishers(self):
         """모듈에 발행자 연결"""
         # Waypoint publisher
@@ -349,6 +355,21 @@ class SimpleBehaviorPlannerNode(Node):
             if self.behavior_controller.update_behavior(current_node_type):
                 self.safety_monitor.update_behavior_type(current_node_type)
 
+    def _publish_target_waypoints(self, current_target, next_nodes, path_info):
+        """waypoint_manage 로 의미 목표(TargetWaypoints) 발행"""
+        msg = TargetWaypoints()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.path_id = path_info.get('path_id', '')
+        msg.current_node_id = current_target['id']
+        msg.next_node_ids = [n['id'] for n in next_nodes]
+        msg.current_waypoint_index = path_info.get('current_index', 0)
+        msg.total_waypoints = path_info.get('total_nodes', 0)
+        msg.is_final_waypoint = path_info.get('is_final_node', False)
+        msg.speed_limit = 0.0              # 0 = 기본값 (BT 도입 시 행동별로 지정)
+        msg.goal_reached_threshold = 0.0
+        msg.recalc_mode = ''               # passthrough (BT 도입 시 densify/offset 등)
+        self.target_waypoints_pub.publish(msg)
+
     def _publish_waypoints(self):
         """웨이포인트 발행"""
         current_target = self.path_manager.get_current_target_node()
@@ -358,7 +379,11 @@ class SimpleBehaviorPlannerNode(Node):
         next_nodes = self.path_manager.get_next_nodes()
         path_info = self.path_manager.get_path_info()
 
-        self.waypoint_publisher.publish_waypoints(current_target, next_nodes, path_info)
+        # 의미 목표 (노드 ID) — waypoint_manage 가 좌표/프레임/가드 처리
+        self._publish_target_waypoints(current_target, next_nodes, path_info)
+        if self.waypoint_mode != 'external':
+            # 레거시 경로: BP 가 직접 odom waypoint 발행 (waypoint_manage 미사용 시)
+            self.waypoint_publisher.publish_waypoints(current_target, next_nodes, path_info)
         self.subgoal_published = True
 
         self.get_logger().info(f'Published waypoints: current={current_target["id"]}, '

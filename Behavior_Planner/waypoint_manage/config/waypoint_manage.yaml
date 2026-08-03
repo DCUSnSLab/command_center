@@ -1,0 +1,18 @@
+waypoint_manage:
+  ros__parameters:
+    topics:
+      target_waypoints: "/target_waypoints"          # BP/BT -> 의미 목표
+      multiple_waypoints: "/multiple_waypoints"      # -> MPPI (기존 규약)
+      graph: "/map_provider_node/graph"
+      utm: "/map_provider_node/utm"
+      localization_status: "/fgo/status"             # 구 스택(모드매니저)이라면 미발행 -> 항상 OK 취급
+    frames:
+      map: "map"
+      odom: "odom"
+    update_rate_hz: 5.0        # 같은 타깃 재변환(보정 반영) 주기
+    heartbeat_rate_hz: 2.0     # 갱신 없을 때 재발행 주기
+    guard:
+      deadband_m: 0.3          # 이보다 작은 보정은 무시 (목표 흔들림 방지)
+      sanity_m: 3.0            # 이보다 큰 보정은 거부 (localization 점프 의심)
+      slew_rate_mps: 0.5       # 통과한 보정도 초당 이 속도로만 이동 (스텝 -> 램프)
+      freeze_when_not_ok: true # /fgo/status != OK 이면 waypoint 동결
