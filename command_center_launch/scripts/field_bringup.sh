@@ -10,7 +10,10 @@
 #   field_bringup.sh --record                         # 기동 + bag 기록
 #   field_bringup.sh route_source:=graph              # 인자는 그대로 런치에 전달
 #   field_bringup.sh --record map_file_path:=/x.json
-set -uo pipefail
+#
+# set -u 는 colcon setup.bash 소싱 **후에** 켠다. 먼저 켜면 setup.bash 의
+# unbound 변수에서 조용히 죽는다 — 이 저장소에서 네 번째로 밟은 함정.
+set -o pipefail
 
 WS=${SCV_WS:-/home/scv/SCV_park}
 LOGDIR=${SCV_LOGDIR:-/home/scv/field_$(date +%Y%m%d_%H%M%S)}
@@ -40,6 +43,7 @@ ip link show can0 | grep -o "state [A-Z]*" | sed 's/^/[bringup] can0 /'
 source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
 source "$WS/install/setup.bash"
+set -u
 
 echo "[bringup] field_drive.launch.py ${ARGS[*]:-(기본 인자)}"
 nohup ros2 launch command_center_launch field_drive.launch.py "${ARGS[@]}" \
