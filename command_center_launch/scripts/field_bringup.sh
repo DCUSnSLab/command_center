@@ -71,6 +71,7 @@ if [ "$RECORD" = 1 ]; then
     /gps/fix_gated /odometry/global /map_anchor/mode /odom /odometry/fast_lio \
     /costmap /costmap_keepout /behavior_status \
     /planned_path_detailed /multiple_waypoints \
+    /vehicle/mux_status /vehicle/estop_status /final_cmd /remote/cmd_mode \
     > "$LOGDIR/record.log" 2>&1 &
   echo "[bringup] record pid $!"
 fi

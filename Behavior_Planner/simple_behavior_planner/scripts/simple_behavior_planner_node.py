@@ -247,6 +247,27 @@ class SimpleBehaviorPlannerNode(Node):
         self.get_logger().info(f'Node type triggers: {self.node_type_triggers}')
         self.get_logger().info(f'Initial route type: {self.current_route_type}')
 
+        # 수동/자율 모드 전이 로그 (2026-08-03 필드 분석에서 추가).
+        # 사후 분석 때 "이 구간이 수동인가 자율인가"를 데이터로 답할 수 없어
+        # GPS 급이동·우회 구간 해석이 모호했다. mux 의 /vehicle/mux_status 를
+        # 구독해 전이만 INFO 로 남긴다. 메시지 패키지가 없는 환경(시뮬 등)
+        # 에서는 조용히 생략 — 하드 의존을 만들지 않는다.
+        try:
+            from teleop_rover_msgs.msg import MuxStatus
+            self._last_mux = None
+
+            def _mux_cb(m):
+                key = (m.mode, m.cmd_source, m.nav_active)
+                if key != self._last_mux:
+                    self.get_logger().info(
+                        f'[MODE] mux mode={m.mode} source={m.cmd_source} '
+                        f'nav_active={m.nav_active} teleop={m.teleop_active}')
+                    self._last_mux = key
+            self.create_subscription(MuxStatus, '/vehicle/mux_status',
+                                     _mux_cb, 10)
+        except ImportError:
+            self.get_logger().info('teleop_rover_msgs 없음 — mux 모드 로그 생략')
+
     # ===== Callback Methods =====
 
     def current_pose_callback(self, msg: Odometry):
