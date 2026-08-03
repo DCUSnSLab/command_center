@@ -51,9 +51,30 @@ class SequentialPlannerNode(Node):
         # 으로 되돌아가려 한다.
         self.declare_parameter('explicit_endpoints', False)
 
-        # 'first_node'          — 경로 첫 노드의 UtmInfo 를 map 원점으로 (기본)
-        # 'tiny_localization'   — 구 tiny_localization 노드에 파라미터 질의 (레거시)
-        self.declare_parameter('map_origin_source', 'first_node')
+        # map 원점 소스:
+        # 'datum'      — 아래 datum_utm_* 고정값 (기본). 위치추정 navsat datum 과
+        #                같은 점이어야 하며, 이렇게 하면 **node0 가 datum 이 아닌
+        #                지도**(다른 구역에서 재배치된 jeju/mando 계열)도 같은
+        #                map 프레임에서 그대로 동작한다. 종전 'first_node' 방식은
+        #                지도 첫 노드가 datum 과 일치할 때만 우연히 맞았다 —
+        #                jeju 지도는 첫 노드가 datum 에서 58 m 떨어져 있어 모든
+        #                좌표가 그만큼 틀어진다.
+        # 'first_node' — 경로 첫 노드의 UtmInfo (datum==node0 지도 전용, 챔버 등)
+        # 'tiny_localization' — 레거시 파라미터 질의
+        self.declare_parameter('map_origin_source', 'datum')
+        # scv_dual_ekf.yaml 의 datum(35.91361, 128.80308)의 UTM 등가값.
+        # datum 을 바꾸면 여기도 함께 바꿔야 한다 (launch 인자로 관통됨).
+        self.declare_parameter('datum_utm_easting', 482232.7)
+        self.declare_parameter('datum_utm_northing', 3974384.47)
+
+        # 기동 시 목적지 라우팅 (시나리오 런치용):
+        #   initial_goal_node  — 지정 시 goal_topic 을 기다리지 않고 이 노드로
+        #                        라우팅한다. 위치 수신 전이면 주기적으로 재시도.
+        #   initial_start_node — 지정 시 최근접 대신 이 노드에서 출발하는 경로를
+        #                        만들고 start 를 고정(pinned)해 발행한다. 차량을
+        #                        해당 노드에 세워 두고 시작하는 시나리오용.
+        self.declare_parameter('initial_goal_node', '')
+        self.declare_parameter('initial_start_node', '')
 
         # 임의 목적지 라우팅: goal_topic 으로 노드 ID(String)가 오면 현재 위치
         # 최근접 노드→목적지의 링크 최단 경로를 계산해 그 구간만 발행한다.
@@ -72,6 +93,16 @@ class SequentialPlannerNode(Node):
             'explicit_endpoints').get_parameter_value().bool_value
         self.origin_source = self.get_parameter(
             'map_origin_source').get_parameter_value().string_value
+        self.datum_utm_e = self.get_parameter(
+            'datum_utm_easting').get_parameter_value().double_value
+        self.datum_utm_n = self.get_parameter(
+            'datum_utm_northing').get_parameter_value().double_value
+        self.initial_goal = self.get_parameter(
+            'initial_goal_node').get_parameter_value().string_value.strip()
+        self.initial_start = self.get_parameter(
+            'initial_start_node').get_parameter_value().string_value.strip()
+        self._initial_routed = False
+        self.route_pinned_start = False
         goal_topic = self.get_parameter(
             'goal_topic').get_parameter_value().string_value
         position_topic = self.get_parameter(
@@ -330,6 +361,7 @@ class SequentialPlannerNode(Node):
             self.get_logger().error(f'{src} → {goal} 경로 없음 (링크 단절)')
             return
         self.active_route = route
+        self.route_pinned_start = False    # 런타임 goal 은 항상 최근접 출발
         self.path_published = False        # publish_callback 이 즉시 재발행
         self.get_logger().info(
             f'goal {goal}: {src} 에서 {len(route)}개 노드 경유 '
@@ -369,7 +401,9 @@ class SequentialPlannerNode(Node):
         # Path metadata
         planned_path.path_id = (f'route_to_{seq[-1]}' if routed
                                 else 'sequential_path')
-        if self.explicit_endpoints and seq:
+        if (self.explicit_endpoints or (routed and self.route_pinned_start)) \
+                and seq:
+            # pinned: behavior planner 가 경로 머리(=지정 시작 노드)부터 따른다
             planned_path.start_node_id = seq[0]
             planned_path.goal_node_id = seq[-1]
         else:
@@ -577,11 +611,60 @@ class SequentialPlannerNode(Node):
             f'{self.map_origin_utm_northing:.2f})')
         return True
 
+    def _try_initial_route(self) -> None:
+        """시나리오 런치의 initial_goal_node 를 라우팅한다 (성공할 때까지 재시도).
+
+        위치 수신 전에는 최근접 출발 라우팅이 불가능하므로 조용히 다음 틱을
+        기다린다 — goal_topic 경로의 '명시적 거절'과 달리 여기는 기동 시퀀스라
+        재시도가 맞다. initial_start_node 가 있으면 위치 없이 즉시 라우팅한다."""
+        if self._initial_routed or not self.initial_goal or not self.is_loaded \
+                or not self.map_origin_set:
+            return
+        goal = self.initial_goal
+        if goal not in self.nodes_data:
+            self.get_logger().error(
+                f"initial_goal_node '{goal}' 은 지도에 없음 — 무시")
+            self._initial_routed = True
+            return
+        if self.initial_start:
+            src = self.initial_start
+            if src not in self.nodes_data:
+                self.get_logger().error(
+                    f"initial_start_node '{src}' 은 지도에 없음 — 무시")
+                self._initial_routed = True
+                return
+            pinned = True
+        else:
+            if self.current_xy is None:
+                return                      # 위치 대기 — 다음 틱 재시도
+            src = self._nearest_node_id(*self.current_xy)
+            pinned = False
+        route = self._shortest_route(src, goal)
+        if route is None:
+            self.get_logger().error(f'초기 라우팅 {src} → {goal} 경로 없음')
+            self._initial_routed = True
+            return
+        self.active_route = route
+        self.route_pinned_start = pinned
+        self.path_published = False
+        self._initial_routed = True
+        self.get_logger().info(
+            f'초기 라우팅 {src} → {goal}: {len(route)}개 노드'
+            f'{" (start 고정)" if pinned else " (최근접 출발)"}')
+
     def check_map_origin_params(self) -> None:
         """Check if map origin parameters are available from localization node"""
+        if not self.map_origin_set and self.origin_source == 'datum':
+            self.map_origin_utm_easting = self.datum_utm_e
+            self.map_origin_utm_northing = self.datum_utm_n
+            self.map_origin_set = True
+            self.get_logger().info(
+                f'map origin = datum ({self.datum_utm_e:.2f}, '
+                f'{self.datum_utm_n:.2f})')
         if not self.map_origin_set and self.origin_source == 'first_node':
             if self.set_origin_from_first_node():
                 return
+        self._try_initial_route()
         if not self.map_origin_set and self.origin_source == 'tiny_localization':
             try:
                 # Create a parameter client for the localization node

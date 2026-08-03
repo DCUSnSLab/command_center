@@ -121,6 +121,16 @@ def generate_launch_description():
                         "start/goal pinned (drive on from wherever you are); "
                         "'graph' uses gmserver + A* between named endpoints."),
         DeclareLaunchArgument(
+            'goal_node', default_value='',
+            description='Scenario goal: route to this node at startup '
+                        '(nearest-node start unless start_node is set). '
+                        'Empty = follow the whole route to its end.'),
+        DeclareLaunchArgument(
+            'start_node', default_value='',
+            description='Scenario start: with goal_node, route FROM this node '
+                        'and pin it (vehicle is expected to be placed there). '
+                        'Empty = start from the node nearest the robot.'),
+        DeclareLaunchArgument(
             'with_fastlio', default_value='true',
             description='FAST-LIO odometry source for the odom EKF'),
         DeclareLaunchArgument(
@@ -172,6 +182,8 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'map_file': map_file_path,
                 'explicit_endpoints': 'false',
+                'goal_node': LaunchConfiguration('goal_node', default=''),
+                'start_node': LaunchConfiguration('start_node', default=''),
             }, condition=IfCondition(
                 PythonExpression(["'", route_source, "' == 'sequential'"]))),
             _include('scv_global_planner', 'path_planner.launch.py', {
