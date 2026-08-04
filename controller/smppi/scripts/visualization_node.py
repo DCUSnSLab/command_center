@@ -5,6 +5,7 @@ Handles all RViz visualization without impacting control performance
 Subscribes to processed data, publishes markers and visualization
 """
 
+import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -521,7 +522,6 @@ class VisualizationNode(Node):
             heading_marker.pose.position.z = 0.3  # Above robot footprint
             
             # Orientation from robot yaw
-            import math
             heading_marker.pose.orientation.w = math.cos(robot_yaw / 2.0)
             heading_marker.pose.orientation.z = math.sin(robot_yaw / 2.0)
             
