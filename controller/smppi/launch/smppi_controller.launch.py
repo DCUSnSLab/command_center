@@ -54,23 +54,6 @@ def generate_launch_description():
     smppi_dir = get_package_share_directory('smppi')
     default_config_path = os.path.join(smppi_dir, 'config', 'smppi_params.yaml')
     
-    # Costmap Processing Node (replaces sensor_processor_node)
-    costmap_processor_node = Node(
-        package='smppi',
-        executable='costmap_processor_node.py',
-        name='costmap_processor',
-        namespace=namespace,
-        parameters=[
-            default_config_path,
-            {
-                'use_sim_time': use_sim_time,
-            }
-        ],
-        output='screen',
-        emulate_tty=True,
-        arguments=['--ros-args', '--log-level', 'info']
-    )
-    
     # MPPI Main Controller Node
     mppi_main_node = Node(
         package='smppi',
@@ -115,8 +98,7 @@ def generate_launch_description():
         
         # Group all nodes
         GroupAction([
-            costmap_processor_node,
-            mppi_main_node,
+                mppi_main_node,
             visualization_node,
         ])
     ])

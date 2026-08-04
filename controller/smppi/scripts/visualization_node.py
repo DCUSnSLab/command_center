@@ -17,7 +17,8 @@ from typing import Optional
 from geometry_msgs.msg import PoseStamped, Point, Twist, PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
-from smppi.msg import ProcessedObstacles, OptimalPath, MPPIState
+from smppi.msg import OptimalPath
+from nav_msgs.msg import Odometry
 from command_center_interfaces.msg import MultipleWaypoints
 
 # TF2 imports
@@ -30,6 +31,14 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from smppi_controller.utils.geometry import GeometryUtils
+
+
+class _VizRobotState:
+    """(x, y, yaw) 홀더 — 구 MPPIState.state_vector 접근 호환"""
+    __slots__ = ('state_vector',)
+
+    def __init__(self, xyyaw):
+        self.state_vector = xyyaw
 
 
 class VisualizationNode(Node):
@@ -52,11 +61,10 @@ class VisualizationNode(Node):
         self._setup_topics()
         
         # State variables
-        self.processed_obstacles: Optional[ProcessedObstacles] = None
         self.optimal_path: Optional[OptimalPath] = None
         self.latest_goal: Optional[PoseStamped] = None
         self.multiple_waypoints: Optional[MultipleWaypoints] = None
-        self.robot_state: Optional[MPPIState] = None
+        self.robot_state = None  # (x, y, yaw) — /odom 직접 변환
         self.lookahead_point: Optional[PoseStamped] = None
         self.target_direction: Optional[PointStamped] = None
         
@@ -71,11 +79,9 @@ class VisualizationNode(Node):
     def _declare_parameters(self):
         """Declare ROS2 parameters"""
         # Topic parameters
-        self.declare_parameter('topics.input.processed_obstacles', '/smppi/processed_obstacles')
         self.declare_parameter('topics.input.optimal_path', '/mppi_optimal_path')
         self.declare_parameter('topics.input.goal_pose', '/subgoal')
         self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
-        self.declare_parameter('topics.input.robot_state', '/smppi/robot_state')
         self.declare_parameter('topics.output.markers', '/smppi_visualization')
         
         # Waypoint mode
@@ -99,11 +105,9 @@ class VisualizationNode(Node):
     def _load_parameters(self):
         """Load parameters from ROS2 parameter server"""
         # Topic names
-        self.obstacles_topic = self.get_parameter('topics.input.processed_obstacles').get_parameter_value().string_value
         self.path_topic = self.get_parameter('topics.input.optimal_path').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
         self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
-        self.robot_state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
         self.markers_topic = self.get_parameter('topics.output.markers').get_parameter_value().string_value
         
         # Waypoint mode
@@ -141,12 +145,13 @@ class VisualizationNode(Node):
         )
         
         # Subscribers
-        self.obstacles_sub = self.create_subscription(
-            ProcessedObstacles, self.obstacles_topic, self.obstacles_callback, reliable_qos)
         self.path_sub = self.create_subscription(
             OptimalPath, self.path_topic, self.path_callback, reliable_qos)
+        # /odom 직구독 (구 MPPIState 릴레이 제거; 발행측 BEST_EFFORT)
+        from rclpy.qos import QoSProfile as _QoS
+        sensor_qos = _QoS(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.robot_state_sub = self.create_subscription(
-            MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
+            Odometry, '/odom', self.robot_state_callback, sensor_qos)
         self.lookahead_sub = self.create_subscription(
             PoseStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
         self.target_direction_sub = self.create_subscription(
@@ -175,9 +180,6 @@ class VisualizationNode(Node):
         
         self.get_logger().info(f"Visualization topics configured")
     
-    def obstacles_callback(self, msg: ProcessedObstacles):
-        """Receive processed obstacles"""
-        self.processed_obstacles = msg
     
     def path_callback(self, msg: OptimalPath):
         """Receive optimal path"""
@@ -193,9 +195,13 @@ class VisualizationNode(Node):
         # Set latest goal from current goal for visualization compatibility
         self.latest_goal = msg.current_goal
     
-    def robot_state_callback(self, msg: MPPIState):
-        """Receive robot state"""
-        self.robot_state = msg
+    def robot_state_callback(self, msg: Odometry):
+        """Receive /odom and keep (x, y, yaw) for markers"""
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.robot_state = _VizRobotState(
+            (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw))
     
     def lookahead_callback(self, msg: PoseStamped):
         """Receive lookahead point"""
