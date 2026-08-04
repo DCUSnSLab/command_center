@@ -268,6 +268,37 @@ class SimpleBehaviorPlannerNode(Node):
         except ImportError:
             self.get_logger().info('teleop_rover_msgs 없음 — mux 모드 로그 생략')
 
+        # 베이스 제어 모드 인지 (2026-08-03 S2 분석에서 추가).
+        # 하드웨어 RC 는 mux 를 거치지 않고 CAN 레벨에서 베이스를 잡는다 —
+        # 그 동안 자율 파이프라인의 명령은 무시되는데 스택은 그걸 모르고
+        # "내 명령으로 차가 안 움직인다 = 차단"으로 해석해 수동 주행 중
+        # ASSIST 를 3회나 헛발동했다(bag 124 실측). /hunter_status 의
+        # control_mode(1=CAN 명령 청취=자율, 3=RC, 0=대기)를 구독해
+        # 베이스가 우리 명령을 듣지 않는 동안 차단 에스컬레이션을 보류한다.
+        # hunter_msgs 가 없는 환경(챔버 시뮬)은 조용히 생략 — 항상 청취로
+        # 간주해 기존 거동 보존.
+        self._hunter_mode = None
+        try:
+            from hunter_msgs.msg import HunterStatus
+
+            def _hs_cb(m):
+                if m.control_mode != self._hunter_mode:
+                    names = {0: '대기', 1: 'CAN(자율)', 3: 'RC(수동)'}
+                    self.get_logger().info(
+                        f'[MODE] hunter control_mode -> {m.control_mode} '
+                        f'({names.get(m.control_mode, "?")})'
+                        + ('' if m.control_mode == 1
+                           else ' — 차단 에스컬레이션 보류'))
+                    self._hunter_mode = m.control_mode
+            self.create_subscription(HunterStatus, '/hunter_status',
+                                     _hs_cb, 10)
+        except ImportError:
+            self.get_logger().info('hunter_msgs 없음 — control_mode 게이트 생략')
+
+    def _base_listening(self) -> bool:
+        """베이스가 자율(CAN) 명령을 듣고 있는가. 미상(None)=참으로 간주."""
+        return self._hunter_mode is None or self._hunter_mode == 1
+
     # ===== Callback Methods =====
 
     def current_pose_callback(self, msg: Odometry):
@@ -501,6 +532,9 @@ class SimpleBehaviorPlannerNode(Node):
             and not self.emergency_stop_requested
             and time.time() >= self.pause_until
             and not self.safety_monitor.get_safety_status()['should_pause']
+            # 베이스가 RC/대기 모드면 우리 명령이 무시되는 중 — "안 움직임"은
+            # 차단이 아니라 권한 부재다. 에스컬레이션(CREEP/ASSIST) 보류.
+            and self._base_listening()
             and (self.latest_goal_distance is None
                  or self.latest_goal_distance > self.blocked_near_goal_hold_off))
 
