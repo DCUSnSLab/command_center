@@ -68,7 +68,8 @@ if [ "$RECORD" = 1 ]; then
     /camera/camera/depth/camera_info /camera/camera/depth/image_rect_raw \
     /cmd_vel /current_speed /current_steer_angle /front/scan /rear/scan \
     /hunter/velocity /hunter_status /velodyne_points \
-    /gps/fix_gated /odometry/global /map_anchor/mode /odom /odometry/fast_lio \
+    /gps/fix_gated /odometry/global /map_anchor/mode /map_anchor/yaw_corr \
+    /odom /odometry/fast_lio \
     /costmap /costmap_keepout /behavior_status \
     /planned_path_detailed /multiple_waypoints \
     /vehicle/mux_status /vehicle/estop_status /final_cmd /remote/cmd_mode \
