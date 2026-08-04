@@ -72,6 +72,7 @@ if [ "$RECORD" = 1 ]; then
     /costmap /costmap_keepout /behavior_status \
     /planned_path_detailed /multiple_waypoints \
     /vehicle/mux_status /vehicle/estop_status /final_cmd /remote/cmd_mode \
+    /navpvt /rxmrtcm \
     > "$LOGDIR/record.log" 2>&1 &
   echo "[bringup] record pid $!"
 fi
