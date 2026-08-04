@@ -4,6 +4,7 @@ Simple Behavior Planner Node (Refactored)
 깔끔하고 모듈화된 새로운 구조
 """
 
+import math
 import time
 
 import rclpy
@@ -470,15 +471,25 @@ class SimpleBehaviorPlannerNode(Node):
             tr = self.waypoint_publisher.tf_buffer.lookup_transform(
                 'odom', 'map', rclpy.time.Time())
             t = tr.transform.translation
-            cur = (t.x, t.y)
+            q = tr.transform.rotation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            cur = (t.x, t.y, yaw)
             last = getattr(self, '_wp_tf_at_publish', None)
             if self.subgoal_published and last is not None:
                 dx = cur[0] - last[0]
                 dy = cur[1] - last[1]
-                if (dx * dx + dy * dy) ** 0.5 > 0.5:
+                # 회전도 감시: yaw 자동 보정(map_anchor autocal)이 주행 중
+                # th 를 돌리면 병진은 그대로여도 waypoint 의 odom 투영이
+                # 통째로 회전한다. 5도 초과면 재발행.
+                dyaw = math.atan2(math.sin(yaw - last[2]),
+                                  math.cos(yaw - last[2])) \
+                    if len(last) > 2 else 0.0
+                if (dx * dx + dy * dy) ** 0.5 > 0.5 or abs(dyaw) > 0.087:
                     self.get_logger().info(
                         f'map→odom anchor moved '
-                        f'{(dx * dx + dy * dy) ** 0.5:.2f} m since last '
+                        f'{(dx * dx + dy * dy) ** 0.5:.2f} m / '
+                        f'{math.degrees(dyaw):+.1f} deg since last '
                         'waypoint publish — refreshing waypoints')
                     self.subgoal_published = False
             self._wp_tf_now = cur
