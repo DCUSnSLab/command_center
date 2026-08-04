@@ -39,8 +39,6 @@ class SMPPIOptimizer:
         self.iteration_count = params.get('iteration_count', 1)
 
         self.lambda_action = params.get('lambda_action', 0.0)
-        self.omega = torch.tensor(params.get('omega_diag', [1.0, 1.0]),
-                                  dtype=torch.float32)
 
         self.v_min = params.get('v_min', 0.0)
         self.v_max = params.get('v_max', 2.0)
@@ -49,6 +47,10 @@ class SMPPIOptimizer:
         self.wheelbase = params.get('wheelbase', 0.65)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
+        # 액션 스무딩 대각 가중 — 한 번만 device 에 올려 [1,1,2]로 보관
+        # (기존: _compute_action_sequence_cost 에서 매 사이클 CPU->GPU 전송)
+        self.omega = torch.tensor(params.get('omega_diag', [1.0, 1.0]),
+                                  device=self.device, dtype=self.dtype).view(1, 1, 2)
         self.min_speed_for_cap = params.get('min_speed_for_cap', 0.10)
         self.max_lateral_acc = params.get('max_lateral_acc', 3.9)
 
@@ -173,9 +175,10 @@ class SMPPIOptimizer:
             a0_odom = torch.zeros(2, device=self.device, dtype=self.dtype)
         
         noise = torch.randn(self.K, self.T, 2, device=self.device, dtype=self.dtype) * self.noise_std
-        U_nom = self.control_sequence.unsqueeze(0).repeat(self.K, 1, 1)
-        U_samples = U_nom + noise
-        eps = U_samples - U_nom
+        # eps(섭동)는 정의상 noise 그 자체 — repeat + 차분으로 재구성하지 않는다.
+        # (broadcasting 합; [K,T,2] 실체화 복사 2개/사이클 제거)
+        U_samples = self.control_sequence.unsqueeze(0) + noise
+        eps = noise
         # a0 = self.robot_state[3:5] if self.robot_state is not None \
         #      else torch.zeros(2, device=self.device, dtype=self.dtype)
         alpha = 0.0
@@ -251,8 +254,7 @@ class SMPPIOptimizer:
 
     def _compute_action_sequence_cost(self, A_samples: torch.Tensor) -> torch.Tensor:
         diff = A_samples[:, 1:, :] - A_samples[:, :-1, :]
-        w = self.omega.to(self.device, self.dtype).view(1, 1, -1)
-        return torch.sum((diff ** 2) * w, dim=(1, 2))
+        return torch.sum((diff ** 2) * self.omega, dim=(1, 2))
 
     # ---------- small helpers ----------
     def _compute_progress(self, trajectories: torch.Tensor) -> torch.Tensor:
@@ -282,13 +284,14 @@ class SMPPIOptimizer:
         a0 = self.last_cmd_applied  # [v, δ]로 유지하면 더 안정적
         U = self.control_sequence.unsqueeze(0)
         A = self._integrate_U_to_A(a0, U)[0]   # [T,2] = [v, δ]
-        A_unclamped = A[0].clone()  # Store unclamped values for debugging
-        
-        # DEBUG: Clipping 전후 비교
-        v_before, delta_before = float(A[0,0]), float(A[0,1])
-        A[:, 0] = torch.clamp(A[:, 0], self.v_min, self.v_max)
-        A[:, 1] = torch.clamp(A[:, 1], self.w_min, self.w_max)  # 주: 현 구조상 w_min/w_max는 δ 한계로 쓰이는 중
-        v_next, delta_next = float(A[0,0]), float(A[0,1])
+
+        # 단일 동기화: 명령에 쓰는 건 첫 스텝뿐 — A[0] 만 CPU 로 내리고
+        # 이후 clamp/δ캡/ω변환은 전부 파이썬 스칼라로 처리.
+        # (기존: float() 4회 = 디바이스 동기화 4회 + 미사용 A_unclamped clone)
+        a_first = A[0].detach().cpu()
+        v_before, delta_before = float(a_first[0]), float(a_first[1])
+        v_next = min(max(v_before, self.v_min), self.v_max)
+        delta_next = min(max(delta_before, self.w_min), self.w_max)  # 주: 현 구조상 w_min/w_max는 δ 한계로 쓰이는 중
 
         # === NEW: speed-dependent steering cap (δ_dyn) ============================
         # 파라미터 준비 (없으면 안전 기본값 사용)
@@ -362,15 +365,6 @@ class SMPPIOptimizer:
         #     self._prev_cmd = [v_next, -omega_next]
         cmd.angular.z = omega_next
         self._prev_cmd = [v_next, omega_next]
-        # Goal 관련 코스트 시각화 (매 10회마다)
-        if hasattr(self, '_goal_debug_counter'):
-            self._goal_debug_counter += 1
-        else:
-            self._goal_debug_counter = 0
-            
-        if self._goal_debug_counter % 10 == 0:
-            self._print_goal_cost_status()
-        
         # 반드시 last_cmd_applied는 [v, δ]로 저장 (내부 일관성)
         self.last_cmd_applied = torch.tensor([v_next, delta_next],
                                             device=self.device, dtype=self.dtype)
@@ -433,52 +427,3 @@ class SMPPIOptimizer:
             return torch.atan2(torch.sin(angle), torch.cos(angle))
         else:
             return math.atan2(math.sin(angle), math.cos(angle))
-    
-    def _print_goal_cost_status(self):
-        # """Goal 관련 코스트 상세 시각화"""
-        # print("=" * 80)
-        # print("[GOAL COST ANALYSIS]")
-        
-        # # 로봇과 골 상태
-        # if hasattr(self, 'robot_state') and self.robot_state is not None:
-        #     x, y, yaw, v_odom, w_odom = [float(x) for x in self.robot_state[:5]]
-        #     print(f"🚗  Robot: pos=({x:.2f},{y:.2f}) | yaw={yaw:.3f} | v={v_odom:.3f} | ω={w_odom:.3f}")
-        
-        # if hasattr(self, 'goal_state') and self.goal_state is not None:
-        #     gx, gy, gyaw = [float(x) for x in self.goal_state[:3]]
-        #     print(f"🎯  Goal: pos=({gx:.2f},{gy:.2f}) | yaw={gyaw:.3f}")
-            
-        #     # 거리 계산
-        #     if hasattr(self, 'robot_state') and self.robot_state is not None:
-        #         robot_pos = self.robot_state[:2]
-        #         goal_pos = self.goal_state[:2]
-        #         distance = float(torch.norm(goal_pos - robot_pos))
-        #         direction = goal_pos - robot_pos
-        #         direction = direction / (torch.norm(direction) + 1e-9)
-        #         target_yaw = float(torch.atan2(direction[1], direction[0]))
-        #         yaw_error = abs(self.normalize_angle(yaw - target_yaw))
-        #         print(f"📏  Distance: {distance:.3f}m | Target yaw: {target_yaw:.3f} | Yaw error: {yaw_error:.3f}")
-        
-        # # Goal critic 정보 (critics에서 goal critic 찾기)
-        # for critic in self.critics:
-        #     if hasattr(critic, '__class__') and 'Goal' in critic.__class__.__name__:
-        #         print(f"⚖️   Goal Critic: weight={critic.weight:.1f}")
-        #         if hasattr(critic, 'xy_goal_tolerance'):
-        #             print(f"      xy_tol={critic.xy_goal_tolerance:.3f} | yaw_tol={critic.yaw_goal_tolerance:.3f}")
-        #         if hasattr(critic, 'lookahead_base_distance'):
-        #             print(f"      lookahead: base={critic.lookahead_base_distance:.1f} | "
-        #                   f"vel_fac={critic.lookahead_velocity_factor:.1f} | "
-        #                   f"range=[{critic.lookahead_min_distance:.1f}-{critic.lookahead_max_distance:.1f}]")
-        #         if hasattr(critic, 'respect_reverse_heading'):
-        #             print(f"      reverse_heading={critic.respect_reverse_heading} | "
-        #                   f"use_multi_wp={critic.use_multiple_waypoints}")
-                
-        #         # Lookahead point 정보
-        #         if hasattr(critic, 'last_lookahead_point') and critic.last_lookahead_point is not None:
-        #             lp = critic.last_lookahead_point
-        #             ly = critic.last_lookahead_yaw if hasattr(critic, 'last_lookahead_yaw') else 0.0
-        #             print(f"👀  Lookahead: pos=({float(lp[0]):.2f},{float(lp[1]):.2f}) | yaw={float(ly):.3f}")
-        #         break
-        
-        # print("=" * 80)
-        pass

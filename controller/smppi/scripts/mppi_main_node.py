@@ -17,9 +17,9 @@ from typing import Optional
 
 # ROS2 messages
 from geometry_msgs.msg import Twist, PoseStamped, PointStamped
-from nav_msgs.msg import Path, OccupancyGrid
+from nav_msgs.msg import Path, OccupancyGrid, Odometry
 from std_msgs.msg import Header
-from smppi.msg import ProcessedObstacles, MPPIState, OptimalPath
+from smppi.msg import OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
 
 # SMPPI modules
@@ -28,6 +28,22 @@ from smppi_controller.critics.obstacle_critic import ObstacleCritic
 from smppi_controller.critics.goal_critic import GoalCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.transforms import Transforms
+
+
+class RobotState:
+    """/odom -> 내부 로봇 상태 (구 MPPIState 릴레이 대체; 필드 호환: header/pose/velocity/state_vector).
+    costmap_processor_node 의 100Hz 재발행 릴레이를 제거하고 /odom 을 직접 소비한다."""
+    __slots__ = ('header', 'pose', 'velocity', 'state_vector')
+
+    def __init__(self, odom: Odometry):
+        self.header = odom.header
+        self.pose = odom.pose.pose
+        self.velocity = odom.twist.twist
+        q = odom.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        p = odom.pose.pose.position
+        self.state_vector = [p.x, p.y, yaw]
 
 
 class MPPIMainNode(Node):
@@ -52,8 +68,7 @@ class MPPIMainNode(Node):
         self._setup_topics()
         
         # State variables
-        self.processed_obstacles: Optional[ProcessedObstacles] = None
-        self.robot_state: Optional[MPPIState] = None
+        self.robot_state: Optional[RobotState] = None
         self.latest_goal: Optional[PoseStamped] = None
         self.latest_path: Optional[Path] = None
         self.multiple_waypoints: Optional[MultipleWaypoints] = None
@@ -92,8 +107,7 @@ class MPPIMainNode(Node):
     def _declare_parameters(self):
         """Declare ROS2 parameters"""
         # Topic parameters
-        self.declare_parameter('topics.input.processed_obstacles', '/smppi/processed_obstacles')
-        self.declare_parameter('topics.input.robot_state', '/smppi/robot_state')
+        self.declare_parameter('topics.input.odometry', '/odom')
         self.declare_parameter('topics.input.costmap', '/costmap')
         self.declare_parameter('topics.input.goal_pose', '/goal_pose')
         self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
@@ -103,6 +117,8 @@ class MPPIMainNode(Node):
         
         # Control parameters
         self.declare_parameter('control_frequency', 20.0)
+        self.declare_parameter('enable_visualization', True)
+        self.declare_parameter('visualization_frequency', 5.0)
         
         # SMPPI optimizer parameters
         self.declare_parameter('optimizer.batch_size', 3000)
@@ -156,10 +172,13 @@ class MPPIMainNode(Node):
         """Load parameters from ROS2 parameter server"""
         # Control frequency
         self.control_frequency = self.get_parameter('control_frequency').get_parameter_value().double_value
+        self.enable_visualization = self.get_parameter('enable_visualization').get_parameter_value().bool_value
+        viz_freq = self.get_parameter('visualization_frequency').get_parameter_value().double_value
+        # 시각화 발행은 소비율(viz 렌더 주기)에 맞춰 데시메이션
+        self.viz_decimation = max(1, round(self.control_frequency / max(viz_freq, 0.1)))
 
         # Topic names
-        self.obstacles_topic = self.get_parameter('topics.input.processed_obstacles').get_parameter_value().string_value
-        self.robot_state_topic = self.get_parameter('topics.input.robot_state').get_parameter_value().string_value
+        self.odom_topic = self.get_parameter('topics.input.odometry').get_parameter_value().string_value
         self.costmap_topic = self.get_parameter('topics.input.costmap').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
         self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
@@ -273,11 +292,12 @@ class MPPIMainNode(Node):
             reliability=ReliabilityPolicy.RELIABLE
         )
         
-        # Subscribers (processed data from sensor node)
-        self.obstacles_sub = self.create_subscription(
-            ProcessedObstacles, self.obstacles_topic, self.obstacles_callback, reliable_qos)
-        self.robot_state_sub = self.create_subscription(
-            MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
+        # Subscribers
+        # /odom 직구독 (구 costmap_processor 릴레이 제거). 발행측이 SensorDataQoS(BEST_EFFORT)
+        # 이므로 RELIABLE 구독은 매칭되지 않는다.
+        sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.odom_sub = self.create_subscription(
+            Odometry, self.odom_topic, self.odom_callback, sensor_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
         
@@ -320,15 +340,11 @@ class MPPIMainNode(Node):
         self.target_direction_pub = self.create_publisher(
             PointStamped, '/smppi_visualization/target_direction', reliable_qos)
         
-        self.get_logger().info(f"Topics configured: obstacles={self.obstacles_topic}, state={self.robot_state_topic}")
+        self.get_logger().info(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
     
-    def obstacles_callback(self, msg: ProcessedObstacles):
-        """Receive processed obstacles from sensor node"""
-        self.processed_obstacles = msg
-
-    def robot_state_callback(self, msg: MPPIState):
-        """Receive robot state from sensor node"""
-        self.robot_state = msg
+    def odom_callback(self, msg: Odometry):
+        """Receive odometry directly and adapt to internal robot state"""
+        self.robot_state = RobotState(msg)
 
     def costmap_callback(self, msg: OccupancyGrid):
         """Receive costmap for grid-based collision detection"""
@@ -543,8 +559,6 @@ class MPPIMainNode(Node):
                 goal=self.latest_goal
             )
             
-            # Set obstacles
-            self.optimizer.set_obstacles(self.processed_obstacles)
 
             # --- fine-grained timing breakdown (GPU-synced) to locate the bottleneck ---
             _prof = (self.control_count % 20 == 0)
@@ -588,10 +602,14 @@ class MPPIMainNode(Node):
             self.optimizer.shift_control_sequence()
 
             _td = _t()
-            # Publish optimal path for visualization node
-            self.publish_optimal_path()
-            # Publish lookahead point for visualization
-            self.publish_lookahead_point()
+            # 시각화 발행 게이트 (소비자: visualization_node 뿐):
+            #   enable_visualization(정적) AND 렌더주기 데시메이션 AND 실구독자 존재(동적).
+            #   publish_optimal_path 는 rollout 을 한 번 더 돌리므로 headless 낭비가 컸음.
+            if self.enable_visualization and \
+                    (self.control_count % self.viz_decimation == 0) and \
+                    self.path_pub.get_subscription_count() > 0:
+                self.publish_optimal_path()
+                self.publish_lookahead_point()
             _te = _t()
             if _prof:
                 self.get_logger().info(
@@ -619,8 +637,8 @@ class MPPIMainNode(Node):
         """Check if controller is ready to compute commands"""
         if self.robot_state is None:
             return False
-        if self.processed_obstacles is None:
-            return False
+        if self.latest_costmap is None:
+            return False   # 크리틱의 실제 입력은 costmap (구 processed_obstacles 게이트 대체)
         return True
     
     def publish_optimal_path(self):
