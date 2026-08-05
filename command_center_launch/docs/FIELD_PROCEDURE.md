@@ -93,6 +93,27 @@ python3 heading_check.py
 - 완전 실패/부작용 → 롤백: 드라이버 정지 후 시리얼로 reg35 headingMode=1
   재기록(RELATIVE 복귀). 기존 autocal 경로가 그대로 유효하다.
 
+## 4-B. LiDAR-관성 오도메트리(LIO) 교체 — 선택 실험
+
+세 구현이 **같은 계약**(`/odometry/fast_lio` 로 odom 프레임 Odometry 발행,
+odom→base_link TF 발행 금지 — EKF 소유)을 지키도록 배선돼 있어 인자 하나로
+바꾼다. 상위 스택(앵커·행동·제어)은 `/odom` 만 보므로 무영향.
+
+```bash
+./field_bringup.sh --record lio_source:=fastlio     # 기본(현장 검증됨)
+./field_bringup.sh --record lio_source:=fasterlio   # Faster-LIO (iVox)
+./field_bringup.sh --record lio_source:=rko         # RKO-LIO (IMU 느슨결합)
+```
+
+| 구현 | 특징 | 주의 |
+|---|---|---|
+| FAST-LIO2 | iEKF + ikd-Tree, 현장 이력 다수 | 기본값 — 실주행 시나리오는 이걸로 |
+| Faster-LIO | 같은 iEKF, iVox 로 근방탐색 가속 | velodyne time 단위 `time_scale: 1.0`(초) 확인 |
+| RKO-LIO | 센서별 모델링 없음, IMU 느슨결합 | 온라인 모드에서 처리가 밀리면 IMU 큐 넘침→영구 락아웃 이력. CPU 여유 확인 필수 |
+
+교체 후에는 **반드시 2절 yaw 게이트부터 다시** 수행한다(오도메트리 소스가
+바뀌면 앵커의 th 추정 입력이 바뀐다).
+
 ## 5. 성공 판정 기준 요약
 
 | 항목 | 기준 |

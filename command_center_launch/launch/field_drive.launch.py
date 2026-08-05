@@ -132,7 +132,12 @@ def generate_launch_description():
                         'Empty = start from the node nearest the robot.'),
         DeclareLaunchArgument(
             'with_fastlio', default_value='true',
-            description='FAST-LIO odometry source for the odom EKF'),
+            description='LiDAR-inertial odometry source for the odom EKF'),
+        DeclareLaunchArgument(
+            'lio_source', default_value='fastlio',
+            description='LIO 구현 선택: fastlio(FAST-LIO2, 기본/현장검증) | '
+                        'fasterlio(Faster-LIO, iVox) | rko(RKO-LIO). '
+                        '셋 다 /odometry/fast_lio 로 발행하므로 하류 무영향.'),
         DeclareLaunchArgument(
             'max_slew_mps', default_value='0.5',
             description='Absolute rate ceiling on map-anchor motion. 0 disables '
@@ -170,6 +175,7 @@ def generate_launch_description():
                 'map_anchor_pcd': '0',
                 'max_slew_mps': max_slew_mps,
                 'cov_ref_m2': cov_ref_m2,
+                'lio_source': LaunchConfiguration('lio_source'),
                 # yaw 자동 보정(2026-08-04 반대주행 대책) 롤백 스위치 —
                 # field_bringup.sh anchor_yaw_autocal:=false 한 줄로 끈다
                 'anchor_yaw_autocal': LaunchConfiguration(
