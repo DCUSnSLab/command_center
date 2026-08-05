@@ -39,6 +39,32 @@ else
 fi
 ip link show can0 | grep -o "state [A-Z]*" | sed 's/^/[bringup] can0 /'
 
+# --- 1b. LiDAR 이더넷 ------------------------------------------------------
+# 2026-08-05 필드: enp7s0 이 재부팅 후 DOWN 인 채로 기동했다. 증상이 아주
+# 나쁘게 나온다 — 스택은 정상 기동하고 자율 전환도 되지만, 포인트클라우드가
+# 없으니 local_costmap 이 안전측으로 전면 LETHAL(40,000셀 전부)을 발행하고
+# MPPI 가 매 주기 비상정지한다. 로그 겉면은 "장애물 때문에 못 감"처럼 보여
+# 현장에서 원인 찾는 데 6분을 썼다. 그래서 여기서 먼저 잡고, 못 잡으면
+# 조용히 진행하지 말고 크게 경고한다.
+LIDAR_IF=${SCV_LIDAR_IF:-enp7s0}
+LIDAR_IP=${SCV_LIDAR_IP:-192.168.1.201}
+if ip link show "$LIDAR_IF" 2>/dev/null | grep -q "LOWER_UP"; then
+  echo "[bringup] $LIDAR_IF 링크 정상"
+else
+  echo "[bringup] $LIDAR_IF 내려가 있음 — 올리는 중 (sudo)"
+  sudo ip link set "$LIDAR_IF" up 2>/dev/null
+  sleep 3
+fi
+if ip link show "$LIDAR_IF" 2>/dev/null | grep -q "NO-CARRIER"; then
+  echo "[bringup] !! $LIDAR_IF NO-CARRIER — 케이블/전원 확인 필요."
+  echo "[bringup] !! 이대로 기동하면 코스트맵이 전면 LETHAL 이라 자율주행 불가."
+elif ping -c 2 -W 2 "$LIDAR_IP" > /dev/null 2>&1; then
+  echo "[bringup] LiDAR $LIDAR_IP 응답 OK"
+else
+  echo "[bringup] !! LiDAR $LIDAR_IP 무응답 (링크는 있음) — IP 설정/전원 확인."
+  echo "[bringup] !! 이대로 기동하면 코스트맵이 전면 LETHAL 이라 자율주행 불가."
+fi
+
 # --- 2. 스택 --------------------------------------------------------------
 source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
