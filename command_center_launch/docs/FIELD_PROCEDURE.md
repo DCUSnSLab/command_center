@@ -1,0 +1,121 @@
+# SCV 필드 테스트 절차 (2026-08-05 판)
+
+8/4 실외 전 시나리오 반대주행의 근본 원인(VectorNav yaw가 자기 기준 없이
+전원 시점부터 자이로 적분 → 세션마다 임의 오프셋: 8/3 +62°, 8/4 +170°)을
+반영한 운용 절차다. 이번 판의 핵심 변경 두 가지:
+
+| 변경 | 내용 | 상태 |
+|---|---|---|
+| yaw 자동 보정 (autocal) | map_anchor가 주행 중 [GPS 실이동 방위 − IMU yaw]를 추정해 자가 교정. **자율 전환 전 RC 전진 보정 주행이 필수 게이트** | 배포 완료 (bag·챔버 검증) |
+| 자기 앵커 복원 (mag cal) | VectorNav HSI 보정 + ABSOLUTE 모드 전환으로 절대 방위 복원. **이번 필드의 특별 작업** | 키트 준비 완료, 현장 실행 대기 |
+
+---
+
+## 0. 사전 조건
+
+- 개활지(RTK fixed 잡히는 곳) 포함 경로. RTK는 8/4에 status 2(σ≈2cm) 재확인됨.
+- 접속: 필드 중 `scv-field`(점프 경유), 랩 복귀 후 직결. 테더링 경로에서는
+  텍스트만 — bag 업로드는 랩 유선에서.
+- 차량 파일 위치: 절차 스크립트 `/home/scv/field_magcal/`,
+  기동 정본 `~/SCV_park/src/command_center/command_center_launch/scripts/`.
+
+## 1. 공통 기동
+
+```bash
+cd ~/SCV_park/src/command_center/command_center_launch/scripts
+./field_bringup.sh --record \
+  map_file_path:=/home/scv/MAP/D2/d2_unha.json \
+  route_source:=sequential goal_node:=N026        # (예: 8/4 주차장 구석 시나리오)
+```
+
+- `--record` 는 스택 안정 후 bag 기록 시작. `/map_anchor/yaw_corr` 포함(8/5 추가).
+- 정지는 반드시 `./teardown.sh` (조상-안전 kill). 기록만 끊을 때는 bag record
+  프로세스만 kill.
+
+## 2. ★ yaw 보정 게이트 (매 기동마다, 자율 전환 전 필수)
+
+기동 직후의 map yaw는 신뢰할 수 없다(전원 시점 기준 임의값). 보정 없이 자율
+전환하면 8/4처럼 앵커 처닝 교착(제자리 지그재그)에 빠지고, 그 상태에선 보정
+주행 자체가 생기지 않는다는 것까지 챔버에서 재현·확인됐다.
+
+1. **RC 수동으로 전진 ~10 m** (RTK fixed면 ~5 m면 충분, 직선일 필요 없음 —
+   완만한 곡선 가능, 후진은 카운트 안 됨).
+2. 보정 발동 확인 (둘 중 하나):
+   ```bash
+   ros2 topic echo /map_anchor/yaw_corr          # 값이 발행되기 시작하면 측정 중
+   grep "yaw autocal" ~/field_*/field_drive.log | tail -3
+   ```
+   `yaw autocal ENGAGED: th rotated ...` 워닝이 뜨면 게이트 통과.
+3. ENGAGED 확인 후 자율 전환.
+
+주의: 자기 앵커 복원(4절)이 성공적으로 끝난 뒤의 세션부터는 이 게이트를
+축소(확인만)할 수 있으나, **검증 주행 2~3회 전까지는 유지**한다.
+
+## 3. 자율 주행 및 모니터링
+
+- 목표 전송(기동 인자로 안 준 경우):
+  `ros2 topic pub -r 2 -t 4 /goal_node_id std_msgs/String "{data: 'N026'}"`
+  (`--once`는 디스커버리 유실 이력 있음 — `-r 2 -t N` 사용)
+- 모니터링 포인트:
+  - `/map_anchor/mode` — GPS_RTK/GPS_SUSPECT/PCD 전환
+  - `/map_anchor/yaw_corr` — 보정값 안정성(주행 중 수 도 이내 미세 조정이 정상)
+  - `/hunter_status.control_mode` — 1=CAN(자율)/3=RC. **RC 링크 플래핑**(8/4에
+    33회/60초 관측) 시 자율 창이 수 초로 쪼개진다 — 조종기 안테나/거리 주의
+  - behavior 로그의 `[MODE]`, `[BLOCKED]`, TURNAROUND 발동 여부
+
+## 4. ★ 자기 앵커 복원 (이번 필드 특별 작업 — 개활지에서 1회)
+
+RTK 잡히는 개활지에서, 다른 시나리오와 독립적으로 수행한다.
+
+```bash
+cd /home/scv/field_magcal
+
+# (1) 스택/드라이버 완전 정지 상태에서 — 보정 전 레지스터 기록
+./magcal_run.sh pre        # 기대: RELATIVE / HSI 미적용 / 보정없음 (현재 상태)
+
+# (2) 드라이버(또는 전체 스택) 기동 후 — 보정 액션
+./magcal_run.sh cal
+#   → 실행 즉시 RC 저속(≤0.5 m/s)으로 원 또는 8자 주행 2~3바퀴 유지.
+#   → 온보드 HSI 수렴 시 자동 종료 + HSI 적용 + ABSOLUTE 전환 + 영구 저장.
+#   → 1000표본(수 분) 내 수렴 안 하면 Ctrl-C 후 더 천천히 재시도.
+
+# (3) 드라이버 정지 후 — 결과 검증 (3판정 모두 OK여야 성공)
+./magcal_run.sh post       # ABSOLUTE OK / USEONBOARD OK / 비항등 OK
+
+# (4) 스택 재기동 후 — 방위 실측 검증 (RC로 서로 다른 방향 직선 주행)
+python3 heading_check.py
+```
+
+**heading_check 판정**:
+- 오프셋이 주행 방향과 무관하게 **상수(자편각 약 −9° 부근)** → 성공.
+  autocal이 이 잔차를 자동 트림하므로 추가 조치 불요.
+- 방향에 따라 수십 도 출렁 → 경자성 잔차. (2)를 더 천천히/넓게 재수행.
+- 완전 실패/부작용 → 롤백: 드라이버 정지 후 시리얼로 reg35 headingMode=1
+  재기록(RELATIVE 복귀). 기존 autocal 경로가 그대로 유효하다.
+
+## 5. 성공 판정 기준 요약
+
+| 항목 | 기준 |
+|---|---|
+| yaw 게이트 | RC 전진 ≤10 m 내 ENGAGED 로그 |
+| 자율 주행 | 목표 방향으로 접근(거리 단조 감소), TURNAROUND 오발 없음 |
+| mag cal | post 3판정 OK + heading_check 오프셋 상수(±5° 이내 변동) |
+| 위치 품질 | RTK fixed 구간에서 /odometry/global 이 실궤적과 일치 |
+
+## 6. 이상 대응
+
+| 증상 | 조치 |
+|---|---|
+| 목표 반대/사선 주행 | 즉시 RC 전환(하드웨어 우선권). ENGAGED 이전 자율 전환 여부 확인 — 2절 게이트 재수행 |
+| 제자리 지그재그 + waypoint 재발행 반복 | yaw 미보정 서명. RC로 빼내서 전진 보정 주행 |
+| autocal 의심(보정값 이상) | `field_bringup.sh anchor_yaw_autocal:=false` 로 재기동(롤백 스위치) 후 증상 비교 |
+| RC 플래핑 (control_mode 3↔0↔1) | 조종기 거리/안테나 확인. 자율 창이 수 초면 주행 판정 불가 |
+| GPS 열화(cov 급증) | 앵커가 EMA 감속·슬루 제한으로 버팀. /map_anchor/mode 관찰 |
+
+## 7. 종료 및 복귀
+
+1. 로깅만 종료: bag record 프로세스 kill (스택 유지 시).
+2. 전체 종료: `./teardown.sh`.
+3. 랩 복귀(유선) 후: bag 업로드 → 아카이브 바이트 대조 검증 → 차량 사본 삭제.
+4. 세션 리포트: yaw_corr 수렴값(=그 세션의 오프셋), mag cal 전후 비교,
+   RTK 비율을 기록해 두면 다음 분석이 빨라진다.

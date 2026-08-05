@@ -170,6 +170,10 @@ def generate_launch_description():
                 'map_anchor_pcd': '0',
                 'max_slew_mps': max_slew_mps,
                 'cov_ref_m2': cov_ref_m2,
+                # yaw 자동 보정(2026-08-04 반대주행 대책) 롤백 스위치 —
+                # field_bringup.sh anchor_yaw_autocal:=false 한 줄로 끈다
+                'anchor_yaw_autocal': LaunchConfiguration(
+                    'anchor_yaw_autocal', default='true'),
             }),
         ]),
 
