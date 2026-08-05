@@ -12,12 +12,40 @@ def cmd(s):
         ck ^= ord(c)
     return ("$%s*%02X\r\n" % (s, ck)).encode()
 
-try:
-    p = serial.Serial("/dev/rs232", 460800, timeout=1.0)
-except Exception as e:
-    print("시리얼 열기 실패: %s" % e)
-    print("드라이버가 떠 있으면 포트를 물고 있다 — 스택 정지 후 재시도.")
+import re
+
+def open_sensor():
+    """보드레이트 자동 감지.
+
+    설정 파일은 460800 이지만 센서 NV 값은 921600 이고, vnproglib 의
+    connect() 가 기동 때마다 460800 으로 바꿔놓는다 — 즉 드라이버를
+    띄웠는지 여부에 따라 raw 접속 속도가 달라진다(현장 실측: 전원 순환
+    직후 921600, 드라이버 기동 뒤 460800). 고정하면 반드시 언젠가 막힌다."""
+    for baud in (460800, 921600, 115200, 230400):
+        try:
+            s = serial.Serial("/dev/rs232", baud, timeout=0.8)
+        except Exception as e:
+            print("시리얼 열기 실패(%d): %s" % (baud, e))
+            print("드라이버가 떠 있으면 포트를 물고 있다 — 스택 정지 후 재시도.")
+            sys.exit(2)
+        s.reset_input_buffer(); time.sleep(0.4)
+        raw = s.read_all()
+        s.write(("$VNRRG,35*%02X\r\n" % _ck("VNRRG,35")).encode())
+        time.sleep(0.5)
+        buf = (raw + s.read_all()).decode("latin-1", errors="replace")
+        if re.search(r"\$VNRRG,35,", buf):
+            print("센서 보드레이트: %d" % baud)
+            return s
+        s.close()
+    print("어떤 보드레이트에서도 응답 없음 — 센서 통신 확인 필요.")
     sys.exit(2)
+
+def _ck(s):
+    ck = 0
+    for c in s: ck ^= ord(c)
+    return ck
+
+p = open_sensor()
 
 import re
 
