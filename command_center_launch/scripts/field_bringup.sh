@@ -62,7 +62,8 @@ if [ "$RECORD" = 1 ]; then
   # /gps/fix, /behavior_state, /odometry/filtered 는 존재하지 않는 이름이었다.
   # 여기에 경로 추종 진단용 토픽 셋을 더했다.
   nohup ros2 bag record -o "$LOGDIR/bag" \
-    /vectornav/imu /vectornav/pose /ublox_gps_node/fix /ublox_gps_node/fix_velocity \
+    /vectornav/imu /vectornav/pose /vectornav/magnetic \
+    /ublox_gps_node/fix /ublox_gps_node/fix_velocity \
     /tf /tf_static /robot_description \
     /camera/camera/color/camera_info /camera/camera/color/image_raw \
     /camera/camera/depth/camera_info /camera/camera/depth/image_rect_raw \
