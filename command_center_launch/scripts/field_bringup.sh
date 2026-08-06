@@ -65,6 +65,31 @@ else
   echo "[bringup] !! 이대로 기동하면 코스트맵이 전면 LETHAL 이라 자율주행 불가."
 fi
 
+# --- 1c. 시나리오 지도 존재 확인 -------------------------------------------
+# 2026-08-05: 쓰려던 d2_unha.json 이 차량에 없어 현장에서 다른 지도로 대체
+# 기동했다. 그 지도에는 목표 지점(주차장 구석)에 대응하는 노드가 없어 13 m
+# 떨어진 노드를 목표로 삼았고, 차량 위치가 그 지도 경로의 '꼬리 뒤'라
+# 자율 전환 직후 목표 반대쪽으로 향했다(올바른 지도였다면 최근접 노드가
+# 목표와 같은 방향 +160도, 12 m 였다). 지도가 없으면 조용히 대체하지 말고
+# 여기서 멈춘다.
+for a in "${ARGS[@]:-}"; do
+  case "$a" in
+    map_file_path:=*)
+      MF="${a#map_file_path:=}"
+      if [ ! -f "$MF" ]; then
+        echo "[bringup] !! 지도 파일 없음: $MF"
+        echo "[bringup] !! 다른 지도로 대체하지 말 것 — 목표 노드가 달라진다."
+        exit 1
+      fi
+      echo "[bringup] 지도 확인: $MF ($(python3 -c "
+import json,sys
+d=json.load(open('$MF'))
+print('노드 %d, 링크 %d' % (len(d.get('Node',[])), len(d.get('Link',[]))))
+" 2>/dev/null || echo '파싱 실패'))"
+      ;;
+  esac
+done
+
 # --- 2. 스택 --------------------------------------------------------------
 source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
