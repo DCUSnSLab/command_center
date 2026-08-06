@@ -150,6 +150,14 @@ def generate_launch_description():
             'corridor_half_width', default_value='1.4',
             description='SMPPI keepout corridor half-width (m). Widen only when '
                         'the route is known to run off the mapped sidewalk.'),
+        # 선언 없이 LaunchConfiguration(default=) 만으로도 동작하지만 그러면
+        # `ros2 launch --show-args` 에 뜨지 않아 롤백 스위치가 있는지 현장에서
+        # 알 수 없다. 게이트를 끄는 인자는 반드시 목록에 보여야 한다.
+        DeclareLaunchArgument(
+            'anchor_yaw_autocal', default_value='true',
+            description='map_anchor 온라인 yaw 보정 (2026-08-04 반대주행 대책). '
+                        'false 로 두면 anchor_yaw_offset 시드만 쓴다 — 회귀 '
+                        'A/B 와 챔버 결함주입 전용. 필드에서는 켠 채로 둘 것.'),
 
         # --- t=0: hardware -------------------------------------------------
         _include('bring_up', 'sensors_start.launch.py',

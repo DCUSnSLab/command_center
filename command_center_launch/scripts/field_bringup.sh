@@ -18,11 +18,16 @@ set -o pipefail
 WS=${SCV_WS:-/home/scv/SCV_park}
 LOGDIR=${SCV_LOGDIR:-/home/scv/field_$(date +%Y%m%d_%H%M%S)}
 RECORD=0
+NOCAM=0
 ARGS=()
 for a in "$@"; do
   case "$a" in
-    --record) RECORD=1 ;;
-    *)        ARGS+=("$a") ;;
+    --record)    RECORD=1 ;;
+    # 카메라 원본이 bag 의 대부분이다 — 2026-08-06 실측 4.8 GB/분 중
+    # 거의 전부. 실내→실외 이동처럼 긴 구간을 기록할 때 빼면 90% 이상
+    # 준다(30분 이동 = 145 GB -> 10 GB 남짓).
+    --no-camera) NOCAM=1 ;;
+    *)           ARGS+=("$a") ;;
   esac
 done
 
@@ -112,12 +117,14 @@ if [ "$RECORD" = 1 ]; then
   # 추측한 이름을 쓰면 ros2 bag record 가 조용히 아무것도 안 남긴다 — 실제로
   # /gps/fix, /behavior_state, /odometry/filtered 는 존재하지 않는 이름이었다.
   # 여기에 경로 추종 진단용 토픽 셋을 더했다.
-  nohup ros2 bag record -o "$LOGDIR/bag" \
+  CAM_TOPICS="/camera/camera/color/camera_info /camera/camera/color/image_raw \
+    /camera/camera/depth/camera_info /camera/camera/depth/image_rect_raw"
+  [ "$NOCAM" = 1 ] && { CAM_TOPICS=""; echo "[bringup] 카메라 토픽 제외 기록"; }
+  # shellcheck disable=SC2086
+  nohup ros2 bag record -o "$LOGDIR/bag" $CAM_TOPICS \
     /vectornav/imu /vectornav/pose /vectornav/magnetic \
     /ublox_gps_node/fix /ublox_gps_node/fix_velocity \
     /tf /tf_static /robot_description \
-    /camera/camera/color/camera_info /camera/camera/color/image_raw \
-    /camera/camera/depth/camera_info /camera/camera/depth/image_rect_raw \
     /cmd_vel /current_speed /current_steer_angle /front/scan /rear/scan \
     /hunter/velocity /hunter_status /velodyne_points \
     /gps/fix_gated /odometry/global /map_anchor/mode /map_anchor/yaw_corr \
