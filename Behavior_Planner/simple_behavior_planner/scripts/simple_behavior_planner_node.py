@@ -279,8 +279,14 @@ class SimpleBehaviorPlannerNode(Node):
         # path_manager.align_to_position docstring 참조).
         self.declare_parameter('join_nearest', False)
         self.declare_parameter('join_max_approach_m', 40.0)
+        # 수동 주행 중 합류 노드 갱신 + 자율 전환 시 재선택 (2026-08-06 필드)
+        self.declare_parameter('realign_on_engage', True)
+        self.declare_parameter('realign_manual_move_m', 2.0)
         self._join_nearest = self.get_parameter('join_nearest').value
         self._join_max_approach = self.get_parameter('join_max_approach_m').value
+        self._realign_on_engage = self.get_parameter('realign_on_engage').value
+        self._realign_move_m = self.get_parameter('realign_manual_move_m').value
+        self._align_pose = None      # 마지막 합류 계산 시점의 위치
 
         # 베이스가 우리 명령을 듣지 않는 동안 차단 에스컬레이션을 보류한다.
         # hunter_msgs 가 없는 환경(챔버 시뮬)은 조용히 생략 — 항상 청취로
@@ -297,7 +303,23 @@ class SimpleBehaviorPlannerNode(Node):
                         f'({names.get(m.control_mode, "?")})'
                         + ('' if m.control_mode == 1
                            else ' — 차단 에스컬레이션 보류'))
+                    prev_mode = self._hunter_mode
                     self._hunter_mode = m.control_mode
+                    # 수동->자율 전환 순간 합류 노드를 다시 고른다.
+                    #
+                    # 합류 노드는 경로 수신 시점에 한 번 정해지는데, 운용
+                    # 절차가 자율 전환 전 RC 전진(yaw 게이트)을 요구하므로
+                    # 그 사이 차량이 20 m 씩 움직인다 — 2026-08-06 필드:
+                    # 기동 위치 (47.2,44.2)에서 고른 N0440 이 RC 이동 후
+                    # (32.3,59.7)에서는 뒤쪽 22 m 에 있었고, 자율 전환 즉시
+                    # 목표(북서)가 아니라 그 노드(남동)로 18.8 m 갔다.
+                    # 절차와 알고리즘이 서로를 무력화하던 구멍이다.
+                    if (prev_mode is not None and m.control_mode == 1
+                            and self._realign_on_engage
+                            and getattr(self, '_unpinned_route', False)):
+                        self.get_logger().info(
+                            '[MODE] 자율 전환 — 현재 위치로 합류 노드 재선택')
+                        self._pending_align = True
             self.create_subscription(HunterStatus, '/hunter_status',
                                      _hs_cb, 10)
         except ImportError:
@@ -335,8 +357,22 @@ class SimpleBehaviorPlannerNode(Node):
                     're-aligning start node to converged position')
                 self._pending_align = True
 
+        # RC 수동 주행 중에는 합류 노드를 계속 따라오게 한다. 수동 주행은
+        # 사실상 '차량 재배치'이므로, 자율 전환 시점의 위치가 반영돼야 한다.
+        # 순간이동 감지(위 블록)는 느린 주행을 잡지 못한다 — 20 m 를 20 초에
+        # 걸쳐 가면 프레임당 1 m 라 임계에 걸리지 않는다.
+        if (self._hunter_mode == 3 and self._realign_on_engage
+                and getattr(self, '_unpinned_route', False)):
+            px = pose_stamped.pose.position.x
+            py = pose_stamped.pose.position.y
+            last = self._align_pose
+            if last is None or math.hypot(px - last[0], py - last[1]) > self._realign_move_m:
+                self._pending_align = True
+
         if getattr(self, '_pending_align', False) and self._align_start_to_pose():
             self._pending_align = False
+            self._align_pose = (pose_stamped.pose.position.x,
+                                pose_stamped.pose.position.y)
             # 정렬로 목표가 바뀌었으니 웨이포인트를 다시 내보낸다. 이걸 리셋하지
             # 않으면 부트스트랩 때 낸 옛 목표(B000)가 제어기에 남아 있는다.
             self.subgoal_published = False
