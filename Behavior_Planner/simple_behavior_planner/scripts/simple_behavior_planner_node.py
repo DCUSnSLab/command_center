@@ -275,6 +275,13 @@ class SimpleBehaviorPlannerNode(Node):
         # "내 명령으로 차가 안 움직인다 = 차단"으로 해석해 수동 주행 중
         # ASSIST 를 3회나 헛발동했다(bag 124 실측). /hunter_status 의
         # control_mode(1=CAN 명령 청취=자율, 3=RC, 0=대기)를 구독해
+        # 경로 합류 규칙 (2026-08-05 필드에서 최근접 규칙의 결함이 드러났다 —
+        # path_manager.align_to_position docstring 참조).
+        self.declare_parameter('join_nearest', False)
+        self.declare_parameter('join_max_approach_m', 40.0)
+        self._join_nearest = self.get_parameter('join_nearest').value
+        self._join_max_approach = self.get_parameter('join_max_approach_m').value
+
         # 베이스가 우리 명령을 듣지 않는 동안 차단 에스컬레이션을 보류한다.
         # hunter_msgs 가 없는 환경(챔버 시뮬)은 조용히 생략 — 항상 청취로
         # 간주해 기존 거동 보존.
@@ -335,16 +342,24 @@ class SimpleBehaviorPlannerNode(Node):
             self.subgoal_published = False
 
     def _align_start_to_pose(self) -> bool:
-        """현재 위치(map 프레임) 최근접 경로 노드를 시작 목표로 정렬."""
+        """경로 합류 노드를 골라 시작 목표로 정렬.
+
+        기본은 비용 기반(접근거리 + 잔여 경로거리 최소). join_nearest:=true 로
+        예전 최근접 규칙으로 되돌릴 수 있다 — 회귀 비교용.
+        """
         if self.current_pose is None or not self.path_manager.path_nodes:
             return False
-        idx = self.path_manager.align_to_position(
-            self.current_pose.pose.position.x,
-            self.current_pose.pose.position.y)
+        px = self.current_pose.pose.position.x
+        py = self.current_pose.pose.position.y
+        # cap=0 이면 어떤 후보도 상한을 통과하지 못해 최근접 폴백으로 떨어진다
+        # — 그게 곧 예전 규칙이라 별도 분기를 두지 않는다.
+        cap = 0.0 if self._join_nearest else self._join_max_approach
+        idx = self.path_manager.align_to_position(px, py, max_approach_m=cap)
         node = self.path_manager.get_current_target_node()
+        rule = 'nearest' if self._join_nearest else 'min(approach+remaining)'
         self.get_logger().info(
-            f'start node unspecified -> nearest node idx {idx}'
-            f' ({node["id"] if node else "?"})')
+            f'start node unspecified -> join idx {idx} '
+            f'({node["id"] if node else "?"}) by {rule}')
         return True
 
     def planned_path_callback(self, msg: PlannedPath):
