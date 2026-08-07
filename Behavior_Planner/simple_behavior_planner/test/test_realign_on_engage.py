@@ -14,8 +14,9 @@
 import math
 import sys
 
-sys.path.insert(0, '/home/ppub/scv_ws/src/command_center/Behavior_Planner/'
-                   'simple_behavior_planner')
+import os
+# 절대경로 금지 — 차량에서 실행되지 않는다 (test_join_rule.py 와 같은 이유).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from simple_behavior_planner.path_manager import PathManager  # noqa: E402
 
 P = F = 0

@@ -3,8 +3,11 @@
 import math
 import sys
 
-sys.path.insert(0, '/home/ppub/scv_ws/src/command_center/Behavior_Planner/'
-                   'simple_behavior_planner')
+import os
+# 절대경로를 박으면 개발 PC 밖에서 죽는다 — 차량(/home/scv/SCV_park)에서
+# 이 테스트가 ModuleNotFoundError 로 실행조차 안 됐다. 패키지 루트는
+# 이 파일 기준 한 단계 위다.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from simple_behavior_planner.path_manager import PathManager  # noqa: E402
 
 P = F = 0
