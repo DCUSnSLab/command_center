@@ -4,7 +4,7 @@
 #   upload_bags.sh ~/bags/field_20260714_145901 [more...]
 #   upload_bags.sh                 # no args: today's bags under ~/bags
 set -u
-A=http://203.250.35.87:31447
+A=http://203.250.33.67:31447
 BAGS=("$@")
 if [ ${#BAGS[@]} -eq 0 ]; then
   mapfile -t BAGS < <(ls -d ~/bags/*"$(date +%Y%m%d)"* 2>/dev/null)
