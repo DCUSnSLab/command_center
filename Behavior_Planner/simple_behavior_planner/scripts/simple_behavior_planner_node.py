@@ -14,7 +14,7 @@ from typing import Optional
 
 # ROS2 messages
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, String, Header, Int32
 
 from command_center_interfaces.msg import (
@@ -288,6 +288,22 @@ class SimpleBehaviorPlannerNode(Node):
         self._realign_move_m = self.get_parameter('realign_manual_move_m').value
         self._align_pose = None      # 마지막 합류 계산 시점의 위치
 
+        # 합류 후보까지의 접근 직선 통행성 검사 (2026-08-11 챔버).
+        # 원본 /costmap 을 쓴다 — /costmap_keepout 은 경로에서 만든 코리도를
+        # 얹은 것이라, 그걸로 합류를 고르면 순환 논리가 된다.
+        self.declare_parameter('join_check_approach', True)
+        self.declare_parameter('join_costmap_topic', '/costmap')
+        self.declare_parameter('join_clear_half_width_m', 0.45)
+        self.declare_parameter('join_clear_lethal', 90)
+        self._join_check_approach = self.get_parameter('join_check_approach').value
+        self._join_clear_half_w = self.get_parameter('join_clear_half_width_m').value
+        self._join_clear_lethal = self.get_parameter('join_clear_lethal').value
+        self._costmap = None
+        if self._join_check_approach:
+            self.create_subscription(
+                OccupancyGrid, self.get_parameter('join_costmap_topic').value,
+                lambda m: setattr(self, '_costmap', m), 1)
+
         # 베이스가 우리 명령을 듣지 않는 동안 차단 에스컬레이션을 보류한다.
         # hunter_msgs 가 없는 환경(챔버 시뮬)은 조용히 생략 — 항상 청취로
         # 간주해 기존 거동 보존.
@@ -390,12 +406,71 @@ class SimpleBehaviorPlannerNode(Node):
         # cap=0 이면 어떤 후보도 상한을 통과하지 못해 최근접 폴백으로 떨어진다
         # — 그게 곧 예전 규칙이라 별도 분기를 두지 않는다.
         cap = 0.0 if self._join_nearest else self._join_max_approach
-        idx = self.path_manager.align_to_position(px, py, max_approach_m=cap)
+        clear = self._approach_clear if self._join_check_approach else None
+        idx = self.path_manager.align_to_position(
+            px, py, max_approach_m=cap, approach_clear=clear)
         node = self.path_manager.get_current_target_node()
         rule = 'nearest' if self._join_nearest else 'min(approach+remaining)'
+        if clear is not None:
+            rule += '+approach_clear'
         self.get_logger().info(
             f'start node unspecified -> join idx {idx} '
             f'({node["id"] if node else "?"}) by {rule}')
+        return True
+
+    def _approach_clear(self, x0: float, y0: float, x1: float, y1: float) -> bool:
+        """(x0,y0)->(x1,y1) map 프레임 직선이 코스트맵에서 통행 가능한가.
+
+        합류란 곧 "여기서 저 노드까지 경로 밖을 직진한다"는 뜻이다. 그 직선이
+        막혀 있으면 그 노드는 합류점이 될 수 없다 — 2026-08-11 챔버에서 이
+        검사가 없어 차량이 매핑된 경로를 통째로 건너뛰고 지름길을 시도하다
+        장애물에 갇혔다(3/3 미도달). 경로는 바로 그 구역을 우회하려고 그려진
+        것이었다.
+
+        코스트맵이나 TF 가 아직 없으면 **참을 반환한다**(fail-open). 여기서
+        거짓을 내면 합류 자체가 막혀 차량이 기동 직후 멎는다 — 정보 부족을
+        장애물로 취급하면 안 된다.
+        """
+        grid = self._costmap
+        if grid is None:
+            return True
+        try:
+            tr = self.waypoint_publisher.tf_buffer.lookup_transform(
+                grid.header.frame_id, 'map', rclpy.time.Time())
+        except Exception:
+            return True
+        tx = tr.transform.translation.x
+        ty = tr.transform.translation.y
+        q = tr.transform.rotation
+        th = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                        1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        c, s = math.cos(th), math.sin(th)
+
+        def to_grid(mx, my):
+            gx = c * mx - s * my + tx
+            gy = s * mx + c * my + ty
+            res = grid.info.resolution
+            col = int((gx - grid.info.origin.position.x) / res)
+            row = int((gy - grid.info.origin.position.y) / res)
+            return col, row
+
+        w, h = grid.info.width, grid.info.height
+        d = math.hypot(x1 - x0, y1 - y0)
+        if d <= 1e-6:
+            return True
+        # 로봇 반폭만큼 좌우로도 훑는다 — 중심선만 보면 폭이 있는 차량이
+        # 스쳐 지나갈 수 없는 틈을 통행 가능으로 판정한다.
+        nx, ny = -(y1 - y0) / d, (x1 - x0) / d
+        steps = max(2, int(d / max(grid.info.resolution, 0.05)))
+        for k in range(steps + 1):
+            t = k / steps
+            bx, by = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+            for off in (-self._join_clear_half_w, 0.0, self._join_clear_half_w):
+                col, row = to_grid(bx + nx * off, by + ny * off)
+                if not (0 <= col < w and 0 <= row < h):
+                    continue          # 코스트맵 밖은 미지 — 막힌 것으로 보지 않는다
+                if grid.data[row * w + col] >= self._join_clear_lethal:
+                    return False
         return True
 
     def planned_path_callback(self, msg: PlannedPath):
