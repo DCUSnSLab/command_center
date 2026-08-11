@@ -18,6 +18,8 @@ class PathManager:
         self.current_target_index = 0
         self.is_path_following = False
         self.last_completed_goal_id = None
+        # 실제로 곁을 지나온 노드의 최대 인덱스. -1 = 아직 아무 데도 안 지남.
+        self.max_passed_index = -1
 
     def update_path(self, planned_path: PlannedPath) -> None:
         """새로운 경로로 업데이트"""
@@ -45,13 +47,35 @@ class PathManager:
         self.current_target_index = 0
         self.is_path_following = True
         self.last_completed_goal_id = None
+        self.max_passed_index = -1
+
+    def note_position(self, x: float, y: float, pass_radius: float = 2.0) -> int:
+        """현재 위치를 통과 이력에 반영. 지나온 노드의 최대 인덱스를 돌려준다.
+
+        "합류해도 되는 앞쪽 노드"와 "가깝기만 한 앞쪽 노드"는 기하만으로
+        구분되지 않는다. 둘 다 최근접이 앞쪽에 있기 때문이다:
+
+          2026-08-06 필드  경로 옆 20 m 주행 -> 앞 노드들을 **지나온 게 맞다**
+          2026-08-11 챔버  경로 옆 6 m 이격  -> 중간 노드를 **지나온 적 없다**
+
+        갈라놓는 것은 통과 이력이다. 차량이 pass_radius 안으로 들어와 본
+        노드만 '지나왔다'고 보고, 합류는 거기서 한 칸까지만 허용한다.
+        """
+        for i, nd in enumerate(self.path_nodes):
+            if i <= self.max_passed_index:
+                continue
+            if math.hypot(nd['x'] - x, nd['y'] - y) <= pass_radius:
+                self.max_passed_index = i
+        return self.max_passed_index
 
     def align_to_position(self, x: float, y: float,
                           max_approach_m: float = 25.0,
                           approach_weight: float = 1.5,
                           max_skip_nodes: int = 2,
                           max_skip_from_current: int = 0,
-                          approach_clear=None) -> int:
+                          approach_clear=None,
+                          limit_to_passed: bool = True,
+                          pass_radius: float = 2.0) -> int:
         """시작 노드 미지정 시 경로에 합류할 노드를 고른다.
 
         최근접이 아니라 **접근거리 + 그 노드부터 목표까지 남은 경로거리**가
@@ -90,6 +114,8 @@ class PathManager:
         if not self.path_nodes:
             return 0
         n = len(self.path_nodes)
+        if limit_to_passed:
+            self.note_position(x, y, pass_radius)
         # 각 노드에서 경로 끝(목표)까지 남은 거리
         rem = [0.0] * n
         for i in range(n - 2, -1, -1):
@@ -103,6 +129,16 @@ class PathManager:
         i_near = d2.index(min(d2))
         i_max = min(n - 1, i_near + max_skip_nodes)
         i_lo = i_near
+        # 통과 이력이 **있을 때만** 게이트한다. 이력이 없다는 건 아직 경로에
+        # 붙어 본 적이 없다는 뜻이고, 그때는 앞쪽 합류가 맞다 — 2026-08-05
+        # 필드가 그 경우다(차량이 경로 옆에 놓인 채 기동, 경로 머리는 뒤쪽).
+        # 여기까지 게이트하면 그날 고친 '경로 머리로 되돌아가기'가 되살아난다.
+        # 게이트의 대상은 **이동 후 따라잡기**이지 최초 합류가 아니다.
+        gate = limit_to_passed and self.max_passed_index >= 0
+        if gate:
+            # 지나온 마지막 노드의 **다음 칸**까지만 허용한다.
+            i_max = min(i_max, self.max_passed_index + 1)
+            i_lo = min(i_lo, i_max)
         if max_skip_from_current > 0:
             i_lo = min(i_lo, self.current_target_index)
             i_max = min(i_max, self.current_target_index + max_skip_from_current)
@@ -131,8 +167,13 @@ class PathManager:
             # 여기서 최근접으로 바로 떨어지면 방금 막혀서 뺀 그 노드로
             # 되돌아간다(챔버 실측: 최근접이 곧 막힌 P3 라 검사가 무효화됐다).
             best_i = pick(0, n - 1, True)
-        if best_i is None:      # 통과 후보 없음 — 최근접으로 합류(합류 불가 방지)
-            best_i = i_near
+        if best_i is None:
+            # 통과 후보 없음 — 합류 불가로 멎지 않게 되돌린다. 다만 최근접으로
+            # 그냥 떨어지면 통과 게이트가 무효가 된다(실측: 경로에서 27 m 떨어진
+            # 위치가 max_approach 를 넘겨 전부 탈락하자 지나온 적 없는 경로 끝이
+            # 선택됐다). 게이트가 켜져 있으면 그 상한 안에서 되돌린다.
+            best_i = (min(i_near, self.max_passed_index + 1)
+                      if gate else i_near)
         self.current_target_index = best_i
         return self.current_target_index
 

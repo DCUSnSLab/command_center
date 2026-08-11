@@ -295,9 +295,11 @@ class SimpleBehaviorPlannerNode(Node):
         self.declare_parameter('join_costmap_topic', '/costmap')
         self.declare_parameter('join_clear_half_width_m', 0.45)
         self.declare_parameter('join_clear_lethal', 90)
+        self.declare_parameter('join_pass_radius_m', 2.0)
         self._join_check_approach = self.get_parameter('join_check_approach').value
         self._join_clear_half_w = self.get_parameter('join_clear_half_width_m').value
         self._join_clear_lethal = self.get_parameter('join_clear_lethal').value
+        self._join_pass_radius = self.get_parameter('join_pass_radius_m').value
         self._costmap = None
         if self._join_check_approach:
             self.create_subscription(
@@ -361,6 +363,14 @@ class SimpleBehaviorPlannerNode(Node):
         # 주행이 아니라 앵커 스냅/FAST-LIO 재초기화다 — 그때만 다시 정렬한다.
         prev = self.current_pose
         self.current_pose = pose_stamped
+
+        # 통과 이력 누적. 합류가 '지나온 노드' 까지만 앞서갈 수 있게 하는
+        # 근거이며, 매 포즈마다 쌓아야 RC 주행 구간이 제대로 기록된다
+        # (합류 계산 시점에만 표본하면 그 사이를 놓친다).
+        if self.path_manager.path_nodes:
+            self.path_manager.note_position(
+                pose_stamped.pose.position.x, pose_stamped.pose.position.y,
+                self._join_pass_radius)
         if prev is not None and getattr(self, '_unpinned_route', False):
             dt = ((msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
                   - (prev.header.stamp.sec + prev.header.stamp.nanosec * 1e-9))

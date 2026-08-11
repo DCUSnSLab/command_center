@@ -58,13 +58,26 @@ check('(F) 현재기준 상한 2 를 켜면 따라잡기가 막힌다 — 그날
 CHAMBER = [('P0', 0, 1), ('P1', 0, 3), ('P2', 0, 5), ('P3', 3, 5)]
 V_CH = (6.0, 1.0)
 
+# 옛 거동(상한 전부 없음)이 그날의 실패를 만든다는 증거를 남긴다.
 pm3 = mk(CHAMBER)
-i_ch = pm3.align_to_position(*V_CH)
+i_ch = pm3.align_to_position(*V_CH, limit_to_passed=False)
 check('(C) 상한 없으면 경로 끝(P3)으로 건너뛴다 — 챔버 실패 재현',
       i_ch == 3, f'(idx {i_ch} = {CHAMBER[i_ch][0]})')
 
+# 기본값에서는 재현되지 않아야 한다. 실제 챔버처럼 RC 주행 이력을 넣는다 —
+# 게이트는 '이동 후 따라잡기'를 대상으로 하므로 이력이 있어야 작동한다.
+def ch_with_history():
+    pm = mk(CHAMBER)
+    for k in range(13):              # (0,1) -> (6,1) RC 주행
+        pm.note_position(0.5 * k, 1.0)
+    return pm
+
+i_ch_def = ch_with_history().align_to_position(*V_CH)
+check('(C) 기본값에서는 건너뛰지 않는다', i_ch_def < 3,
+      f'(idx {i_ch_def} = {CHAMBER[i_ch_def][0]})')
+
 pm4 = mk(CHAMBER)
-i_ch2 = pm4.align_to_position(*V_CH, max_skip_from_current=2)
+i_ch2 = pm4.align_to_position(*V_CH, max_skip_from_current=2, limit_to_passed=False)
 check('(C) 현재기준 상한 2 로 건너뛰기 차단', i_ch2 <= 2,
       f'(idx {i_ch2} = {CHAMBER[i_ch2][0]})')
 
@@ -100,10 +113,60 @@ i_f3 = pm6.align_to_position(*V_ENGAGE, approach_clear=lambda *a: True)
 check('(F) approach_clear 켜도 따라잡기 유지', i_f3 == i_engage,
       f'(idx {i_f3})')
 
-# 전부 막히면 최근접으로 폴백 — 합류 불가로 멎지 않는다
-pm7 = mk(CHAMBER)
-i_blk = pm7.align_to_position(*V_CH, approach_clear=lambda *a: False)
-check('전 후보 차단 시 최근접 폴백', i_blk == 3, f'(idx {i_blk})')
+# 전부 막혀도 합류 불가로 멎지 않는다. 다만 되돌아갈 곳은 '최근접'이 아니라
+# 통과 게이트 안이다 — 최근접으로 떨어지면 방금 막혀서 뺀 노드로 돌아간다.
+i_blk = ch_with_history().align_to_position(*V_CH, approach_clear=lambda *a: False)
+check('전 후보 차단 시에도 합류점은 정해진다(게이트 안)', i_blk <= 2,
+      f'(idx {i_blk})')
+
+pm7b = mk(CHAMBER)
+i_blk2 = pm7b.align_to_position(*V_CH, approach_clear=lambda *a: False,
+                                limit_to_passed=False)
+check('게이트를 끄면 종전대로 최근접 폴백', i_blk2 == 3, f'(idx {i_blk2})')
+
+
+# --- 통과 이력 기준 (limit_to_passed) -----------------------------------
+# "가까운가" 가 아니라 "지나왔는가" 로 가른다. 위 두 사례가 기하만으로는
+# 구분되지 않는 것을 이력이 갈라 준다.
+
+# (F) 필드: RC 로 경로 옆을 훑고 지나갔다 -> 지나온 노드까지 따라잡기 허용
+pm8 = mk(FIELD)
+pm8.align_to_position(*V_START, limit_to_passed=True)
+# RC 주행을 표본으로 재현 (경로에서 ~1.1 m 옆을 따라 이동)
+for k in range(21):
+    t = k / 20
+    pm8.note_position(V_START[0] + (V_ENGAGE[0] - V_START[0]) * t,
+                      V_START[1] + (V_ENGAGE[1] - V_START[1]) * t)
+i_f8 = pm8.align_to_position(*V_ENGAGE, limit_to_passed=True)
+check('(F) 곁을 지나온 노드까지는 따라잡기 허용', i_f8 >= i_start + 3,
+      f'(idx {i_f8}, 지나온 최대 {pm8.max_passed_index})')
+
+# (C) 챔버: 경로에서 6 m 옆을 지나갔을 뿐 P1/P2 곁에 간 적이 없다
+pm9 = mk(CHAMBER)
+for k in range(13):                      # (0,1) -> (6,1) RC 주행
+    pm9.note_position(0.5 * k, 1.0)
+i_c9 = pm9.align_to_position(*V_CH, limit_to_passed=True)
+# P1(0,3) 은 RC 선(y=1)에서 정확히 2.0 m — pass_radius 경계라 '지나옴'으로
+# 잡힌다. 규칙은 지나온 다음 칸까지 허용하므로 P2 까지가 상한이다. 중요한
+# 것은 **경로 끝 P3 로 건너뛰지 않는 것**이고, P2 로의 접근 직선은
+# approach_clear 가 다시 거른다(둘이 겹쳐 막는다).
+check('(C) 지나온 적 없는 경로 끝으로는 건너뛰지 않음', i_c9 <= 2,
+      f'(idx {i_c9} = {CHAMBER[i_c9][0]}, 지나온 최대 {pm9.max_passed_index})')
+
+pm9b = mk(CHAMBER)
+for k in range(13):
+    pm9b.note_position(0.5 * k, 1.0)
+i_c9b = pm9b.align_to_position(*V_CH, limit_to_passed=True, approach_clear=clear)
+check('(C) 이력+접근검사 함께면 경로 유지', i_c9b <= 1,
+      f'(idx {i_c9b} = {CHAMBER[i_c9b][0]})')
+
+# 통과 이력이 아예 없으면 게이트하지 않는다 — 2026-08-05 최초 합류 보호.
+# 그날 차량은 경로 옆에 놓인 채 기동했고(경로 머리는 뒤쪽) 앞쪽 합류가
+# 맞았다. 여기까지 게이트하면 그 수정이 되살아나 무효가 된다.
+pm10 = mk(CHAMBER)
+i_c10 = pm10.align_to_position(20.0, 20.0, limit_to_passed=True)
+check('이력 없으면 게이트하지 않음 (8/5 최초 합류 보호)',
+      i_c10 == 3 and pm10.max_passed_index == -1, f'(idx {i_c10})')
 
 print(f"\n{P} passed, {F} failed")
 sys.exit(1 if F else 0)
