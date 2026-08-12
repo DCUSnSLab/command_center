@@ -54,6 +54,17 @@ def generate_launch_description():
         description='Keepout corridor half-width in metres'
     )
 
+    # 순항 제어기 선택 (2026-08-12, 3분할 구조): 'mppi' = 종전 MPPI 노드,
+    # 'mpc' = 외부 Frenet MPC 가 /cmd_vel 을 맡는다 — 이 경우 이 파일은
+    # 인지 체인(costmap processor + corridor keepout)만 띄우고 MPPI 본체는
+    # 띄우지 않는다 (/smppi/robot_state·/costmap_keepout 은 MPC 도 소비).
+    controller_arg = DeclareLaunchArgument(
+        'controller',
+        default_value='mppi',
+        description="'mppi' launches mppi_main_node; 'mpc' skips it "
+                    "(external Frenet MPC owns /cmd_vel)"
+    )
+
     # Get configuration
     use_sim_time = LaunchConfiguration('use_sim_time')
     enable_visualization = LaunchConfiguration('enable_visualization')
@@ -105,11 +116,14 @@ def generate_launch_description():
     )
 
     # MPPI Main Controller Node
+    from launch.substitutions import PythonExpression
     mppi_main_node = Node(
         package='smppi',
         executable='mppi_main_node.py',
         name='mppi_main_controller',
         namespace=namespace,
+        condition=IfCondition(PythonExpression(
+            ["'", LaunchConfiguration('controller'), "' == 'mppi'"])),
         parameters=[
             default_config_path,
             {
@@ -150,6 +164,7 @@ def generate_launch_description():
         config_file_arg,
         namespace_arg,
         corridor_half_width_arg,
+        controller_arg,
         
         # Group all nodes
         GroupAction([

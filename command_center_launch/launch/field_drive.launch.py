@@ -55,7 +55,8 @@ Usage:
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+                            IncludeLaunchDescription, TimerAction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
@@ -88,6 +89,9 @@ def generate_launch_description():
     max_slew_mps = LaunchConfiguration('max_slew_mps', default='0.5')
     cov_ref_m2 = LaunchConfiguration('cov_ref_m2', default='1.0')
     corridor_half_width = LaunchConfiguration('corridor_half_width', default='1.4')
+    controller = LaunchConfiguration('controller', default='mppi')
+    mpc_dir = LaunchConfiguration('mpc_tools_dir',
+                                  default='/home/scv/scv_sim_tools/mpc')
 
     # Map must contain UtmInfo (F2: UtmInfo-less maps yield zeroed
     # waypoints) and its node[0] must equal the navsat datum in
@@ -153,6 +157,21 @@ def generate_launch_description():
         # 선언 없이 LaunchConfiguration(default=) 만으로도 동작하지만 그러면
         # `ros2 launch --show-args` 에 뜨지 않아 롤백 스위치가 있는지 현장에서
         # 알 수 없다. 게이트를 끄는 인자는 반드시 목록에 보여야 한다.
+        # 순항 제어기 3분할 스위치 (2026-08-12): mppi = 종전(현장검증 롤백),
+        # mpc = Frenet MPC + Hybrid A* 기동 계층(챔버 검증 0639d6a). 새 구조의
+        # 순항은 MPC 이고 MPPI 는 롤백 수단으로만 남긴다.
+        DeclareLaunchArgument(
+            'controller', default_value='mppi',
+            description="'mppi'(field-proven rollback) | 'mpc'(Frenet MPC + "
+                        "maneuver layer, chamber-validated 2026-08-12)"),
+        DeclareLaunchArgument(
+            'mpc_tools_dir', default_value='/home/scv/scv_sim_tools/mpc',
+            description='frenet_mpc_node.py / maneuver_node.py location '
+                        '(scv_sim_tools clone, synced from ppub canonical)'),
+        DeclareLaunchArgument(
+            'with_maneuver', default_value='true',
+            description='controller:=mpc 일 때 Hybrid A* 기동 계층도 기동 '
+                        '(재정렬 K-turn + 막힘 후진 탈출)'),
         DeclareLaunchArgument(
             'anchor_yaw_autocal', default_value='true',
             description='map_anchor 온라인 yaw 보정 (2026-08-04 반대주행 대책). '
@@ -226,7 +245,26 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'enable_visualization': enable_visualization,
                 'corridor_half_width': corridor_half_width,
+                # 'mpc' 면 인지 체인만 (mppi_main 미기동, /cmd_vel 은 MPC 소유)
+                'controller': controller,
             }),
+            # Frenet MPC (순항) — smppi 인지 체인의 /smppi/robot_state,
+            # /costmap_keepout 을 소비하고 /cmd_vel, /goal_status 를 낸다
+            # (MPPI 와 토픽 계약 동일 — 행동계획/베이스 무수정).
+            ExecuteProcess(
+                cmd=['python3',
+                     PathJoinSubstitution([mpc_dir, 'frenet_mpc_node.py'])],
+                condition=IfCondition(PythonExpression(
+                    ["'", controller, "' == 'mpc'"])),
+                output='log', respawn=True, respawn_delay=1.0),
+            # Hybrid A* 기동 계층 — /maneuver/active 로 MPC 와 조율
+            ExecuteProcess(
+                cmd=['python3',
+                     PathJoinSubstitution([mpc_dir, 'maneuver_node.py'])],
+                condition=IfCondition(PythonExpression(
+                    ["'", controller, "' == 'mpc' and '",
+                     LaunchConfiguration('with_maneuver'), "' == 'true'"])),
+                output='log', respawn=True, respawn_delay=1.0),
         ]),
 
         # --- t=15: behavior planner (L3) ------------------------------------
