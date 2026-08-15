@@ -173,6 +173,17 @@ def generate_launch_description():
             description='controller:=mpc 일 때 Hybrid A* 기동 계층도 기동 '
                         '(재정렬 K-turn + 막힘 후진 탈출)'),
         DeclareLaunchArgument(
+            'scan_yaw_init', default_value='0',
+            description='1/true: 정지 스캔 정합(standstill_yaw_init.py)의 '
+                        '/scan_yaw_init/pose 를 yaw 시드+앵커로 소비 — '
+                        "'RC 10 m 전진' 수렴 절차의 정지 대체. 기준 지도는 "
+                        'capture_yaw_ref.sh 로 출발 지점마다 1회 촬영.'),
+        DeclareLaunchArgument(
+            'map_anchor_pcd', default_value='0',
+            description='1/true: 본선 PCD 정합기(/pcd/global_pose) 하이브리드 '
+                        '앵커링. SCV_NEW_MAP0721 계열 지도 필요. '
+                        'scan_yaw_init 과는 배타(둘 다 켜면 scan 우선).'),
+        DeclareLaunchArgument(
             'anchor_yaw_autocal', default_value='true',
             description='map_anchor 온라인 yaw 보정 (2026-08-04 반대주행 대책). '
                         'false 로 두면 anchor_yaw_offset 시드만 쓴다 — 회귀 '
@@ -199,7 +210,13 @@ def generate_launch_description():
             _include('robot_localization', 'scv_dual_ekf.launch.py', {
                 'use_sim_time': use_sim_time,
                 'with_fastlio': with_fastlio,
-                'map_anchor_pcd': '0',
+                'map_anchor_pcd': LaunchConfiguration(
+                    'map_anchor_pcd', default='0'),
+                # 정지 스캔 정합으로 yaw 를 초기화한다(2026-08-13 챔버 검증).
+                # standstill_yaw_init.py 를 같은 지점에서 돌려 주면 전진
+                # 없이 map_anchor/yaw_converged 가 통과한다.
+                'scan_yaw_init': LaunchConfiguration(
+                    'scan_yaw_init', default='0'),
                 'max_slew_mps': max_slew_mps,
                 'cov_ref_m2': cov_ref_m2,
                 'lio_source': LaunchConfiguration('lio_source'),
