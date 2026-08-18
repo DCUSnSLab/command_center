@@ -268,16 +268,24 @@ def generate_launch_description():
             # Frenet MPC (순항) — smppi 인지 체인의 /smppi/robot_state,
             # /costmap_keepout 을 소비하고 /cmd_vel, /goal_status 를 낸다
             # (MPPI 와 토픽 계약 동일 — 행동계획/베이스 무수정).
+            # OPENBLAS/OMP=1: numpy 가 띄우는 OpenBLAS 작업자 스레드들이
+            # 호출 간격을 sched_yield 스핀으로 태워 1코어를 잠식, velodyne
+            # 파이프라인 기아 -> 코스트맵 페일세이프를 만들었다 (2026-08-18
+            # 필드 A/B 실측 107% -> 0.8%). MPC 행렬은 2x2 라 성능 무영향.
             ExecuteProcess(
                 cmd=['python3',
                      PathJoinSubstitution([mpc_dir, 'frenet_mpc_node.py'])],
                 condition=IfCondition(PythonExpression(
                     ["'", controller, "' == 'mpc'"])),
+                additional_env={'OPENBLAS_NUM_THREADS': '1',
+                                'OMP_NUM_THREADS': '1'},
                 output='log', respawn=True, respawn_delay=1.0),
             # Hybrid A* 기동 계층 — /maneuver/active 로 MPC 와 조율
             ExecuteProcess(
                 cmd=['python3',
                      PathJoinSubstitution([mpc_dir, 'maneuver_node.py'])],
+                additional_env={'OPENBLAS_NUM_THREADS': '1',
+                                'OMP_NUM_THREADS': '1'},
                 condition=IfCondition(PythonExpression(
                     ["'", controller, "' == 'mpc' and '",
                      LaunchConfiguration('with_maneuver'), "' == 'true'"])),
