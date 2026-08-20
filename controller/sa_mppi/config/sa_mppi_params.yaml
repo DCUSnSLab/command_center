@@ -95,7 +95,24 @@
       enable_cbf: true                    # ablation: false = 제동거리 CBF 속도상한 끄기
       enable_dynamic_aware: true          # 움직이는 장애물에만 감속/분산증가 (costmap 시간차분); 정적 기하는 obstacle cost로만 회피
       dynamic_min_cluster: 5              # 신뢰할 이동 셀 연결블롭 최소 크기 (flicker 거부)
+      dynamic_hold_frames: 25             # 모션 persistence ~2.5s: 이동했던 셀은 점유 유지 동안 dynamic 유지 (멈춘 보행자 대응)
+      dynamic_gate_cbf: true              # 속도상한을 '이동' 셀에만 반응 (false=모든 장애물=legacy)
+      dynamic_gate_covariance: true       # 공분산 증가를 '이동' 셀에만 반응 (false=정적 밀도=legacy)
+      dynamic_mask_source: 'detector'     # 실차는 항상 detector ('oracle'은 시뮬 전용: GT 위치 필요)
       sensor_error: 0.3                   # 인지 불확실성 마진 [m]
+
+      # 내부축① 횡가속 캡: v <= sqrt(a_lat_max/kappa)  [기본 off]
+      # max_v 1.5에서는 구속되지 않음(sqrt(2.0/0.766)=1.6 m/s) → 1.6 m/s 초과 주행 시에만 의미
+      enable_lat_acc: false
+      max_lat_acc: 2.0                    # 스키드/전복 마진 [m/s^2] (안락·적재 사양이면 1.0)
+
+      # 내부축② 정지 탈출 (정적 포켓 회복)  [기본 off — 첫 실차 주행에서는 끄고 시작]
+      # 3s 창에서 0.5m 미변위가 30s 지속 ∧ 외부(이동체) 부재 → σ_v×2.5, λ×2로 탐색 재배치
+      enable_escape: false
+      escape_progress_window_s: 3.0
+      escape_progress_m: 0.5
+      escape_trigger_s: 30.0              # 최후수단(군중 서행 중앙값 3.1s vs 포켓 208s로 결정)
+      escape_ramp_s: 2.0
       min_safety_range: 1.0               # 안전 범위 하한 [m]
       max_safety_range: 6.0               # 안전 범위 상한 [m]
       lookahead_time: 3.0                 # 감지 범위 시간지평 [s]
@@ -148,3 +165,11 @@
           reverse_scale: 1.00
           v_bias: 0.00
           lambda_scale: 1.00
+        escape:                           # 내부축② 정지 탈출 (enable_escape=true일 때만 발화)
+          noise_scale: 2.15
+          noise_scale_v: 2.50             # 속도축 확대 → 제동/후진 샘플 생성 (정지 시 δ노이즈는 무효)
+          noise_scale_delta: 1.80
+          speed_scale: 1.00
+          reverse_scale: 1.00
+          v_bias: 0.00
+          lambda_scale: 2.00              # 평탄 가중 → 일시적 비용 증가 수용

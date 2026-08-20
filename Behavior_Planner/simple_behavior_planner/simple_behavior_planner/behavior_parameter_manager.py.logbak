@@ -33,8 +33,8 @@ class BehaviorParameterManager:
         # Load behavior modifiers
         self.behavior_modifiers = behavior_modifiers_config.get('behavior_modifiers', {})
         
-        self.logger.debug(f"Loaded baseline params from: {smppi_config_path}")
-        self.logger.debug(f"Loaded {len(self.behavior_modifiers)} behavior modifiers")
+        self.logger.info(f"Loaded baseline params from: {smppi_config_path}")
+        self.logger.info(f"Loaded {len(self.behavior_modifiers)} behavior modifiers")
         
     
     def _load_smppi_baseline(self, config_path: str) -> Dict[str, Any]:
@@ -50,7 +50,7 @@ class BehaviorParameterManager:
             with open(resolved_path, 'r') as file:
                 config = yaml.safe_load(file)
                 
-            self.logger.debug(f"Successfully loaded SMPPI config from: {resolved_path}")
+            self.logger.info(f"Successfully loaded SMPPI config from: {resolved_path}")
             
             # Extract relevant parameters from SMPPI config structure
             ros_params = config.get('/**', {}).get('ros__parameters', {})
@@ -132,7 +132,7 @@ class BehaviorParameterManager:
                     package_share_dir = get_package_share_directory('simple_behavior_planner')
                     candidate_path = os.path.join(package_share_dir, 'config', config_path)
                     if os.path.exists(candidate_path):
-                        self.logger.debug(f"Found config in simple_behavior_planner: {candidate_path}")
+                        self.logger.info(f"Found config in simple_behavior_planner: {candidate_path}")
                         return candidate_path
                 except Exception:
                     pass
@@ -143,7 +143,7 @@ class BehaviorParameterManager:
                     package_share_dir = get_package_share_directory(package_name)
                     candidate_path = os.path.join(package_share_dir, 'config', config_path)
                     if os.path.exists(candidate_path):
-                        self.logger.debug(f"Found SMPPI config in package {package_name}: {candidate_path}")
+                        self.logger.info(f"Found SMPPI config in package {package_name}: {candidate_path}")
                         return candidate_path
                 except Exception:
                     continue  # Package not found, try next
@@ -249,7 +249,7 @@ class BehaviorParameterManager:
         if param_name in self.baseline_params:
             old_value = self.baseline_params[param_name]
             self.baseline_params[param_name] = value
-            self.logger.debug(f"Updated baseline {param_name}: {old_value} -> {value}")
+            self.logger.info(f"Updated baseline {param_name}: {old_value} -> {value}")
         else:
             self.logger.warn(f"Unknown baseline parameter: {param_name}")
     

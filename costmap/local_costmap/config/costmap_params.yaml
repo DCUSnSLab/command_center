@@ -48,6 +48,16 @@
     # Points within this footprint will be filtered out to remove robot body reflections
     robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
 
+    # === Semantic Static Layer ===
+    # map_provider 가 발행하는 의미 격자(주행가능/횡단보도/주행불가)를 얹는다.
+    # inflation **뒤에** 적용된다 — 주행불가는 사람이 지도에 그은 경계이지 부딪히는
+    # 물체가 아니므로 팽창시키면 좁은 길이 통째로 막힌다.
+    # 비용은 올리기만 한다: 지도상 주행가능이어도 지금 그 자리에 장애물이 있을 수 있다.
+    use_semantic_layer: true
+    semantic_grid_topic: '/map_provider_node/semantic/grid'
+    map_frame: 'map'
+    semantic_crosswalk_cost: 50   # 횡단보도 = 통행 가능하되 회피 선호 (0~100)
+
     # === Inflation Layer ===
     inflation_radius: 3.0        # Inflation radius in meters (safety margin around obstacles)
     cost_scaling_factor: 10.0     # Cost decay factor (higher = steeper decay, range: 1.0~20.0)

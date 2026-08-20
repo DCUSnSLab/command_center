@@ -60,7 +60,7 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
     semantic_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
       semantic_grid_topic_, qos,
       std::bind(&CostmapNode::semanticGridCallback, this, std::placeholders::_1));
-    RCLCPP_DEBUG(this->get_logger(), "Semantic layer on, waiting for %s",
+    RCLCPP_INFO(this->get_logger(), "Semantic layer on, waiting for %s",
                 semantic_grid_topic_.c_str());
   }
 
@@ -95,10 +95,10 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
     std::chrono::duration<double>(timer_period),
     std::bind(&CostmapNode::mainLoopCallback, this));
 
-  RCLCPP_INFO(this->get_logger(), "local costmap ready");
-  RCLCPP_DEBUG(this->get_logger(), "  PointCloud topic: %s", point_cloud_topic_.c_str());
-  RCLCPP_DEBUG(this->get_logger(), "  Odometry topic: %s", odom_topic_.c_str());
-  RCLCPP_DEBUG(this->get_logger(), "  Costmap size: %.1f x %.1f m (%.0f x %.0f cells)",
+  RCLCPP_INFO(this->get_logger(), "Local costmap node initialized");
+  RCLCPP_INFO(this->get_logger(), "  PointCloud topic: %s", point_cloud_topic_.c_str());
+  RCLCPP_INFO(this->get_logger(), "  Odometry topic: %s", odom_topic_.c_str());
+  RCLCPP_INFO(this->get_logger(), "  Costmap size: %.1f x %.1f m (%.0f x %.0f cells)",
     costmap_width_, costmap_height_,
     static_cast<double>(costmap_->getWidthCells()),
     static_cast<double>(costmap_->getHeightCells()));
@@ -268,7 +268,7 @@ void CostmapNode::semanticGridCallback(
   const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& msg)
 {
   semantic_layer_.setGrid(*msg);
-  RCLCPP_DEBUG(this->get_logger(),
+  RCLCPP_INFO(this->get_logger(),
               "Semantic grid received: %ux%u @ %.2f m, origin (%.1f, %.1f)",
               msg->info.width, msg->info.height, msg->info.resolution,
               msg->info.origin.position.x, msg->info.origin.position.y);

@@ -40,6 +40,10 @@ SA_PARAM_DEFAULTS = {
     'enable_cbf': True,               # ablation: braking-distance CBF speed cap
     'enable_dynamic_aware': True,     # brake/raise-variance only for MOVING obstacles (costmap temporal diff)
     'dynamic_min_cluster': 5,         # min moving cells in a connected blob to trust (rejects flicker)
+    'dynamic_hold_frames': 25,        # motion persistence ~2.5 s: a moved cell stays dynamic while occupied
+    'dynamic_gate_cbf': True,         # speed cap keys off MOVING cells only (False = any obstacle)
+    'dynamic_gate_covariance': True,  # covariance raise keys off MOVING cells only (False = static density)
+    'dynamic_mask_source': 'detector',  # 'oracle' is sim-only (needs ground-truth agent poses)
     'min_safety_range': 1.0, 'max_safety_range': 6.0, 'lookahead_time': 3.0,
     'crowded_cost_threshold': 10.0, 'max_reachable_half_angle_deg': 80.0,
     'crowded_density_entry': 0.03, 'crowded_density_exit': 0.03,
@@ -62,6 +66,22 @@ SA_PARAM_DEFAULTS = {
     'adaptation.curved.noise_scale_delta': 1.8, 'adaptation.curved.speed_scale': 1.0,
     'adaptation.curved.reverse_scale': 1.0, 'adaptation.curved.v_bias': 0.0,
     'adaptation.curved.lambda_scale': 1.0,
+    # Internal axis 1: lateral-acceleration cap v <= sqrt(a_lat_max / kappa).
+    # OFF by default: at max_v 1.5 it cannot bind (sqrt(2.0/0.766) = 1.6 m/s), so
+    # it only matters if the robot is allowed above ~1.6 m/s outdoors.
+    'enable_lat_acc': False, 'max_lat_acc': 2.0,
+    # Internal axis 2: standstill escape (static-pocket recovery).  OFF by
+    # default for first field runs — it widens sigma_v x2.5 and raises lambda,
+    # which is the right move in a dead end but should be enabled deliberately.
+    'enable_escape': False,
+    'escape_progress_window_s': 3.0,  # trailing window for the progress test
+    'escape_progress_m': 0.5,         # displacement counting as progress
+    'escape_trigger_s': 30.0,         # last resort: crowd crawl vs true pocket
+    'escape_ramp_s': 2.0,
+    'adaptation.escape.noise_scale': 2.15, 'adaptation.escape.noise_scale_v': 2.5,
+    'adaptation.escape.noise_scale_delta': 1.8, 'adaptation.escape.speed_scale': 1.0,
+    'adaptation.escape.reverse_scale': 1.0, 'adaptation.escape.v_bias': 0.0,
+    'adaptation.escape.lambda_scale': 2.0,
 }
 
 

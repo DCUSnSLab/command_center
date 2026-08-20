@@ -7,6 +7,7 @@ Based on BAE MPPI's dynamics but simplified
 import torch
 import math
 from typing import Tuple
+from .._verbose import vprint
 
 
 class AckermannModel:
@@ -24,7 +25,7 @@ class AckermannModel:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
         
-        print(f"[AckermannModel] wheelbase={self.wheelbase}, max_steering={self.max_steering_angle}")
+        vprint(f"[AckermannModel] wheelbase={self.wheelbase}, max_steering={self.max_steering_angle}")
     
     def forward(self, states: torch.Tensor, controls: torch.Tensor, dt: float) -> torch.Tensor:
         """

@@ -7,6 +7,7 @@ Abstract base class following Nav2 critic pattern
 import torch
 from abc import ABC, abstractmethod
 from typing import Optional, Any
+from .._verbose import vprint
 
 
 class BaseCritic(ABC):
@@ -30,7 +31,7 @@ class BaseCritic(ABC):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = torch.float32
         
-        print(f"[{self.name}] Initialized with weight={self.weight}")
+        vprint(f"[{self.name}] Initialized with weight={self.weight}")
     
     @abstractmethod
     def compute_cost(self, trajectories: torch.Tensor, controls: torch.Tensor,
@@ -58,12 +59,12 @@ class BaseCritic(ABC):
     def set_weight(self, weight: float):
         """Set critic weight"""
         self.weight = weight
-        print(f"[{self.name}] Weight updated to {self.weight}")
+        vprint(f"[{self.name}] Weight updated to {self.weight}")
     
     def set_enabled(self, enabled: bool):
         """Enable/disable critic"""
         self.enabled = enabled
-        print(f"[{self.name}] {'Enabled' if enabled else 'Disabled'}")
+        vprint(f"[{self.name}] {'Enabled' if enabled else 'Disabled'}")
     
     def normalize_angle(self, angle: torch.Tensor) -> torch.Tensor:
         """Normalize angle to [-pi, pi]"""

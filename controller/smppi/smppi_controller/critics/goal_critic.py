@@ -27,6 +27,7 @@ import math
 import torch
 from typing import Optional, Any, Tuple
 from .base_critic import BaseCritic
+from .._verbose import vprint
 
 
 class GoalCritic(BaseCritic):
@@ -67,7 +68,7 @@ class GoalCritic(BaseCritic):
         self.last_lookahead_yaw: Optional[torch.Tensor] = None
         self.last_target_direction: Optional[torch.Tensor] = None
 
-        print(f"[GoalCritic] lookahead={self._static_lookahead():.2f}m (static), "
+        vprint(f"[GoalCritic] lookahead={self._static_lookahead():.2f}m (static), "
               f"max_step={self.lookahead_max_step}m/cycle")
 
     # ------------------------------------------------------------------
@@ -105,7 +106,7 @@ class GoalCritic(BaseCritic):
         self.lookahead_max_step = params.get('lookahead_max_step', self.lookahead_max_step)
         self.use_multiple_waypoints = params.get('use_multiple_waypoints', self.use_multiple_waypoints)
         # legacy keys (lookahead_velocity_factor, curve_*, angle_scale, ...) are ignored
-        print("[GoalCritic] Parameters updated")
+        vprint("[GoalCritic] Parameters updated")
 
     # ------------------------------------------------------------------
     # Cost

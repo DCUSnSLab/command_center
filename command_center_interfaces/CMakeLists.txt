@@ -21,6 +21,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PauseCommand.msg"
   "msg/RequestReplan.msg"
   "msg/TargetWaypoints.msg"
+  "msg/RouteRequest.msg"
+  "msg/RouteStatus.msg"
   DEPENDENCIES std_msgs geometry_msgs map_interfaces
 )
 

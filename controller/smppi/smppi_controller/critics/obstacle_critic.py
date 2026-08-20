@@ -24,6 +24,7 @@ import numpy as np
 from typing import Optional, Any
 
 from .base_critic import BaseCritic
+from .._verbose import vprint
 
 
 class ObstacleCritic(BaseCritic):
@@ -52,7 +53,7 @@ class ObstacleCritic(BaseCritic):
         default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
         self.footprint = list(params.get('footprint', default_footprint))
         if len(self.footprint) < 6 or len(self.footprint) % 2 != 0:
-            print(f"[ObstacleCritic] Invalid footprint {self.footprint}, using default")
+            vprint(f"[ObstacleCritic] Invalid footprint {self.footprint}, using default")
             self.footprint = default_footprint
         self.footprint_padding = params.get('footprint_padding', 0.0)
 
@@ -67,12 +68,12 @@ class ObstacleCritic(BaseCritic):
         # subscriber thread, readers grab one local reference per call
         self.costmap_info = None
 
-        print(f"[ObstacleCritic] Footprint-sampled costmap collision checking")
-        print(f"[ObstacleCritic] collision_cost={self.collision_cost}, "
+        vprint(f"[ObstacleCritic] Footprint-sampled costmap collision checking")
+        vprint(f"[ObstacleCritic] collision_cost={self.collision_cost}, "
               f"repulsion_factor={self.repulsion_factor}, "
               f"collision_threshold>={self.collision_value_threshold}, "
               f"unknown_is_lethal={self.unknown_is_lethal}")
-        print(f"[ObstacleCritic] footprint vertices={len(self.footprint) // 2}, "
+        vprint(f"[ObstacleCritic] footprint vertices={len(self.footprint) // 2}, "
               f"padding={self.footprint_padding}, "
               f"sample_points={self.sample_points.shape[0]}")
 
@@ -242,7 +243,7 @@ class ObstacleCritic(BaseCritic):
                 self.footprint_padding = params['footprint_padding']
             self.sample_points = self._build_sample_points()
 
-        print(f"[ObstacleCritic] Parameters updated: "
+        vprint(f"[ObstacleCritic] Parameters updated: "
               f"collision={self.collision_cost}, repulsion={self.repulsion_factor}, "
               f"collision_threshold>={self.collision_value_threshold}, "
               f"unknown_is_lethal={self.unknown_is_lethal}, "

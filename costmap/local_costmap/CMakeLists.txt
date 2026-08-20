@@ -35,6 +35,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   src/point_cloud_processor.cpp
   src/inflation_layer.cpp
   src/denoise_layer.cpp
+  src/semantic_layer.cpp
   src/costmap_node.cpp
 )
 

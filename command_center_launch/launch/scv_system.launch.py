@@ -23,7 +23,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import (LaunchConfiguration, PythonExpression,
+                                  EnvironmentVariable)
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -38,6 +39,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     enable_visualization = LaunchConfiguration('enable_visualization')
     use_waypoint_manage = LaunchConfiguration('use_waypoint_manage')
+    route_tool = LaunchConfiguration('route_tool')
     # waypoint_manage 사용 시 BP 는 의미 목표(/target_waypoints)만 발행 (이중 발행 방지)
     waypoint_mode = PythonExpression(
         ["'external' if '", use_waypoint_manage, "' == 'true' else 'multiple'"])
@@ -47,10 +49,15 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_visualization', default_value='true'),
         DeclareLaunchArgument('use_waypoint_manage', default_value='false',
                               choices=['true', 'false']),
+        # 경로 지정 GUI. path_planner.launch.py 가 DISPLAY 유무로 기본값을 정하므로
+        # 여기서는 빈 값을 넘겨 그 판단을 그대로 쓴다 ('true'/'false' 로 덮어쓸 수 있다).
+        DeclareLaunchArgument('route_tool', default_value=EnvironmentVariable(
+            'SCV_ROUTE_TOOL', default_value='true' if os.environ.get('DISPLAY') else 'false'),
+            description='경로 지정 PyQt 툴 동시 실행'),
 
         # global planner (map_provider /graph + datum 소비, TF map→base_link 로 현재위치)
         _inc('scv_global_planner', 'path_planner.launch.py',
-             {'use_sim_time': use_sim_time}),
+             {'use_sim_time': use_sim_time, 'route_tool': route_tool}),
 
         # local costmap (odom 프레임; controller가 /costmap 소비하므로 먼저)
         TimerAction(period=1.0, actions=[

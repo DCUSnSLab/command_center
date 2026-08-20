@@ -14,6 +14,9 @@ from .waypoint_generator import MapWaypoint
 class GraphStore:
     def __init__(self):
         self._nodes: Dict[str, dict] = {}
+        # planned_path 에 실려오는 노드 캐시 — 그래프에 없는 임시 노드
+        # (GPS_START 등 planner 가 만드는 가상 시작/목표 노드) 해석용 fallback.
+        self._path_nodes: Dict[str, dict] = {}
         self._origin_easting: Optional[float] = None
         self._origin_northing: Optional[float] = None
 
@@ -31,6 +34,20 @@ class GraphStore:
         }
         return len(self._nodes)
 
+    def set_path_nodes(self, nodes) -> int:
+        """PlannedPath.path_data.nodes 수신 — 경로별 노드(임시 노드 포함) 캐시.
+        새 경로가 오면 통째로 교체 (이전 경로의 임시 노드는 무효)."""
+        self._path_nodes = {
+            n.id: {
+                "easting": n.easting,
+                "northing": n.northing,
+                "heading_deg": n.heading_deg,
+                "node_type": int(n.node_type),
+            }
+            for n in nodes
+        }
+        return len(self._path_nodes)
+
     def set_datum(self, utm_msg) -> None:
         self._origin_easting = utm_msg.origin_easting
         self._origin_northing = utm_msg.origin_northing
@@ -41,7 +58,8 @@ class GraphStore:
 
     def resolve(self, node_id: str) -> Optional[MapWaypoint]:
         """노드 ID -> map 프레임 waypoint. 미지 ID 는 None."""
-        n = self._nodes.get(node_id)
+        # 그래프 우선 (graph.json 수정/재발행 반영), 임시 노드는 경로 캐시로 fallback
+        n = self._nodes.get(node_id) or self._path_nodes.get(node_id)
         if n is None or self._origin_easting is None:
             return None
         # heading(deg, 그래프 규약) -> map yaw [rad]
