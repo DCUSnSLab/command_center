@@ -75,7 +75,7 @@ class VisualizationNode(Node):
             self.visualization_callback
         )
         
-        self.get_logger().info("smppi visualization ready")
+        self.get_logger().info(f"SMPPI Visualization Node initialized at {self.visualization_frequency}Hz")
     
     def _declare_parameters(self):
         """Declare ROS2 parameters"""
@@ -135,7 +135,7 @@ class VisualizationNode(Node):
         """Initialize TF listener"""
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.get_logger().debug("TF listener initialized for visualization")
+        self.get_logger().info("TF listener initialized for visualization")
     
     def _setup_topics(self):
         """Setup ROS2 topics"""
@@ -162,11 +162,11 @@ class VisualizationNode(Node):
         if self.waypoint_mode == 'single':
             self.goal_sub = self.create_subscription(
                 PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
-            self.get_logger().debug(f"Visualization single mode: subscribed to {self.goal_topic}")
+            self.get_logger().info(f"Visualization single mode: subscribed to {self.goal_topic}")
         elif self.waypoint_mode == 'multiple':
             self.multiple_waypoints_sub = self.create_subscription(
                 MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
-            self.get_logger().debug(f"Visualization multiple mode: subscribed to {self.multiple_waypoints_topic}")
+            self.get_logger().info(f"Visualization multiple mode: subscribed to {self.multiple_waypoints_topic}")
         else:
             # Fallback - subscribe to both
             self.goal_sub = self.create_subscription(
@@ -179,7 +179,7 @@ class VisualizationNode(Node):
         self.marker_pub = self.create_publisher(
             MarkerArray, self.markers_topic, reliable_qos)
         
-        self.get_logger().debug(f"Visualization topics configured")
+        self.get_logger().info(f"Visualization topics configured")
     
     
     def path_callback(self, msg: OptimalPath):

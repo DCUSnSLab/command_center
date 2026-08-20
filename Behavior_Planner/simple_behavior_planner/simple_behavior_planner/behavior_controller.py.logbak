@@ -53,7 +53,7 @@ class BehaviorController:
             # Initialize parameter manager
             self.param_manager = BehaviorParameterManager(smppi_config_path, behavior_config)
 
-            self.node.get_logger().debug(f"Behavior controller initialized with config: {full_config_path}")
+            self.node.get_logger().info(f"Behavior controller initialized with config: {full_config_path}")
             self._log_available_behaviors()
 
         except Exception as e:
@@ -77,9 +77,9 @@ class BehaviorController:
             return
 
         behaviors = self.param_manager.get_available_behaviors()
-        self.node.get_logger().debug(f"Available behaviors: {len(behaviors)}")
+        self.node.get_logger().info(f"Available behaviors: {len(behaviors)}")
         for behavior_type, description in behaviors.items():
-            self.node.get_logger().debug(f"  {behavior_type}: {description}")
+            self.node.get_logger().info(f"  {behavior_type}: {description}")
 
     def update_behavior(self, node_type: int) -> bool:
         """행동 업데이트"""
@@ -129,10 +129,10 @@ class BehaviorController:
             'goal_weight': params.get('goal_weight', 'N/A')
         }
 
-        self.node.get_logger().debug(f"🔄 [BEHAVIOR UPDATE] {self.current_node_type}->{node_type}: {behavior_desc}")
+        self.node.get_logger().info(f"🔄 [BEHAVIOR UPDATE] {self.current_node_type}->{node_type}: {behavior_desc}")
         for param, value in key_params.items():
             if value != 'N/A':
-                self.node.get_logger().debug(f"   {param}: {value}")
+                self.node.get_logger().info(f"   {param}: {value}")
 
     def _send_mppi_parameters(self, behavior_params: dict):
         """MPPI 파라미터 전송"""

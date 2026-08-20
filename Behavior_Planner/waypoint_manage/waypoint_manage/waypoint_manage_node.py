@@ -25,7 +25,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
-from command_center_interfaces.msg import MultipleWaypoints, TargetWaypoints
+from command_center_interfaces.msg import MultipleWaypoints, PlannedPath, TargetWaypoints
 from map_interfaces.msg import GraphLayer, UtmLayer
 
 import tf2_ros
@@ -52,6 +52,8 @@ class WaypointManageNode(Node):
             'topics.utm', '/map_provider_node/utm').value
         self.status_topic = self.declare_parameter(
             'topics.localization_status', '/fgo/status').value
+        self.planned_path_topic = self.declare_parameter(
+            'topics.planned_path', '/planned_path_detailed').value
         self.map_frame = self.declare_parameter('frames.map', 'map').value
         self.odom_frame = self.declare_parameter('frames.odom', 'odom').value
         self.update_rate = self.declare_parameter('update_rate_hz', 5.0).value
@@ -88,6 +90,10 @@ class WaypointManageNode(Node):
 
         self.create_subscription(
             TargetWaypoints, self.target_topic, self._target_callback, reliable)
+        # 경로 노드 캐시: planner 의 임시 노드(GPS_START 등)는 그래프에 없어
+        # planned_path 에서 좌표를 얻는다 (2026-08-04 시뮬 테스트에서 skip 확인)
+        self.create_subscription(
+            PlannedPath, self.planned_path_topic, self._planned_path_callback, reliable)
         self.create_subscription(
             GraphLayer, self.graph_topic, self._graph_callback, latched)
         self.create_subscription(
@@ -120,7 +126,14 @@ class WaypointManageNode(Node):
             self.get_logger().warn(f'localization status: {msg.data}')
         self.localization_ok = ok
 
+    def _planned_path_callback(self, msg: PlannedPath):
+        n = self.graph_store.set_path_nodes(msg.path_data.nodes)
+        self.get_logger().info(f'planned path nodes cached: {n} (path_id={msg.path_id})')
+
     def _target_callback(self, msg: TargetWaypoints):
+        if self.target is None or msg.current_node_id != self.target.current_node_id:
+            self.get_logger().info(
+                f'target received: {msg.current_node_id} (next={list(msg.next_node_ids)})')
         self.target = msg
         # 새 타깃은 update 루프를 기다리지 않고 즉시 처리 (노드 전환 반응성 유지)
         self._update_loop()
@@ -184,6 +197,10 @@ class WaypointManageNode(Node):
 
         out.header.stamp = now.to_msg()
         self.waypoints_pub.publish(out)
+        if self.last_published_target_id != self.target.current_node_id:
+            self.get_logger().info(
+                f'publishing current={out.current_goal.header.frame_id} '
+                f'(decision={result.decision.value}, target={self.target.current_node_id})')
         self.last_published = out
         self.last_published_target_id = self.target.current_node_id
 

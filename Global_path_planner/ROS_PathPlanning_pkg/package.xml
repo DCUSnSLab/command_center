@@ -20,6 +20,10 @@
   <depend>map_interfaces</depend>
   <depend>command_center_interfaces</depend>
 
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-pyqt6</exec_depend>
+  <exec_depend>ament_cmake_python</exec_depend>
+  <exec_depend>python3-utm</exec_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

@@ -40,3 +40,20 @@ def internal_score(sa):
     curvature_deg = _cumulative_curvature_deg(sa)
     score = clamp01(linear_ramp(abs(curvature_deg), sa.curved_entry_deg, sa.curved_saturation_deg))
     return score, curvature_deg
+
+
+def planned_curvature(sa):
+    """Max path curvature |kappa| = |tan(delta)| / L over the near plan (1/m).
+
+    Curvature, unlike the cumulative-heading descriptor above, is a *geometric*
+    quantity independent of speed, which is what a lateral-acceleration limit
+    needs: a_lat = v^2 * kappa.  Taken as the maximum over the near window so
+    the cap anticipates the tightest part of the upcoming turn.
+    """
+    cs = sa.control_sequence
+    if cs is None or cs.shape[0] == 0:
+        return 0.0
+    steps = max(min(int(cs.shape[0]), sa.curved_window_steps), 1)
+    delta = cs[:steps, 1]
+    kappa = torch.abs(torch.tan(delta)) / sa.L
+    return float(torch.max(kappa).item())

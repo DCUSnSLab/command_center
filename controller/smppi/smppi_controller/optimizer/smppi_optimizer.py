@@ -5,6 +5,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Path
+from .._verbose import vprint
 
 def _now_sync():
     """CUDA 사용시 비동기 커널 동기화 후 perf_counter 반환"""
@@ -77,7 +78,7 @@ class SMPPIOptimizer:
         self._opt_dbg_counter = 0
         self.last_cmd_applied = torch.zeros(2, device=self.device, dtype=self.dtype)  # for pub vs plan diff
 
-        print(f"[SMPPI] Initialized (SMPPI core) K={self.K}, T={self.T}, dt={self.dt}, dev={self.device}")
+        vprint(f"[SMPPI] Initialized (SMPPI core) K={self.K}, T={self.T}, dt={self.dt}, dev={self.device}")
 
     # ---------- external hooks ----------
     def set_motion_model(self, motion_model): self.motion_model = motion_model
@@ -187,10 +188,10 @@ class SMPPIOptimizer:
             a0 = self.last_cmd_applied.clone()
         
         # Debug: last_cmd_applied 출력
-        # print(f"[SMPPI] last_cmd_applied: v={float(self.last_cmd_applied[0]):.3f}, δ={float(self.last_cmd_applied[1]):.3f}")
-        # print(f"[SMPPI] a0_odom: v={float(abs(a0_odom[0])):.3f}, δ={float(a0_odom[1]):.3f}")
-        # print(f"[SMPPI] a0_final: v={float(a0[0]):.3f}, δ={float(a0[1]):.3f}")
-        # print(f"[SMPPI] w_min: {self.w_min}, w_max: {self.w_max}")
+        # vprint(f"[SMPPI] last_cmd_applied: v={float(self.last_cmd_applied[0]):.3f}, δ={float(self.last_cmd_applied[1]):.3f}")
+        # vprint(f"[SMPPI] a0_odom: v={float(abs(a0_odom[0])):.3f}, δ={float(a0_odom[1]):.3f}")
+        # vprint(f"[SMPPI] a0_final: v={float(a0[0]):.3f}, δ={float(a0[1]):.3f}")
+        # vprint(f"[SMPPI] w_min: {self.w_min}, w_max: {self.w_max}")
         a0[0] = torch.clamp(a0[0], self.v_min, self.v_max)
         a0[1] = torch.clamp(a0[1], self.w_min, self.w_max)     # δ 한계 보장
         self._a0_last = a0  # 업데이트 후 U 사영(anti-windup)에 사용
@@ -315,10 +316,10 @@ class SMPPIOptimizer:
             
         delta_clipped = abs(delta_before - delta_next) > 1e-6 or abs(delta_before_dyn - delta_next) > 1e-6
         if self._clipping_debug_counter % 10 == 0 and delta_clipped:
-            print(f"[CLIPPING] delta: {delta_before:.4f} -> {delta_next:.4f} (static:[{self.w_min:.3f},{self.w_max:.3f}], dyn_max:{delta_dyn_max:.4f})")
+            vprint(f"[CLIPPING] delta: {delta_before:.4f} -> {delta_next:.4f} (static:[{self.w_min:.3f},{self.w_max:.3f}], dyn_max:{delta_dyn_max:.4f})")
             omega_tmp_before = (v_abs / L) * math.tan(delta_before) if v_abs > 1e-3 else 0.0
             omega_tmp_after  = (v_abs / L) * math.tan(delta_next)   if v_abs > 1e-3 else 0.0
-            print(f"  omega_est(v-abs): {omega_tmp_before:.4f} -> {omega_tmp_after:.4f}")
+            vprint(f"  omega_est(v-abs): {omega_tmp_before:.4f} -> {omega_tmp_after:.4f}")
         
 
         # δ -> ω 변환 (Ackermann Model 공식 사용 - 후진/전진 자동 처리)
@@ -349,8 +350,8 @@ class SMPPIOptimizer:
         
         # Log significant command changes
         if cmd_w_change > 0.5:  # Angular velocity change > 0.5 rad/s
-            print(f"🎮 [CMD CHANGE] v: {prev_cmd[0]:.3f}->{v_next:.3f} ({cmd_v_change:.3f}), ω: {prev_cmd[1]:.3f}->{omega_next if v_next > 0 else -omega_next:.3f} ({cmd_w_change:.3f})")
-            print(f"   δ: {float(self.last_cmd_applied[1]):.4f} -> {delta_next:.4f}")
+            vprint(f"🎮 [CMD CHANGE] v: {prev_cmd[0]:.3f}->{v_next:.3f} ({cmd_v_change:.3f}), ω: {prev_cmd[1]:.3f}->{omega_next if v_next > 0 else -omega_next:.3f} ({cmd_w_change:.3f})")
+            vprint(f"   δ: {float(self.last_cmd_applied[1]):.4f} -> {delta_next:.4f}")
         
         # Twist publish
         cmd = Twist()
@@ -386,7 +387,7 @@ class SMPPIOptimizer:
         self.control_sequence.zero_()
         # Also reset last_cmd_applied to prevent inconsistency after parameter changes
         self.last_cmd_applied = torch.zeros(2, device=self.device, dtype=self.dtype)
-        print("[SMPPI] Optimizer reset (U and last_cmd_applied cleared)")
+        vprint("[SMPPI] Optimizer reset (U and last_cmd_applied cleared)")
 
     # ---------- dynamic parameter updates ----------
     def update_velocity_limits(self, min_v: float = None, max_v: float = None, 
@@ -401,7 +402,7 @@ class SMPPIOptimizer:
         if max_w is not None:
             self.w_max = max_w
         
-        # print(f"[SMPPI] Velocity limits updated: v_min={self.v_min:.2f}, v_max={self.v_max:.2f}, "
+        # vprint(f"[SMPPI] Velocity limits updated: v_min={self.v_min:.2f}, v_max={self.v_max:.2f}, "
         #       f"w_min={self.w_min:.3f}, w_max={self.w_max:.3f}")
     
     def set_action_bounds(self, v_bounds: list = None, w_bounds: list = None):
@@ -411,7 +412,7 @@ class SMPPIOptimizer:
         if w_bounds and len(w_bounds) == 2:
             self.w_min, self.w_max = w_bounds[0], w_bounds[1]
         
-        # print(f"[SMPPI] Action bounds updated: v=[{self.v_min:.2f}, {self.v_max:.2f}], "
+        # vprint(f"[SMPPI] Action bounds updated: v=[{self.v_min:.2f}, {self.v_max:.2f}], "
         #       f"w=[{self.w_min:.3f}, {self.w_max:.3f}]")
 
     # ---------- expose debug ----------
