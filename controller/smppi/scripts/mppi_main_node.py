@@ -575,7 +575,7 @@ class MPPIMainNode(Node):
             cmd_vel = self.optimizer.get_control_command()
             _tc = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] optimize=%.1fms cmd=%.1fms (prep+rest below)" % (
                         (_tb - _ta) * 1000.0, (_tc - _tb) * 1000.0))
                 self._t_opt = _tb - _ta
@@ -612,7 +612,7 @@ class MPPIMainNode(Node):
                 self.publish_lookahead_point()
             _te = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] publish_path+lookahead=%.1fms | prepare+goal+shift=%.1fms" % (
                         (_te - _td) * 1000.0,
                         ((_ta - start_time) + (_td - _tc)) * 1000.0))

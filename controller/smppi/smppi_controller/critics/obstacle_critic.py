@@ -49,6 +49,12 @@ class ObstacleCritic(BaseCritic):
         # (e.g. sensor timeout) stops the robot instead of freeing all space
         self.unknown_is_lethal = params.get('unknown_is_lethal', True)
 
+        # 전부 충돌인 사이클 진단용. collides.all() 은 GPU->CPU 동기화라
+        # 매 사이클 부르면 optimize 가 26.6 -> 33.2 ms 로 늘어난다 (실측).
+        # 20 사이클마다만 확인해 비용을 1/20 로 누른다.
+        self._all_blocked_count = 0
+        self._cycle = 0
+
         # Vehicle footprint polygon [x1,y1,x2,y2,...] in base frame
         default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
         self.footprint = list(params.get('footprint', default_footprint))
@@ -159,18 +165,61 @@ class ObstacleCritic(BaseCritic):
         pose_collision = collision.any(dim=2)  # [K, T+1]
 
         # Continuous repulsion over the inflation gradient: max sample value
-        # per pose (most conservative). Sentinel cells (>= 10) contribute 0;
-        # colliding poses are zeroed since the collision penalty dominates
+        # per pose (most conservative). Sentinel cells (>= 10) contribute 0.
+        #
+        # Colliding poses used to be zeroed here. That removed the only "move away
+        # from the wall" signal at exactly the moment it was needed: once the
+        # current footprint touched a lethal cell, every rollout scored the same
+        # constant and the obstacle term carried no direction at all. Keep it.
         sample_rep = torch.where(g < 10.0, g, torch.zeros_like(g))
         pose_max = sample_rep.max(dim=2).values  # [K, T+1], already squared
-        repulsion = torch.where(pose_collision,
-                                torch.zeros_like(pose_max),
-                                self.repulsion_factor * pose_max * 100.0)
+        repulsion = self.repulsion_factor * pose_max * 100.0
 
-        total_costs = repulsion.sum(dim=1)
-        total_costs = total_costs + pose_collision.any(dim=1).to(total_costs.dtype) * self.collision_cost
+        # t=0 is the pose the robot is already in. No control sequence can change
+        # it, so penalising it adds the same constant to all K rollouts - measured
+        # in the field as every cost pinned at 1e7, which left the steering
+        # decision to the goal term alone, 34,000x smaller and quantised away in
+        # float32. Judge only what the plan can still avoid.
+        future_collision = pose_collision[:, 1:] if pose_collision.shape[1] > 1 \
+            else pose_collision
+
+        # Grade by WHEN the collision happens instead of a binary any(). A binary
+        # flag makes "hits the wall next step" and "hits it 59 steps out" cost the
+        # same, so there is no gradient to escape along. Later is cheaper, and the
+        # spread is large enough to survive float32 at this magnitude.
+        T_f = future_collision.shape[1]
+        idx = torch.arange(T_f, device=future_collision.device).to(repulsion.dtype)
+        big = torch.full_like(idx, float(T_f))
+        first_hit = torch.where(future_collision, idx.expand_as(future_collision),
+                                big.expand_as(future_collision)).min(dim=1).values
+        collides = future_collision.any(dim=1)
+        # 언제 부딪히는지(first_hit)만 보면 "깊게 관통하면서 충돌을 뒤로 미루는"
+        # 궤적이 싸진다. 실측: 궤적점의 46.1% 가 치명 셀, base 는 29.9% 였다.
+        # 그래서 관통 깊이(충돌 자세 개수)를 같은 무게로 함께 벌한다.
+        #   늦게 스치기        : first_hit 큼, depth 작음  -> 싸다 (탈출 기울기 유지)
+        #   깊게 관통          : depth 큼                  -> 비싸다 (침범 억제)
+        depth = future_collision.to(repulsion.dtype).sum(dim=1) / float(T_f)
+        severity = torch.where(collides,
+                               0.5 * (1.0 - first_hit / float(T_f)) + 0.5 * depth,
+                               torch.zeros_like(first_hit))
+
+        total_costs = repulsion.sum(dim=1) + severity * self.collision_cost
+
+        # 충돌 없는 궤적이 하나도 없는 상황을 드러낸다. 조용한 포화가
+        # 현장 실패를 bag 재생으로만 찾을 수 있게 만든 원인이었다.
+        self._cycle += 1
+        if self._cycle % 20 == 0 and bool(collides.all()):
+            self._all_blocked_count += 1
+            print(f"[ObstacleCritic] ALL {collides.numel()} rollouts collide "
+                  f"(earliest step median={first_hit.median().item():.0f}/{T_f}) "
+                  f"- no collision-free plan exists this cycle", flush=True)
 
         return self.apply_weight(total_costs)
+
+    @property
+    def all_blocked(self) -> bool:
+        """직전 사이클에 충돌 없는 궤적이 하나도 없었는가 (상위 노드 진단용)."""
+        return self._all_blocked_count > 0
 
     def set_costmap_info(self, costmap_info: dict):
         """
