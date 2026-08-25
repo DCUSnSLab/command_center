@@ -17,6 +17,8 @@
 #include "local_costmap/costmap_2d.hpp"
 #include "local_costmap/point_cloud_processor.hpp"
 #include "local_costmap/inflation_layer.hpp"
+#include "local_costmap/denoise_layer.hpp"
+#include "local_costmap/semantic_layer.hpp"
 
 namespace local_costmap
 {
@@ -43,11 +45,13 @@ private:
 
   // Callbacks
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg);
+  void semanticGridCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& msg);
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& msg);
   void mainLoopCallback();
 
   // Costmap operations
   void updateCostmap();
+  void applySemanticLayer();
   void publishCostmap();
 
   // TF lookup
@@ -69,14 +73,25 @@ private:
   double min_obstacle_height_;
   double max_obstacle_height_;
   double update_frequency_;
-  double staleness_timeout_;
   double inflation_radius_;
   double cost_scaling_factor_;
+  double sensor_timeout_;
+  double raytrace_max_range_;
+  double obstacle_max_range_;
+  bool track_unknown_space_;
+  int denoise_minimal_group_size_;
+
+  // Semantic static layer (map_provider ~/semantic/grid)
+  bool use_semantic_layer_ = true;
+  std::string semantic_grid_topic_;
+  std::string map_frame_;
+  int semantic_crosswalk_cost_ = 50;
   std::vector<double> robot_footprint_;
 
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr semantic_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
   rclcpp::TimerBase::SharedPtr main_timer_;
 
@@ -85,19 +100,21 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // Core components
-  std::unique_ptr<Costmap2D> costmap_;
+  std::unique_ptr<Costmap2D> obstacle_map_;  // persistent marking/clearing grid
+  std::unique_ptr<Costmap2D> costmap_;       // published grid (obstacles + inflation)
   std::unique_ptr<PointCloudProcessor> pc_processor_;
   std::unique_ptr<InflationLayer> inflation_layer_;
+  DenoiseLayer denoise_layer_;
+  SemanticLayer semantic_layer_;
 
   // State
   std::mutex pc_mutex_;
-  std::vector<Point3D> latest_points_;
+  ProcessedCloud latest_cloud_;
+  double sensor_origin_x_;
+  double sensor_origin_y_;
   std::atomic<bool> has_new_points_;
-
-  // input-staleness watchdog (C3): when the point cloud stops arriving the
-  // node must NOT keep republishing its last grid as if the world froze.
-  std::atomic<bool> ever_received_points_{false};
-  rclcpp::Time last_points_time_;
+  bool cloud_received_;
+  rclcpp::Time last_cloud_time_;
 
   std::mutex odom_mutex_;
   RobotPose robot_pose_;

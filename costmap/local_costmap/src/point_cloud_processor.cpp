@@ -133,11 +133,16 @@ void PointCloudProcessor::transformPoints(
   }
 }
 
-void PointCloudProcessor::filterByHeight(std::vector<Point3D>& points)
+void PointCloudProcessor::filterByHeight(std::vector<Point3D>& points, double robot_z)
 {
+  // Points are in the odom frame; filter by height relative to the robot
+  // so the filter stays correct on slopes and under odom z drift
+  const float min_z = static_cast<float>(robot_z + min_height_);
+  const float max_z = static_cast<float>(robot_z + max_height_);
+
   auto new_end = std::remove_if(points.begin(), points.end(),
-    [this](const Point3D& p) {
-      return p.z < min_height_ || p.z > max_height_;
+    [min_z, max_z](const Point3D& p) {
+      return p.z < min_z || p.z > max_z;
     });
 
   points.erase(new_end, points.end());
@@ -196,18 +201,19 @@ void PointCloudProcessor::filterByFootprint(
   points.erase(new_end, points.end());
 }
 
-std::vector<Point3D> PointCloudProcessor::processCloud(
+ProcessedCloud PointCloudProcessor::processCloud(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud,
   const geometry_msgs::msg::TransformStamped& transform,
-  double robot_x, double robot_y, double robot_yaw)
+  double robot_x, double robot_y, double robot_z, double robot_yaw)
 {
+  ProcessedCloud result;
   std::vector<Point3D> points;
 
   // Parse point cloud (zero-copy from raw data)
   if (!parsePointCloud(cloud, points)) {
     last_point_count_ = 0;
     last_filtered_count_ = 0;
-    return points;
+    return result;
   }
 
   last_point_count_ = points.size();
@@ -215,15 +221,20 @@ std::vector<Point3D> PointCloudProcessor::processCloud(
   // Transform to target frame
   transformPoints(points, transform);
 
+  // Every finite return is a clearing endpoint: the beam that produced it
+  // passed through free space, regardless of the obstacle height band
+  result.clearing = points;
+
   // Apply height filter
-  filterByHeight(points);
+  filterByHeight(points, robot_z);
 
   // Filter robot footprint
   filterByFootprint(points, robot_x, robot_y, robot_yaw);
 
   last_filtered_count_ = points.size();
 
-  return points;
+  result.marking = std::move(points);
+  return result;
 }
 
 }  // namespace local_costmap

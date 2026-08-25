@@ -9,13 +9,10 @@
 namespace local_costmap
 {
 
-struct InflationCell
-{
-  int dx;      // Offset from obstacle cell
-  int dy;
-  int8_t cost; // Pre-computed cost at this distance
-};
-
+// BFS wavefront inflation (Nav2 inflation_layer algorithm):
+// obstacle cells seed a breadth-first expansion ordered by distance, each
+// visited cell gets the pre-computed cost for its distance to the nearest
+// obstacle. O(inflated cells), independent of the number of obstacles.
 class InflationLayer
 {
 public:
@@ -33,23 +30,39 @@ public:
   bool isInitialized() const { return initialized_; }
 
 private:
+  // Cell queued for expansion, tracking its nearest obstacle (sx, sy)
+  struct CellData
+  {
+    int x;
+    int y;
+    int sx;
+    int sy;
+  };
+
   double inflation_radius_;
   double cost_scaling_factor_;
   double resolution_;
   bool initialized_;
 
-  // Pre-computed inflation kernel
-  // Sorted by distance (closest first) for early termination
-  std::vector<InflationCell> kernel_;
-
   // Inflation radius in cells
-  int inflation_cells_;
+  int cell_inflation_radius_;
 
-  // Pre-compute the inflation kernel
-  void computeKernel();
+  // Distance / cost lookup tables indexed by [|dy|][|dx|]
+  std::vector<std::vector<double>> cached_distances_;
+  std::vector<std::vector<int8_t>> cached_costs_;
+
+  // Per-inflate() scratch (kept as members to avoid reallocation)
+  std::vector<uint8_t> seen_;
+  std::vector<std::vector<CellData>> bins_;
+
+  // Pre-compute the distance/cost lookup tables
+  void computeCaches();
 
   // Compute cost based on distance using exponential decay
   int8_t computeCost(double distance) const;
+
+  // Queue a cell into the distance-ordered bins
+  void enqueue(int x, int y, int sx, int sy, int width);
 };
 
 }  // namespace local_costmap

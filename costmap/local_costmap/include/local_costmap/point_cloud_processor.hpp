@@ -19,6 +19,14 @@ struct Point3D
   float x, y, z;
 };
 
+struct ProcessedCloud
+{
+  // Obstacle points (height + footprint filtered): marked OCCUPIED
+  std::vector<Point3D> marking;
+  // All finite points in the target frame: raytrace clearing endpoints
+  std::vector<Point3D> clearing;
+};
+
 class PointCloudProcessor
 {
 public:
@@ -29,11 +37,12 @@ public:
   void setRobotFootprint(const std::vector<double>& footprint_flat);
 
   // Process point cloud
-  // Returns filtered points in target frame
-  std::vector<Point3D> processCloud(
+  // Returns marking points (filtered) and clearing endpoints in target frame
+  // Height filter is applied relative to robot_z (not the odom origin)
+  ProcessedCloud processCloud(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud,
     const geometry_msgs::msg::TransformStamped& transform,
-    double robot_x, double robot_y, double robot_yaw);
+    double robot_x, double robot_y, double robot_z, double robot_yaw);
 
   // Get point count from last processing
   size_t getLastPointCount() const { return last_point_count_; }
@@ -60,7 +69,7 @@ private:
     std::vector<Point3D>& points,
     const geometry_msgs::msg::TransformStamped& transform);
 
-  void filterByHeight(std::vector<Point3D>& points);
+  void filterByHeight(std::vector<Point3D>& points, double robot_z);
 
   void filterByFootprint(
     std::vector<Point3D>& points,
