@@ -317,6 +317,12 @@ class MPPIMainNode(Node):
             MPPIState, self.robot_state_topic, self.robot_state_callback, reliable_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
+        # probe advance (2026-08-22): behavior 의 탐침 전진 신호 — 원거리
+        # lethal 완화를 obstacle critic 에 전파. 근거리 hard 는 critic 이 보장.
+        from std_msgs.msg import Bool as _Bool
+        self._probe_active = False
+        self.probe_sub = self.create_subscription(
+            _Bool, '/behavior/probe_advance', self.probe_callback, reliable_qos)
 
         # C4: map-anchor interlock inputs. /gps/fix_gated only carries fixes
         # that passed the sanity gate, so its arrival IS the anchor event.
@@ -407,6 +413,16 @@ class MPPIMainNode(Node):
                     if hasattr(critic, 'set_costmap_info'):
                         critic.set_costmap_info(costmap_info)
     
+    def probe_callback(self, msg):
+        if bool(msg.data) != self._probe_active:
+            self.get_logger().warn(
+                f'[PROBE] far-lethal relax {"ON" if msg.data else "OFF"}')
+        self._probe_active = bool(msg.data)
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
+            for critic in self.optimizer.critics:
+                if hasattr(critic, 'set_probe'):
+                    critic.set_probe(self._probe_active)
+
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""
         self.latest_goal = msg

@@ -35,6 +35,13 @@ class ObstacleCritic(BaseCritic):
         # which is exactly how avoidance used to slip over the curb.
         self.lethal_hard = bool(params.get('lethal_hard', True))
         self.hard_lethal_cost = float(params.get('hard_lethal_cost', 1.0e6))
+        # probe advance (2026-08-22): behavior 가 '원거리 가짜 벽' 패턴에서
+        # 탐침 전진을 요청하면, 로봇에서 probe_near_r 밖의 occupied 만
+        # 유한 비용으로 완화한다. 근거리 occupied·OOB 는 항상 hard —
+        # 실벽/연석 접근 시 기존 안전 정지가 그대로 발동한다.
+        self.probe_active = False
+        self.probe_near_r = float(params.get('probe_near_r', 3.0))
+        self.probe_far_cost = float(params.get('probe_far_cost', 500.0))
 
         # Costmap threshold parameters
         self.occupied_cost_threshold = params.get('occupied_cost_threshold', 80)  # Cost >= 80 is occupied
@@ -157,9 +164,19 @@ class ObstacleCritic(BaseCritic):
                 normalized_values = (costmap_values[inflation_mask] - self.inflation_zone_start) / inflation_range
                 valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
 
-            # Occupied: collision cost
-            valid_costs[occupied_mask] = (self.hard_lethal_cost
-                                          if self.lethal_hard else self.collision_cost)
+            # Occupied: collision cost (probe 시 원거리만 완화)
+            occ_cost = (self.hard_lethal_cost
+                        if self.lethal_hard else self.collision_cost)
+            if self.probe_active and np.any(occupied_mask):
+                robot_xy = poses[0, :2]
+                vdist = np.hypot(vertices_flat[valid_mask][:, 0] - robot_xy[0],
+                                 vertices_flat[valid_mask][:, 1] - robot_xy[1])
+                far_occ = occupied_mask & (vdist > self.probe_near_r)
+                near_occ = occupied_mask & ~far_occ
+                valid_costs[near_occ] = occ_cost
+                valid_costs[far_occ] = self.probe_far_cost
+            else:
+                valid_costs[occupied_mask] = occ_cost
 
             # Assign computed costs
             vertex_costs[valid_mask] = valid_costs
@@ -212,8 +229,17 @@ class ObstacleCritic(BaseCritic):
                 valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
 
             # Occupied: collision cost
-            valid_costs[occupied_mask] = (self.hard_lethal_cost
-                                          if self.lethal_hard else self.collision_cost)
+            occ_cost = (self.hard_lethal_cost
+                        if self.lethal_hard else self.collision_cost)
+            if self.probe_active and np.any(occupied_mask):
+                robot_xy = traj_xy_flat[0]
+                pdist = np.hypot(traj_xy_flat[valid_mask][:, 0] - robot_xy[0],
+                                 traj_xy_flat[valid_mask][:, 1] - robot_xy[1])
+                far_occ = occupied_mask & (pdist > self.probe_near_r)
+                valid_costs[occupied_mask & ~far_occ] = occ_cost
+                valid_costs[far_occ] = self.probe_far_cost
+            else:
+                valid_costs[occupied_mask] = occ_cost
 
             # Assign computed costs
             point_costs[valid_mask] = valid_costs
@@ -270,6 +296,9 @@ class ObstacleCritic(BaseCritic):
         rotated_footprint = np.stack([rotated_x, rotated_y], axis=2)  # [N, V, 2]
 
         return rotated_footprint
+
+    def set_probe(self, active: bool):
+        self.probe_active = bool(active)
 
     def set_costmap_info(self, costmap_info: dict):
         """
