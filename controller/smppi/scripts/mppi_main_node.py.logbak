@@ -18,7 +18,6 @@ from typing import Optional
 # ROS2 messages
 from geometry_msgs.msg import Twist, PoseStamped, PointStamped
 from nav_msgs.msg import Path, OccupancyGrid, Odometry
-from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import Header
 from smppi.msg import OptimalPath
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
@@ -27,10 +26,8 @@ from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoint
 from smppi_controller.optimizer.smppi_optimizer import SMPPIOptimizer
 from smppi_controller.critics.obstacle_critic import ObstacleCritic
 from smppi_controller.critics.goal_critic import GoalCritic
-from smppi_controller.critics.lateral_bias_critic import LateralBiasCritic
 from smppi_controller.motion_models.ackermann_model import AckermannModel
 from smppi_controller.utils.transforms import Transforms
-from smppi_controller.localization_anchor import LocalizationAnchorMonitor
 
 
 class RobotState:
@@ -105,7 +102,7 @@ class MPPIMainNode(Node):
         self.last_control_time = time.time()
         self.control_count = 0
         
-        self.get_logger().info("smppi controller ready")
+        self.get_logger().info("SMPPI Main Controller Node initialized")
     
     def _declare_parameters(self):
         """Declare ROS2 parameters"""
@@ -152,19 +149,6 @@ class MPPIMainNode(Node):
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
         self.declare_parameter('costs.goal_weight', 6.0)
-
-        # Curb-safety cost shaping
-        self.declare_parameter('costs.lethal_hard', True)
-        self.declare_parameter('costs.hard_lethal_cost', 1.0e6)
-        # best-trajectory cost at/above which we zero the command
-        self.declare_parameter('costs.all_lethal_stop_cost', 5.0e5)
-        # C4 map-anchor interlock: refuse to drive until the map frame has
-        # been anchored by a gate-passed GNSS fix (route/keepout live in map)
-        self.declare_parameter('safety.require_map_anchor', True)
-        self.declare_parameter('safety.global_odom_timeout', 1.0)
-        self.declare_parameter('costs.lateral_bias_weight', 15.0)
-        self.declare_parameter('costs.lateral_bias_side', 'right')
-        self.declare_parameter('costs.lateral_bias_deadband', 0.25)
         
         # Lookahead parameters
         self.declare_parameter('costs.lookahead.base_distance', 2.5)
@@ -230,15 +214,6 @@ class MPPIMainNode(Node):
             'min_turning_radius': self.get_parameter('vehicle.min_turning_radius').get_parameter_value().double_value
         }
         
-        self.all_lethal_stop_cost = self.get_parameter(
-            'costs.all_lethal_stop_cost').get_parameter_value().double_value
-
-        self.require_map_anchor = self.get_parameter(
-            'safety.require_map_anchor').get_parameter_value().bool_value
-        self.anchor_monitor = LocalizationAnchorMonitor(
-            global_timeout=self.get_parameter(
-                'safety.global_odom_timeout').get_parameter_value().double_value)
-
         # Critic weights
         self.critic_weights = {
             'obstacle_weight': self.get_parameter('costs.obstacle_weight').get_parameter_value().double_value,
@@ -269,13 +244,13 @@ class MPPIMainNode(Node):
     def _init_motion_model(self):
         """Initialize motion model"""
         self.motion_model = AckermannModel(self.vehicle_params)
-        self.get_logger().debug("Ackermann motion model initialized")
+        self.get_logger().info("Ackermann motion model initialized")
     
     def _init_optimizer(self):
         """Initialize SMPPI optimizer"""
         self.optimizer = SMPPIOptimizer(self.optimizer_params)
         self.optimizer.set_motion_model(self.motion_model)
-        self.get_logger().debug("SMPPI optimizer initialized")
+        self.get_logger().info("SMPPI optimizer initialized")
     
     def _init_critics(self):
         """Initialize critic functions"""
@@ -284,11 +259,6 @@ class MPPIMainNode(Node):
             'weight': self.critic_weights['obstacle_weight'],
             'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
             'repulsion_factor': 2.0,
-            'occupied_cost_threshold': 80,  # Costmap values >= 80 are occupied
-            'inflation_zone_start': 50,      # Costmap values >= 50 are inflation zone
-            # curb/keepout cells must never be traded off against goal progress
-            'lethal_hard': self.get_parameter('costs.lethal_hard').get_parameter_value().bool_value,
-            'hard_lethal_cost': self.get_parameter('costs.hard_lethal_cost').get_parameter_value().double_value,
             'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
             'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
             'footprint': list(self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value),
@@ -310,17 +280,7 @@ class MPPIMainNode(Node):
         }
         self.goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(self.goal_critic)
-
-        # Lateral bias critic: prefer avoiding AWAY from the curb side
-        lateral_params = {
-            'weight': self.get_parameter('costs.lateral_bias_weight').get_parameter_value().double_value,
-            'bias_side': self.get_parameter('costs.lateral_bias_side').get_parameter_value().string_value,
-            'deadband': self.get_parameter('costs.lateral_bias_deadband').get_parameter_value().double_value,
-        }
-        if lateral_params['weight'] > 0.0 and lateral_params['bias_side'] != 'none':
-            self.lateral_bias_critic = LateralBiasCritic(lateral_params)
-            self.optimizer.add_critic(self.lateral_bias_critic)
-
+        
         self.get_logger().info("Critics initialized")
     
     
@@ -340,30 +300,16 @@ class MPPIMainNode(Node):
             Odometry, self.odom_topic, self.odom_callback, sensor_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
-        # probe advance (2026-08-22): behavior 의 탐침 전진 신호 — 원거리
-        # lethal 완화를 obstacle critic 에 전파. 근거리 hard 는 critic 이 보장.
-        from std_msgs.msg import Bool as _Bool
-        self._probe_active = False
-        self.probe_sub = self.create_subscription(
-            _Bool, '/behavior/probe_advance', self.probe_callback, reliable_qos)
-
-        # C4: map-anchor interlock inputs. /gps/fix_gated only carries fixes
-        # that passed the sanity gate, so its arrival IS the anchor event.
-        if self.require_map_anchor:
-            self.create_subscription(NavSatFix, '/gps/fix_gated',
-                                     self.anchor_fix_callback, 10)
-            self.create_subscription(Odometry, '/odometry/global',
-                                     self.global_odom_callback, 10)
-
+        
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
             self.goal_sub = self.create_subscription(
                 PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
-            self.get_logger().debug(f"Single waypoint mode: subscribed to {self.goal_topic}")
+            self.get_logger().info(f"Single waypoint mode: subscribed to {self.goal_topic}")
         elif self.waypoint_mode == 'multiple':
             self.multiple_waypoints_sub = self.create_subscription(
                 MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
-            self.get_logger().debug(f"Multiple waypoints mode: subscribed to {self.multiple_waypoints_topic}")
+            self.get_logger().info(f"Multiple waypoints mode: subscribed to {self.multiple_waypoints_topic}")
         else:
             # Fallback - subscribe to both but with priority to multiple waypoints
             self.goal_sub = self.create_subscription(
@@ -394,19 +340,11 @@ class MPPIMainNode(Node):
         self.target_direction_pub = self.create_publisher(
             PointStamped, '/smppi_visualization/target_direction', reliable_qos)
         
-        self.get_logger().debug(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
+        self.get_logger().info(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
     
     def odom_callback(self, msg: Odometry):
         """Receive odometry directly and adapt to internal robot state"""
         self.robot_state = RobotState(msg)
-
-    def anchor_fix_callback(self, msg: NavSatFix):
-        """C4: a fix that passed gps_fix_gate anchors the map frame."""
-        self.anchor_monitor.on_anchor_fix(time.time())
-
-    def global_odom_callback(self, msg: Odometry):
-        """C4: map-frame localization liveness."""
-        self.anchor_monitor.on_global_odom(time.time())
 
     def costmap_callback(self, msg: OccupancyGrid):
         """Receive costmap for grid-based collision detection"""
@@ -438,16 +376,6 @@ class MPPIMainNode(Node):
                 if hasattr(critic, 'set_costmap_info'):
                     critic.set_costmap_info(costmap_info)
     
-    def probe_callback(self, msg):
-        if bool(msg.data) != self._probe_active:
-            self.get_logger().warn(
-                f'[PROBE] far-lethal relax {"ON" if msg.data else "OFF"}')
-        self._probe_active = bool(msg.data)
-        if hasattr(self, 'optimizer') and self.optimizer is not None:
-            for critic in self.optimizer.critics:
-                if hasattr(critic, 'set_probe'):
-                    critic.set_probe(self._probe_active)
-
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""
         self.latest_goal = msg
@@ -460,7 +388,7 @@ class MPPIMainNode(Node):
         else:
             self.current_goal_id = f"goal_{int(time.time())}"
             
-        self.get_logger().debug(f"New goal received: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), ID: {self.current_goal_id}")
+        self.get_logger().info(f"New goal received: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), ID: {self.current_goal_id}")
     
     def multiple_waypoints_callback(self, msg: MultipleWaypoints):
         """Process multiple waypoints"""
@@ -491,7 +419,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.set_multiple_waypoints(msg)
         
-        # self.get_logger().debug(f"New multiple waypoints: current={self.current_goal_id}, "
+        # self.get_logger().info(f"New multiple waypoints: current={self.current_goal_id}, "
         #                      f"next_count={len(msg.next_waypoints)}, final={msg.is_final_waypoint}")
     
     def params_update_callback(self, msg: MPPIParams):
@@ -506,15 +434,15 @@ class MPPIMainNode(Node):
         if msg.update_obstacle_critic: update_types.append('obstacle_critic')
         if msg.update_control: update_types.append('control')
         
-        self.get_logger().debug(f"📨 [MPPI PARAM UPDATE] Types: {update_types}")
-        self.get_logger().debug(f"   Behavior: {msg.current_behavior_type} - {msg.current_behavior_desc}")
+        self.get_logger().info(f"📨 [MPPI PARAM UPDATE] Types: {update_types}")
+        self.get_logger().info(f"   Behavior: {msg.current_behavior_type} - {msg.current_behavior_desc}")
         
         if msg.update_vehicle:
-            self.get_logger().debug(f"   Vehicle: max_v={msg.max_linear_velocity}, min_v={msg.min_linear_velocity}")
+            self.get_logger().info(f"   Vehicle: max_v={msg.max_linear_velocity}, min_v={msg.min_linear_velocity}")
         if msg.update_goal_critic:
-            self.get_logger().debug(f"   Goal: respect_reverse={msg.respect_reverse_heading}")
+            self.get_logger().info(f"   Goal: respect_reverse={msg.respect_reverse_heading}")
         if msg.update_lookahead:
-            self.get_logger().debug(f"   Lookahead: base={msg.lookahead_base_distance}, vel_factor={msg.lookahead_velocity_factor}")
+            self.get_logger().info(f"   Lookahead: base={msg.lookahead_base_distance}, vel_factor={msg.lookahead_velocity_factor}")
         
         try:
             # Validate and update optimizer parameters
@@ -560,9 +488,9 @@ class MPPIMainNode(Node):
                 self.current_behavior_desc = msg.current_behavior_desc if msg.current_behavior_desc else f"Behavior {msg.current_behavior_type}"
                 
                 if prev_behavior != self.current_behavior_type:
-                    self.get_logger().debug(f"🎨 [BEHAVIOR MODE CHANGE] {prev_behavior} -> {self.current_behavior_type}")
+                    self.get_logger().info(f"🎨 [BEHAVIOR MODE CHANGE] {prev_behavior} -> {self.current_behavior_type}")
                 
-            self.get_logger().debug("✅ MPPI parameters updated successfully")
+            self.get_logger().info("✅ MPPI parameters updated successfully")
             
         except Exception as e:
             self.get_logger().error(f"Failed to update MPPI parameters: {e}")
@@ -575,7 +503,7 @@ class MPPIMainNode(Node):
             self.pause_duration = msg.pause_duration
             self.pause_node_id = msg.node_id
             
-            self.get_logger().debug(f"Pause activated: {msg.pause_duration}s for node {msg.node_id} ({msg.reason})@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            self.get_logger().info(f"Pause activated: {msg.pause_duration}s for node {msg.node_id} ({msg.reason})@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             
         except Exception as e:
             self.get_logger().error(f"Failed to process pause command: {e}")
@@ -613,13 +541,10 @@ class MPPIMainNode(Node):
             else:
                 # Pause completed
                 self.is_paused = False
-                self.get_logger().debug(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
+                self.get_logger().info(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
         
         start_time = time.perf_counter()
-
-        # 회두(K-turn) 게이트 — 목표가 등 뒤일 때만 후진을 허용한다.
-        self._turnaround_gate()
-
+        
         try:
             # Convert MPPIState to internal format
             robot_pose = PoseStamped()
@@ -650,40 +575,13 @@ class MPPIMainNode(Node):
             cmd_vel = self.optimizer.get_control_command()
             _tc = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] optimize=%.1fms cmd=%.1fms (prep+rest below)" % (
                         (_tb - _ta) * 1000.0, (_tc - _tb) * 1000.0))
                 self._t_opt = _tb - _ta
 
             # Apply velocity limits before publishing
             cmd_vel = self._apply_velocity_limits(cmd_vel)
-            
-            # SAFETY GUARD: if even the BEST sampled trajectory is lethal
-            # (robot cell itself marked lethal, corridor glitch, perception
-            # fault), the softmax average of all-lethal rollouts is an
-            # unpredictable "escape" manoeuvre. Command a hard stop instead
-            # and let the behavior planner / operator resolve it.
-            best = getattr(self.optimizer, 'last_best_cost', 0.0)
-            if best >= self.all_lethal_stop_cost:
-                cmd_vel = Twist()
-                self.get_logger().error(
-                    f'ALL trajectories lethal (best cost {best:.2e}) — '
-                    f'emergency zero command', throttle_duration_sec=1.0)
-
-            # C4 SAFETY GUARD: the route and the corridor keepout live in the
-            # map frame. Until it is anchored by a gate-passed GNSS fix the
-            # filter still believes it sits at the datum, so both are displaced
-            # by the datum->start offset (chamber-measured: 3.0 m spawn offset
-            # => 3.01 m map error, collapsing to 0.21 m on anchor) and the L2
-            # keepout protects nothing. Hold until anchored; once anchored we
-            # never re-block (GPS outages are FAST-LIO's job, by design).
-            if self.require_map_anchor:
-                allow, reason = self.anchor_monitor.update(time.time())
-                if not allow:
-                    cmd_vel = Twist()
-                    self.get_logger().warn(
-                        f'map frame not anchored — holding: {reason}',
-                        throttle_duration_sec=2.0)
 
             # Publish control command
             self.cmd_pub.publish(cmd_vel)
@@ -698,7 +596,7 @@ class MPPIMainNode(Node):
                 
                 # # Check if goal reached
                 # if goal_distance_float < self.goal_reached_threshold:
-                #     self.get_logger().debug(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
+                #     self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
             
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
@@ -714,7 +612,7 @@ class MPPIMainNode(Node):
                 self.publish_lookahead_point()
             _te = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] publish_path+lookahead=%.1fms | prepare+goal+shift=%.1fms" % (
                         (_te - _td) * 1000.0,
                         ((_ta - start_time) + (_td - _tc)) * 1000.0))
@@ -884,9 +782,9 @@ class MPPIMainNode(Node):
             if hasattr(self.optimizer, 'update_parameters'):
                 self.optimizer.update_parameters(self.optimizer_params)
             else:
-                self.get_logger().debug("Optimizer doesn't support parameter updates - parameters stored for future use")
+                self.get_logger().info("Optimizer doesn't support parameter updates - parameters stored for future use")
         
-        self.get_logger().debug("Optimizer parameters updated")
+        self.get_logger().info("Optimizer parameters updated")
     
     def _update_vehicle_params(self, msg: MPPIParams):
         """Update vehicle parameters"""
@@ -947,9 +845,9 @@ class MPPIMainNode(Node):
             # Reset control sequence to prevent oscillation after parameter changes
             if hasattr(self.optimizer, 'reset'):
                 self.optimizer.reset()
-                self.get_logger().debug("SMPPI control sequence reset after parameter update")
+                self.get_logger().info("SMPPI control sequence reset after parameter update")
         
-        # self.get_logger().debug(f"Vehicle parameters updated: "
+        # self.get_logger().info(f"Vehicle parameters updated: "
         #                      f"max_v={self.vehicle_params['max_linear_velocity']:.1f}m/s, "
         #                      f"max_w={self.vehicle_params['max_angular_velocity']:.2f}rad/s")
     
@@ -981,7 +879,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.update_parameters(goal_params)
             
-        self.get_logger().debug("Goal critic parameters updated")
+        self.get_logger().info("Goal critic parameters updated")
     
     def _update_cost_weights(self, msg: MPPIParams):
         """Update cost function weights"""
@@ -990,7 +888,7 @@ class MPPIMainNode(Node):
         if msg.goal_weight >= 0:
             self.critic_weights['goal_weight'] = msg.goal_weight
             
-        # self.get_logger().debug(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
+        # self.get_logger().info(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
     
     def _update_lookahead_params(self, msg: MPPIParams):
         """Update lookahead parameters"""
@@ -1021,7 +919,7 @@ class MPPIMainNode(Node):
                 'lookahead_max_distance': self.lookahead_params['max_distance']
             })
             
-        self.get_logger().debug(f"Lookahead parameters updated: base={self.lookahead_params['base_distance']}, "
+        self.get_logger().info(f"Lookahead parameters updated: base={self.lookahead_params['base_distance']}, "
                              f"vel_factor={self.lookahead_params['velocity_factor']}")
     
     def _update_obstacle_critic_params(self, msg: MPPIParams):
@@ -1046,7 +944,7 @@ class MPPIMainNode(Node):
                     critic.update_parameters(obstacle_params)
                     break
                     
-        self.get_logger().debug("Obstacle critic parameters updated")
+        self.get_logger().info("Obstacle critic parameters updated")
     
     def _update_control_params(self, msg: MPPIParams):
         """Update control parameters"""
@@ -1055,9 +953,9 @@ class MPPIMainNode(Node):
             self.control_frequency = msg.control_frequency
         if msg.goal_reached_threshold > 0:
             self.goal_reached_threshold = msg.goal_reached_threshold
-            self.get_logger().debug(f"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@update {self.goal_reached_threshold}@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            self.get_logger().info(f"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@update {self.goal_reached_threshold}@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             
-        self.get_logger().debug("Control parameters updated")
+        self.get_logger().info("Control parameters updated")
     
     def _update_waypoints_params(self, msg: MPPIParams):
         """Update waypoints parameters"""
@@ -1076,7 +974,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.update_parameters({'use_multiple_waypoints': msg.use_multiple_waypoints})
             
-        self.get_logger().debug("Waypoints parameters updated")
+        self.get_logger().info("Waypoints parameters updated")
     
     def _update_debug_params(self, msg: MPPIParams):
         """Update debug parameters"""
@@ -1091,145 +989,8 @@ class MPPIMainNode(Node):
                 if hasattr(critic, 'update_parameters'):
                     critic.update_parameters(debug_params)
                     
-        self.get_logger().debug("Debug parameters updated")
+        self.get_logger().info("Debug parameters updated")
     
-    def _turnaround_gate(self):
-        """목표가 '크게 뒤'에 있는 동안만 후진을 허용해 3점 회전을 가능하게 한다.
-
-        왜 필요한가 (2026-08-02 챔버 D1 실측): 모델이 Ackermann 이라 v=0 이면
-        yaw 이 변하지 않고(제자리 회전 불가), 최소 회전반경 1.69 m 로는 보도 폭
-        안에서 한 호 유턴이 물리적으로 불가하다. 전진 전용 속도범위에서 뒤쪽
-        목표는 '정지'가 국소최소가 된다. goal critic 의 회두 항이 방향 유인을
-        주고, 이 게이트가 후진을 풀어 K-turn 해를 탐색 가능하게 만든다.
-
-        · 켜짐: 목표 방위각 오차 > 100도  /  꺼짐: < 55도 (히스테리시스)
-        · 활성 중 속도범위 [-turnaround_rev_v, +turnaround_fwd_v] (저속),
-          해제 시 원래 범위 복원. 전환 시 제어열 reset 으로 동결 탈출.
-        """
-        if self.goal_state is None or self.robot_state is None:
-            return
-        sv = self.robot_state.state_vector
-        dx = float(self.goal_state[0]) - sv[0]
-        dy = float(self.goal_state[1]) - sv[1]
-        if dx * dx + dy * dy < 1.0:      # 목표 1 m 이내 — 회두 불필요/불안정 영역
-            err = 0.0
-        else:
-            import math as _m
-            err = abs(_m.atan2(_m.sin(_m.atan2(dy, dx) - sv[2]),
-                               _m.cos(_m.atan2(dy, dx) - sv[2])))
-        on_rad, off_rad = 1.745, 0.960   # 100도 / 55도
-        active = getattr(self, '_ta_active', False)
-        new_active = True if err > on_rad else (False if err < off_rad else active)
-        if new_active == active:
-            return
-
-        # 활성 전 공간 검사: 회전 기동이 들어갈 여유가 costmap 에서 확인될
-        # 때만 K-turn 을 허용한다. 여유가 없으면 critic 회두 항까지 봉인한다 —
-        # 방향 유인만 있고 공간이 없으면 전진 호가 연석 쪽으로 파고들다
-        # 모서리를 스친다(2026-08-02 D1c 실측). 둘 다 꺼지면 뒤쪽 목표에서
-        # 정지 → behavior BLOCKED 에스컬레이션이 운용자를 부른다(의도된 안전
-        # 동작). 검사는 1 s 스로틀 — 거부 상태에서 매 사이클 재검사하지 않는다.
-        if new_active:
-            now = time.monotonic()
-            if now - getattr(self, '_ta_check_t', 0.0) < 1.0:
-                return
-            self._ta_check_t = now
-            if not self._turnaround_clearance_ok():
-                self._set_critic_turnaround(False)
-                self.get_logger().warn(
-                    '[TURNAROUND] refused: insufficient clearance '
-                    f'(< {getattr(self, "turnaround_clear_radius", 1.5)} m) '
-                    '— holding position, BLOCKED escalation will follow',
-                    throttle_duration_sec=5.0)
-                return
-            self._set_critic_turnaround(True)
-        self._ta_active = new_active
-        base_min = self.vehicle_params.get('min_linear_velocity', 0.0)
-        base_max = self.vehicle_params.get('max_linear_velocity', 2.0)
-        min_w = self.vehicle_params.get('min_angular_velocity', -1.16)
-        max_w = self.vehicle_params.get('max_angular_velocity', 1.16)
-        if new_active:
-            v_lo, v_hi = -0.4, min(0.5, base_max)
-        else:
-            v_lo, v_hi = base_min, base_max
-        if hasattr(self.optimizer, 'update_velocity_limits'):
-            self.optimizer.update_velocity_limits(min_v=v_lo, max_v=v_hi,
-                                                  min_w=min_w, max_w=max_w)
-        elif hasattr(self.optimizer, 'set_action_bounds'):
-            self.optimizer.set_action_bounds(v_bounds=[v_lo, v_hi],
-                                             w_bounds=[min_w, max_w])
-        # 모션 모델의 자체 클램프도 같이 풀어야 한다 (옵티마이저와 별도 저장)
-        mm = getattr(self, 'motion_model', None)
-        if mm is not None:
-            if hasattr(mm, 'min_linear_velocity'):
-                mm.min_linear_velocity = v_lo
-            if hasattr(mm, 'max_linear_velocity'):
-                mm.max_linear_velocity = v_hi
-        if hasattr(self.optimizer, 'reset'):
-            self.optimizer.reset()
-        self.get_logger().warn(
-            f'[TURNAROUND] {"ON" if new_active else "OFF"} '
-            f'(bearing err {err:.2f} rad) -> v range [{v_lo:.1f},{v_hi:.1f}]')
-
-    def _turnaround_clearance_ok(self) -> bool:
-        """로봇 중심 반경 turnaround_clear_radius(기본 1.8 m) 원판에 lethal
-        셀이 없어야 K-turn 을 허용한다.
-
-        1.5 m 근거: 회전 스윕(footprint 대각 반 0.62 + 패딩 0.15 = 0.77) +
-        여유 0.7. 이 값이 성립하는 전제는 **벽이 진실한 위치에 선다**는 것 —
-        curb_detection 의 그늘 경계 마킹(shadow_edge_cells)이 물리 연석선에
-        벽을 세우기 전에는 below-grade 벽이 실제 낙차보다 ~1.3 m 바깥(보이는
-        도로면 시작점)에 있어서, 검사 반경을 2.2 m 까지 키워도 근본이 안
-        잡혔다(D1e/D1f 실측: 0.75 m 옆 연석을 1.2/1.8 m 검사가 통과). 지금은
-        시작점 검사가 즉시 스윕만 막고, 기동 '중'의 보호는 진실한 벽 +
-        연석 기억이 담당한다. costmap 미수신이면 보수적으로 거부한다."""
-        g = self.latest_costmap
-        if g is None or self.robot_state is None:
-            return False
-        res = g.info.resolution
-        W, H = g.info.width, g.info.height
-        ox = g.info.origin.position.x
-        oy = g.info.origin.position.y
-        rx = float(self.robot_state.state_vector[0])
-        ry = float(self.robot_state.state_vector[1])
-        rad = float(getattr(self, 'turnaround_clear_radius', 1.5))
-        thr = int(getattr(self, 'turnaround_lethal_thr', 90))
-        ci = int((rx - ox) / res)
-        cj = int((ry - oy) / res)
-        rc = int(rad / res) + 1
-        i0, i1 = max(0, ci - rc), min(W, ci + rc + 1)
-        j0, j1 = max(0, cj - rc), min(H, cj + rc + 1)
-        if i1 <= i0 or j1 <= j0:
-            return False                     # 로봇이 costmap 밖 — 판단 불가
-        d = np.asarray(g.data, dtype=np.int16).reshape(H, W)
-        sub = d[j0:j1, i0:i1]
-        jj, ii = np.mgrid[j0:j1, i0:i1]
-        cx = (ii + 0.5) * res + ox
-        cy = (jj + 0.5) * res + oy
-        inside = (cx - rx) ** 2 + (cy - ry) ** 2 <= rad * rad
-        n_lethal = int(((sub >= thr) & inside).sum())
-        if n_lethal:
-            self.get_logger().info(
-                f'[TURNAROUND] clearance check: {n_lethal} lethal cell(s) '
-                f'within {rad:.1f} m', throttle_duration_sec=5.0)
-        return n_lethal == 0
-
-    def _set_critic_turnaround(self, enabled: bool):
-        """goal critic 의 회두 항을 켜고 끈다 (공간 검사와 연동)."""
-        crit = getattr(self, '_ta_critic', None)
-        if crit is None:
-            for c in getattr(self.optimizer, 'critics', []):
-                if hasattr(c, 'turnaround_enabled'):
-                    crit = c
-                    break
-            if crit is None:
-                return
-            self._ta_critic = crit
-        if crit.turnaround_enabled != enabled:
-            crit.turnaround_enabled = enabled
-            self.get_logger().info(
-                f'[TURNAROUND] goal-critic turn term {"ON" if enabled else "OFF"}')
-
     def _apply_velocity_limits(self, cmd_vel: Twist) -> Twist:
         """Apply velocity limits to command - MPPI already applies internal limits, so this is just a safety check"""
         # MPPI optimizer already applies proper velocity limits internally including reverse mode
@@ -1376,8 +1137,8 @@ class MPPIMainNode(Node):
                 f"Cost:{total_cost:.1f} | Obs:{closest_obstacle:.1f}m | Prog:{progress:.2f}"
             )
             
-            self.get_logger().debug(f"[SMPPI] {monitoring_msg_line1}")
-            self.get_logger().debug(f"[SMPPI] {monitoring_msg_line2}")
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line1}")
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line2}")
             
         except Exception as e:
             self.get_logger().warn(f"Failed to publish monitoring info: {e}")
@@ -1449,7 +1210,7 @@ class MPPIMainNode(Node):
     
     def shutdown(self):
         """Shutdown controller"""
-        self.get_logger().debug("Shutting down SMPPI main controller")
+        self.get_logger().info("Shutting down SMPPI main controller")
         # Stop the robot
         cmd_vel = Twist()
         self.cmd_pub.publish(cmd_vel)

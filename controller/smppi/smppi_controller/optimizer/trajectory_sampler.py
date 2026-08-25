@@ -7,6 +7,7 @@ Nav2-style noise generation with SMPPI enhancements
 import torch
 import numpy as np
 from typing import Tuple
+from .._verbose import vprint
 
 
 class TrajectorySampler:
@@ -37,7 +38,7 @@ class TrajectorySampler:
             'w_max': params.get('w_max', 1.0)
         }
         
-        print(f"[TrajectorySampler] Initialized with batch_size={self.batch_size}")
+        vprint(f"[TrajectorySampler] Initialized with batch_size={self.batch_size}")
     
     def sample_controls(self, nominal_sequence: torch.Tensor) -> torch.Tensor:
         """

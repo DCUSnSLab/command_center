@@ -9,7 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(gmserver REQUIRED)
+find_package(map_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 # Generate messages
@@ -20,7 +20,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MPPIParams.msg"
   "msg/PauseCommand.msg"
   "msg/RequestReplan.msg"
-  DEPENDENCIES std_msgs geometry_msgs gmserver
+  "msg/TargetWaypoints.msg"
+  "msg/RouteRequest.msg"
+  "msg/RouteStatus.msg"
+  DEPENDENCIES std_msgs geometry_msgs map_interfaces
 )
 
 if(BUILD_TESTING)

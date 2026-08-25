@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """
 Obstacle Avoidance Critic for SMPPI
-Costmap-based grid collision detection (optimized for performance)
+Footprint-based costmap collision checking, fully on-device (torch)
+
+For every trajectory pose the (padded) robot footprint is rotated/translated
+into the world frame and sampled along its perimeter (plus the center point).
+Each sample point does one costmap lookup:
+
+    -1 (UNKNOWN):                       collision if unknown_is_lethal (default), else free
+    >= collision_value_threshold (100): collision (actual obstacle cell)
+    1..99 (inflation gradient):         continuous repulsion = repulsion_factor * (v/100)^2 * 100
+    0 (FREE):                           no cost
+    out of map bounds:                  collision (conservative; rolling window makes this rare)
+
+Per pose: collision if ANY sample collides; repulsion uses the max sample value.
+A trajectory containing any colliding pose gets `collision_cost` added once,
+sized to dominate any accumulated repulsion so MPPI can never prefer a
+colliding trajectory over one that merely grazes the inflation zone.
 """
 
 import torch
@@ -9,68 +24,108 @@ import numpy as np
 from typing import Optional, Any
 
 from .base_critic import BaseCritic
+from .._verbose import vprint
 
 
 class ObstacleCritic(BaseCritic):
-    """
-    Obstacle avoidance critic using costmap grid-based collision detection
-
-    Costmap value mapping:
-        0-49:   Free space    → cost = 0
-        50-79:  Inflation     → cost = scaled repulsion
-        80-100: Occupied      → cost = collision_cost
-    """
+    """Obstacle avoidance critic using footprint-sampled costmap lookup"""
 
     def __init__(self, params: dict):
         """Initialize costmap-based obstacle critic"""
         super().__init__("ObstacleCritic", params)
 
-        # Collision cost parameters
-        self.collision_cost = params.get('collision_cost', 1000.0)
+        # Per-trajectory penalty when any pose collides.
+        # Must dominate worst-case repulsion sum (~repulsion_factor * 100 * horizon)
+        self.collision_cost = params.get('collision_cost', 100000.0)
+
+        # Scaling of the continuous repulsion term in the inflation zone
         self.repulsion_factor = params.get('repulsion_factor', 2.0)
 
-        # Hard-lethal mode: occupied cells (curb walls, corridor keepout) get a
-        # near-infinite cost so no colliding trajectory can win the softmax --
-        # a summed soft cost of 1000 can be traded away by a good goal score,
-        # which is exactly how avoidance used to slip over the curb.
+        # Costmap value at/above which a sample point is a definite collision
+        # (100 = OCCUPIED in the local_costmap package; inflation stays <= 99)
+        self.collision_value_threshold = params.get('collision_value_threshold', 100)
+
+        # UNKNOWN (-1) cells: lethal by default so a cleared/stale costmap
+        # (e.g. sensor timeout) stops the robot instead of freeing all space
+        self.unknown_is_lethal = params.get('unknown_is_lethal', True)
+
+        # [병합 이식: park feature/fgo-integration → main GEN-1249 커널]
+        # Hard-lethal: 연석 벽/keepout 셀은 목표 비용과 절대 교환 불가 —
+        # 합산 soft cost 는 좋은 goal 점수에 밀려 연석을 넘던 실측 원인.
         self.lethal_hard = bool(params.get('lethal_hard', True))
         self.hard_lethal_cost = float(params.get('hard_lethal_cost', 1.0e6))
         # probe advance (2026-08-22): behavior 가 '원거리 가짜 벽' 패턴에서
-        # 탐침 전진을 요청하면, 로봇에서 probe_near_r 밖의 occupied 만
-        # 유한 비용으로 완화한다. 근거리 occupied·OOB 는 항상 hard —
-        # 실벽/연석 접근 시 기존 안전 정지가 그대로 발동한다.
+        # 탐침 전진을 요청하면 로봇에서 probe_near_r 밖 occupied 만 유한
+        # 비용으로 완화. 근거리 occupied·OOB·UNKNOWN 은 항상 hard.
         self.probe_active = False
         self.probe_near_r = float(params.get('probe_near_r', 3.0))
         self.probe_far_cost = float(params.get('probe_far_cost', 500.0))
 
-        # Costmap threshold parameters
-        self.occupied_cost_threshold = params.get('occupied_cost_threshold', 80)  # Cost >= 80 is occupied
-        self.inflation_zone_start = params.get('inflation_zone_start', 50)        # Cost >= 50 is inflation zone
+        # Vehicle footprint polygon [x1,y1,x2,y2,...] in base frame
+        default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+        self.footprint = list(params.get('footprint', default_footprint))
+        if len(self.footprint) < 6 or len(self.footprint) % 2 != 0:
+            vprint(f"[ObstacleCritic] Invalid footprint {self.footprint}, using default")
+            self.footprint = default_footprint
+        self.footprint_padding = params.get('footprint_padding', 0.0)
 
-        # Vehicle footprint parameters
-        self.footprint = params.get('footprint', [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725])
-        self.footprint_padding = params.get('footprint_padding', 0.15)
-        self.use_polygon_collision = params.get('use_polygon_collision', True)
+        # Perimeter sample spacing; half the costmap resolution so no cell
+        # crossed by the footprint boundary is skipped
+        self.sample_spacing = params.get('footprint_sample_spacing', 0.05)
 
-        # Parse footprint into list of (x, y) tuples
-        self.footprint_points = []
-        for i in range(0, len(self.footprint), 2):
-            if i + 1 < len(self.footprint):
-                self.footprint_points.append((self.footprint[i], self.footprint[i+1]))
+        # Precomputed sample points in body frame, [P, 2] on device
+        self.sample_points = self._build_sample_points()
 
-        # Costmap cache (updated via set_costmap_info)
+        # Costmap snapshot; the whole dict is swapped atomically by the
+        # subscriber thread, readers grab one local reference per call
         self.costmap_info = None
 
-        print(f"[ObstacleCritic] Costmap-based collision detection")
-        print(f"[ObstacleCritic] collision_cost={self.collision_cost}, repulsion_factor={self.repulsion_factor}")
-        print(f"[ObstacleCritic] thresholds: inflation>={self.inflation_zone_start}, occupied>={self.occupied_cost_threshold}")
-        print(f"[ObstacleCritic] footprint: {self.footprint_points}, padding={self.footprint_padding}, use_polygon={self.use_polygon_collision}")
+        vprint(f"[ObstacleCritic] Footprint-sampled costmap collision checking")
+        vprint(f"[ObstacleCritic] collision_cost={self.collision_cost}, "
+              f"repulsion_factor={self.repulsion_factor}, "
+              f"collision_threshold>={self.collision_value_threshold}, "
+              f"unknown_is_lethal={self.unknown_is_lethal}")
+        vprint(f"[ObstacleCritic] footprint vertices={len(self.footprint) // 2}, "
+              f"padding={self.footprint_padding}, "
+              f"sample_points={self.sample_points.shape[0]}")
+
+    def _build_sample_points(self) -> torch.Tensor:
+        """
+        Build footprint sample points in the body frame: padded polygon
+        vertices, perimeter samples every `sample_spacing`, and the center.
+
+        Returns:
+            sample_points: [P, 2] tensor on device
+        """
+        flat = self.footprint
+        vertices = []
+        for i in range(0, len(flat) - 1, 2):
+            x, y = float(flat[i]), float(flat[i + 1])
+            # Nav2-style padding: push each vertex outward along both axes
+            x += np.sign(x) * self.footprint_padding
+            y += np.sign(y) * self.footprint_padding
+            vertices.append((x, y))
+
+        points = [(0.0, 0.0)]  # center: catches obstacles fully inside the footprint
+
+        if len(vertices) >= 3:
+            n = len(vertices)
+            for i in range(n):
+                x1, y1 = vertices[i]
+                x2, y2 = vertices[(i + 1) % n]
+                edge_len = float(np.hypot(x2 - x1, y2 - y1))
+                num_seg = max(1, int(np.ceil(edge_len / self.sample_spacing)))
+                for k in range(num_seg):  # includes vertex, excludes edge end (next edge adds it)
+                    t = k / num_seg
+                    points.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+
+        return torch.tensor(points, device=self.device, dtype=self.dtype)
 
     def compute_cost(self, trajectories: torch.Tensor, controls: torch.Tensor,
-                    robot_state: torch.Tensor, goal_state: Optional[torch.Tensor],
-                    obstacles: Optional[Any]) -> torch.Tensor:
+                     robot_state: torch.Tensor, goal_state: Optional[torch.Tensor],
+                     obstacles: Optional[Any]) -> torch.Tensor:
         """
-        Compute obstacle avoidance cost using costmap grid lookup
+        Compute obstacle avoidance cost using footprint-sampled costmap lookup
 
         Args:
             trajectories: [K, T+1, 3] sampled trajectories (x, y, theta)
@@ -82,223 +137,69 @@ class ObstacleCritic(BaseCritic):
         Returns:
             costs: [K] total obstacle costs per trajectory
         """
-        if not self.enabled:
+        info = self.costmap_info
+
+        if not self.enabled or info is None:
             return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
 
-        # Check if costmap is available
-        if self.costmap_info is None:
-            return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
+        width = info['width']
+        height = info['height']
 
-        return self.compute_cost_from_costmap(trajectories)
+        # Rotate/translate footprint samples into world frame: [K, T+1, P]
+        theta = trajectories[:, :, 2].unsqueeze(-1)      # [K, T+1, 1]
+        cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+        fx = self.sample_points[:, 0]                    # [P]
+        fy = self.sample_points[:, 1]                    # [P]
+        wx = trajectories[:, :, 0].unsqueeze(-1) + fx * cos_t - fy * sin_t
+        wy = trajectories[:, :, 1].unsqueeze(-1) + fx * sin_t + fy * cos_t
 
-    def compute_cost_from_costmap(self, trajectories: torch.Tensor) -> torch.Tensor:
-        """
-        Compute collision costs using vectorized costmap grid lookup (O(1) per point)
+        # World to grid (floor, so cells left/below the origin stay negative)
+        gx = torch.floor((wx - info['origin_x']) / info['resolution']).long()
+        gy = torch.floor((wy - info['origin_y']) / info['resolution']).long()
 
-        Algorithm (with polygon footprint):
-            1. Flatten all trajectory poses to [K*(T+1), 3] (x, y, theta)
-            2. Rotate footprint for each pose → [K*(T+1), V, 2]
-            3. Convert all vertices to grid coords (vectorized)
-            4. Lookup costmap values for all vertices
-            5. Take max cost per pose (most conservative)
-            6. Reshape and sum per trajectory
+        inside = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)  # [K, T+1, P]
 
-        Args:
-            trajectories: [K, T+1, 3] tensor (x, y, theta)
+        # Clamped index; out-of-bounds samples are overridden below.
+        # SINGLE gather from the packed grid (see set_costmap_info encoding)
+        g = info['packed_grid'][gy.clamp(0, height - 1), gx.clamp(0, width - 1)]
 
-        Returns:
-            costs: [K] tensor of total costs per trajectory
-        """
-        K, T_plus_1, _ = trajectories.shape
-
-        # Extract costmap metadata
-        resolution = self.costmap_info['resolution']
-        origin_x = self.costmap_info['origin_x']
-        origin_y = self.costmap_info['origin_y']
-        width = self.costmap_info['width']
-        height = self.costmap_info['height']
-        costmap_data = self.costmap_info['data']  # (height, width) numpy array
-
-        if self.use_polygon_collision and len(self.footprint_points) > 0:
-            # === POLYGON FOOTPRINT MODE ===
-            # Extract all poses: [K, T+1, 3] → [K*(T+1), 3]
-            poses = trajectories.detach().cpu().numpy().reshape(-1, 3)  # [N, 3] where N = K*(T+1)
-            N = poses.shape[0]
-
-            # Rotate footprint for all poses → [N, V, 2]
-            rotated_footprint = self._rotate_footprint(self.footprint_points, poses)  # [N, V, 2]
-            V = rotated_footprint.shape[1]  # Number of vertices
-
-            # Flatten to [N*V, 2] for vectorized grid conversion
-            vertices_flat = rotated_footprint.reshape(-1, 2)  # [N*V, 2]
-
-            # World to grid conversion (vectorized)
-            gx = ((vertices_flat[:, 0] - origin_x) / resolution).astype(np.int32)
-            gy = ((vertices_flat[:, 1] - origin_y) / resolution).astype(np.int32)
-
-            # Bounds checking
-            valid_mask = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)
-
-            # Initialize costs (out-of-bounds = lethal)
-            oob_cost = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
-            vertex_costs = np.full(len(gx), oob_cost, dtype=np.float32)
-
-            # Get costmap values for valid vertices
-            costmap_values = costmap_data[gy[valid_mask], gx[valid_mask]]  # Range: [0, 100]
-
-            # Map costmap values to costs based on thresholds
-            free_space_mask = costmap_values < self.inflation_zone_start
-            inflation_mask = (costmap_values >= self.inflation_zone_start) & \
-                            (costmap_values < self.occupied_cost_threshold)
-            occupied_mask = costmap_values >= self.occupied_cost_threshold
-
-            # Compute costs for valid points
-            valid_costs = np.zeros(len(costmap_values), dtype=np.float32)
-
-            # Free space: no cost
-            valid_costs[free_space_mask] = 0.0
-
-            # Inflation zone: scaled repulsion cost
-            if np.any(inflation_mask):
-                inflation_range = self.occupied_cost_threshold - self.inflation_zone_start
-                normalized_values = (costmap_values[inflation_mask] - self.inflation_zone_start) / inflation_range
-                valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
-
-            # Occupied: collision cost (probe 시 원거리만 완화)
-            occ_cost = (self.hard_lethal_cost
-                        if self.lethal_hard else self.collision_cost)
-            if self.probe_active and np.any(occupied_mask):
-                robot_xy = poses[0, :2]
-                vdist = np.hypot(vertices_flat[valid_mask][:, 0] - robot_xy[0],
-                                 vertices_flat[valid_mask][:, 1] - robot_xy[1])
-                far_occ = occupied_mask & (vdist > self.probe_near_r)
-                near_occ = occupied_mask & ~far_occ
-                valid_costs[near_occ] = occ_cost
-                valid_costs[far_occ] = self.probe_far_cost
-            else:
-                valid_costs[occupied_mask] = occ_cost
-
-            # Assign computed costs
-            vertex_costs[valid_mask] = valid_costs
-
-            # Reshape to [N, V] and take max cost per pose
-            vertex_costs_reshaped = vertex_costs.reshape(N, V)  # [N, V]
-            pose_costs = vertex_costs_reshaped.max(axis=1)  # [N] - max cost among vertices
-
-            # Reshape to [K, T+1] and sum per trajectory
-            pose_costs_reshaped = pose_costs.reshape(K, T_plus_1)  # [K, T+1]
-            total_costs = pose_costs_reshaped.sum(axis=1)  # [K]
-
+        if self.unknown_is_lethal:
+            collision = ~inside | (g >= 10.0)              # collision or unknown
         else:
-            # === SINGLE POINT MODE (original behavior) ===
-            # Extract trajectory positions: [K, T+1, 2] → [K*(T+1), 2]
-            traj_xy = trajectories[:, :, :2].detach().cpu().numpy()
-            traj_xy_flat = traj_xy.reshape(-1, 2)  # Shape: [K*(T+1), 2]
+            collision = ~inside | ((g >= 10.0) & (g < 20.0))  # collision only
 
-            # World to grid conversion (vectorized)
-            gx = ((traj_xy_flat[:, 0] - origin_x) / resolution).astype(np.int32)
-            gy = ((traj_xy_flat[:, 1] - origin_y) / resolution).astype(np.int32)
+        probe_cost = None
+        if self.probe_active and robot_state is not None:
+            # [병합 이식] probe: 로봇 기준 probe_near_r 밖의 occupied(10.0)만
+            # hard 에서 제외하고 pose 당 유한 비용으로 과금. OOB(~inside)와
+            # UNKNOWN(20.0), 근거리 occupied 는 그대로 hard 유지.
+            rs = robot_state.to(wx.device, wx.dtype)
+            dist = torch.hypot(wx - rs[0], wy - rs[1])          # [K, T+1, P]
+            occupied = inside & (g >= 10.0) & (g < 20.0)
+            far_occ = occupied & (dist > self.probe_near_r)
+            collision = collision & ~far_occ
+            probe_cost = far_occ.any(dim=2).to(self.dtype) * self.probe_far_cost
 
-            # Bounds checking
-            valid_mask = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)
+        pose_collision = collision.any(dim=2)  # [K, T+1]
 
-            # Initialize costs (out-of-bounds = lethal)
-            oob_cost = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
-            point_costs = np.full(len(gx), oob_cost, dtype=np.float32)
+        # Continuous repulsion over the inflation gradient: max sample value
+        # per pose (most conservative). Sentinel cells (>= 10) contribute 0;
+        # colliding poses are zeroed since the collision penalty dominates
+        sample_rep = torch.where(g < 10.0, g, torch.zeros_like(g))
+        pose_max = sample_rep.max(dim=2).values  # [K, T+1], already squared
+        repulsion = torch.where(pose_collision,
+                                torch.zeros_like(pose_max),
+                                self.repulsion_factor * pose_max * 100.0)
 
-            # Get costmap values for valid points (O(1) lookup per point)
-            costmap_values = costmap_data[gy[valid_mask], gx[valid_mask]]  # Range: [0, 100]
+        total_costs = repulsion.sum(dim=1)
+        # [병합 이식] hard-lethal 모드: 충돌 궤적 페널티를 1e6 으로 상향 —
+        # GEN-1249 의 1회 부과 구조는 유지하되 크기만 절대 우위로.
+        penalty = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
+        total_costs = total_costs + pose_collision.any(dim=1).to(total_costs.dtype) * penalty
+        if probe_cost is not None:
+            total_costs = total_costs + probe_cost.sum(dim=1)
 
-            # Map costmap values to costs based on thresholds
-            free_space_mask = costmap_values < self.inflation_zone_start
-            inflation_mask = (costmap_values >= self.inflation_zone_start) & \
-                            (costmap_values < self.occupied_cost_threshold)
-            occupied_mask = costmap_values >= self.occupied_cost_threshold
-
-            # Compute costs for valid points
-            valid_costs = np.zeros(len(costmap_values), dtype=np.float32)
-
-            # Free space: no cost
-            valid_costs[free_space_mask] = 0.0
-
-            # Inflation zone: scaled repulsion cost
-            # Map costmap value [50, 80) to [0, 1] → apply quadratic penalty
-            if np.any(inflation_mask):
-                inflation_range = self.occupied_cost_threshold - self.inflation_zone_start
-                normalized_values = (costmap_values[inflation_mask] - self.inflation_zone_start) / inflation_range
-                valid_costs[inflation_mask] = self.repulsion_factor * (normalized_values ** 2) * 100.0
-
-            # Occupied: collision cost
-            occ_cost = (self.hard_lethal_cost
-                        if self.lethal_hard else self.collision_cost)
-            if self.probe_active and np.any(occupied_mask):
-                robot_xy = traj_xy_flat[0]
-                pdist = np.hypot(traj_xy_flat[valid_mask][:, 0] - robot_xy[0],
-                                 traj_xy_flat[valid_mask][:, 1] - robot_xy[1])
-                far_occ = occupied_mask & (pdist > self.probe_near_r)
-                valid_costs[occupied_mask & ~far_occ] = occ_cost
-                valid_costs[far_occ] = self.probe_far_cost
-            else:
-                valid_costs[occupied_mask] = occ_cost
-
-            # Assign computed costs
-            point_costs[valid_mask] = valid_costs
-
-            # Reshape back to [K, T+1] and sum per trajectory
-            point_costs_reshaped = point_costs.reshape(K, T_plus_1)
-            total_costs = point_costs_reshaped.sum(axis=1)  # Shape: [K]
-
-        # Convert to torch tensor and apply weight
-        total_costs_tensor = torch.tensor(total_costs, device=self.device, dtype=self.dtype)
-        return self.apply_weight(total_costs_tensor)
-
-    def _rotate_footprint(self, footprint_points: list, poses: np.ndarray) -> np.ndarray:
-        """
-        Rotate and translate footprint for each pose in batch
-
-        Args:
-            footprint_points: List of (x, y) tuples in body frame
-            poses: [N, 3] array of (x, y, theta) poses
-
-        Returns:
-            rotated_footprint: [N, num_vertices, 2] array of rotated footprint vertices in world frame
-        """
-        N = poses.shape[0]
-        num_vertices = len(footprint_points)
-
-        # Convert footprint to numpy array [num_vertices, 2]
-        footprint_array = np.array(footprint_points, dtype=np.float32)  # [V, 2]
-
-        # Extract poses
-        x = poses[:, 0]      # [N]
-        y = poses[:, 1]      # [N]
-        theta = poses[:, 2]  # [N]
-
-        # Compute rotation matrices for all poses
-        cos_theta = np.cos(theta)  # [N]
-        sin_theta = np.sin(theta)  # [N]
-
-        # Broadcast footprint to all poses: [N, V, 2]
-        footprint_batch = np.tile(footprint_array[np.newaxis, :, :], (N, 1, 1))  # [N, V, 2]
-
-        # Apply rotation and translation vectorized
-        # x' = x_robot + (x_footprint * cos(θ) - y_footprint * sin(θ))
-        # y' = y_robot + (x_footprint * sin(θ) + y_footprint * cos(θ))
-
-        fx = footprint_batch[:, :, 0]  # [N, V]
-        fy = footprint_batch[:, :, 1]  # [N, V]
-
-        # Rotated coordinates
-        rotated_x = x[:, np.newaxis] + (fx * cos_theta[:, np.newaxis] - fy * sin_theta[:, np.newaxis])  # [N, V]
-        rotated_y = y[:, np.newaxis] + (fx * sin_theta[:, np.newaxis] + fy * cos_theta[:, np.newaxis])  # [N, V]
-
-        # Stack to [N, V, 2]
-        rotated_footprint = np.stack([rotated_x, rotated_y], axis=2)  # [N, V, 2]
-
-        return rotated_footprint
-
-    def set_probe(self, active: bool):
-        self.probe_active = bool(active)
+        return self.apply_weight(total_costs)
 
     def set_costmap_info(self, costmap_info: dict):
         """
@@ -306,12 +207,41 @@ class ObstacleCritic(BaseCritic):
 
         Args:
             costmap_info: Dictionary with costmap metadata
-                - resolution: cell size in meters (e.g., 0.05)
+                - resolution: cell size in meters (e.g., 0.1)
                 - origin_x, origin_y: map origin in world coordinates
                 - width, height: grid dimensions in cells
-                - data: 2D numpy array of shape (height, width) with values [0-100]
+                - data: 2D numpy array of shape (height, width), values [-1, 100]
+                - costmap_tensor (optional): pre-built torch tensor of the same
+                  data; passed in to share one on-device copy between consumers
         """
-        self.costmap_info = costmap_info
+        info = dict(costmap_info)
+
+        tensor = info.get('costmap_tensor')
+        if tensor is None:
+            tensor = torch.as_tensor(np.ascontiguousarray(info['data']))
+        tensor = tensor.to(device=self.device, dtype=self.dtype)
+        info['costmap_tensor'] = tensor
+
+        # Precompute ONE packed grid per costmap (40k cells at ~10 Hz) so the
+        # per-cycle lookup over K*T*P (millions of) sample points is a SINGLE
+        # random-access gather. Encoding:
+        #   [0, 1):  repulsion (value/100)^2, squared so per-pose reduce is max()
+        #   10.0:    collision cell (value >= collision_value_threshold)
+        #   20.0:    unknown cell (value < 0)
+        info['packed_grid'] = self._build_packed_grid(tensor)
+
+        self.costmap_info = info
+
+    def _build_packed_grid(self, tensor: torch.Tensor) -> torch.Tensor:
+        packed = (tensor.clamp(min=0.0) / 100.0).square()
+        packed = torch.where(tensor >= self.collision_value_threshold,
+                             torch.full_like(packed, 10.0), packed)
+        packed = torch.where(tensor < 0, torch.full_like(packed, 20.0), packed)
+        return packed
+
+    def set_probe(self, active: bool):
+        """[병합 이식] behavior 탐침 전진 신호 — mppi_main probe_callback 이 호출"""
+        self.probe_active = bool(active)
 
     def update_parameters(self, params: dict):
         """
@@ -319,20 +249,35 @@ class ObstacleCritic(BaseCritic):
 
         Args:
             params: Dictionary with parameter updates
-                - collision_cost: Cost for occupied cells
-                - repulsion_factor: Scaling factor for inflation zone
-                - occupied_cost_threshold: Threshold for occupied cells
-                - inflation_zone_start: Threshold for inflation zone start
+                - collision_cost: Per-trajectory penalty for colliding trajectories
+                - repulsion_factor: Scaling factor for inflation-zone repulsion
+                - collision_value_threshold: Costmap value treated as collision
+                - unknown_is_lethal: Whether UNKNOWN (-1) cells are collisions
+                - footprint / footprint_padding: Vehicle footprint update
         """
         if 'collision_cost' in params:
             self.collision_cost = params['collision_cost']
         if 'repulsion_factor' in params:
             self.repulsion_factor = params['repulsion_factor']
-        if 'occupied_cost_threshold' in params:
-            self.occupied_cost_threshold = params['occupied_cost_threshold']
-        if 'inflation_zone_start' in params:
-            self.inflation_zone_start = params['inflation_zone_start']
+        if 'collision_value_threshold' in params:
+            self.collision_value_threshold = params['collision_value_threshold']
+            # packed_grid was precomputed with the old threshold
+            if self.costmap_info is not None:
+                info = dict(self.costmap_info)
+                info['packed_grid'] = self._build_packed_grid(info['costmap_tensor'])
+                self.costmap_info = info
+        if 'unknown_is_lethal' in params:
+            self.unknown_is_lethal = params['unknown_is_lethal']
 
-        print(f"[ObstacleCritic] Parameters updated: "
+        if 'footprint' in params or 'footprint_padding' in params:
+            if 'footprint' in params:
+                self.footprint = params['footprint']
+            if 'footprint_padding' in params:
+                self.footprint_padding = params['footprint_padding']
+            self.sample_points = self._build_sample_points()
+
+        vprint(f"[ObstacleCritic] Parameters updated: "
               f"collision={self.collision_cost}, repulsion={self.repulsion_factor}, "
-              f"thresholds=[{self.inflation_zone_start}, {self.occupied_cost_threshold}]")
+              f"collision_threshold>={self.collision_value_threshold}, "
+              f"unknown_is_lethal={self.unknown_is_lethal}, "
+              f"sample_points={self.sample_points.shape[0]}")

@@ -19,7 +19,7 @@ from std_msgs.msg import Bool, String, Header, Int32
 
 from command_center_interfaces.msg import (
     PlannedPath, ControllerGoalStatus, MultipleWaypoints,
-    MPPIParams, PauseCommand, RequestReplan
+    MPPIParams, PauseCommand, RequestReplan, TargetWaypoints
 )
 
 # Local modules
@@ -95,7 +95,7 @@ class SimpleBehaviorPlannerNode(Node):
         # Main planning timer
         self.create_timer(0.05, self.planning_callback)  # 20Hz
 
-        self.get_logger().info('Simple Behavior Planner Node (Refactored) initialized')
+        self.get_logger().info('behavior planner ready')
         self._log_configuration()
 
     def _declare_parameters(self):
@@ -155,7 +155,8 @@ class SimpleBehaviorPlannerNode(Node):
         self.enable_behavior_control = self.get_parameter('enable_behavior_control').value
 
         # Validate waypoint mode
-        if self.waypoint_mode not in ['single', 'multiple']:
+        # 'external' = waypoint_manage 가 /multiple_waypoints 발행 담당 (BP 는 /target_waypoints 만)
+        if self.waypoint_mode not in ['single', 'multiple', 'external']:
             self.get_logger().warn(f"Invalid waypoint_mode '{self.waypoint_mode}', defaulting to 'multiple'")
             self.waypoint_mode = 'multiple'
 
@@ -238,6 +239,11 @@ class SimpleBehaviorPlannerNode(Node):
         self._probe_pub = self.create_publisher(
             _Bool, '/behavior/probe_advance', self.reliable_qos)
         self._probe_state = False
+        # waypoint_manage 로의 의미 목표 발행 (waypoint 계층 분리; DESIGN: waypoint_manage/README)
+        #   waypoint_mode 'external' 이면 내부 odom-waypoint 발행은 생략되고
+        #   waypoint_manage 가 /multiple_waypoints 를 담당한다.
+        self.target_waypoints_pub = self.create_publisher(
+            TargetWaypoints, '/target_waypoints', self.reliable_qos)
 
     def _link_module_publishers(self):
         """모듈에 발행자 연결"""
@@ -256,14 +262,14 @@ class SimpleBehaviorPlannerNode(Node):
 
     def _log_configuration(self):
         """설정 로깅"""
-        self.get_logger().info(f'Waypoint mode: {self.waypoint_mode}')
-        self.get_logger().info(f'Behavior control: {"enabled" if self.enable_behavior_control else "disabled"}')
-        self.get_logger().info(f'Planned path topic: {self.planned_path_topic}')
-        self.get_logger().info(f'Goal status topic: {self.goal_status_topic}')
-        self.get_logger().info(f'Path availability topic: {self.path_availability_topic}')
-        self.get_logger().info(f'Request replan topic: {self.request_replan_topic}')
-        self.get_logger().info(f'Node type triggers: {self.node_type_triggers}')
-        self.get_logger().info(f'Initial route type: {self.current_route_type}')
+        self.get_logger().debug(f'Waypoint mode: {self.waypoint_mode}')
+        self.get_logger().debug(f'Behavior control: {"enabled" if self.enable_behavior_control else "disabled"}')
+        self.get_logger().debug(f'Planned path topic: {self.planned_path_topic}')
+        self.get_logger().debug(f'Goal status topic: {self.goal_status_topic}')
+        self.get_logger().debug(f'Path availability topic: {self.path_availability_topic}')
+        self.get_logger().debug(f'Request replan topic: {self.request_replan_topic}')
+        self.get_logger().debug(f'Node type triggers: {self.node_type_triggers}')
+        self.get_logger().debug(f'Initial route type: {self.current_route_type}')
 
         # 수동/자율 모드 전이 로그 (2026-08-03 필드 분석에서 추가).
         # 사후 분석 때 "이 구간이 수동인가 자율인가"를 데이터로 답할 수 없어
@@ -523,16 +529,16 @@ class SimpleBehaviorPlannerNode(Node):
             if new_route_type and new_route_type != self.current_route_type:
                 old_route = self.current_route_type
                 self.current_route_type = new_route_type
-                self.get_logger().info(f'Route type updated: {old_route} -> {self.current_route_type}')
+                self.get_logger().debug(f'Route type updated: {old_route} -> {self.current_route_type}')
 
         # Log path info
         path_info = self.path_manager.get_path_info()
         node_types = self.path_manager.get_node_types()
 
-        self.get_logger().info(f'Received path with {path_info["total_nodes"]} nodes')
-        self.get_logger().info(f'Path ID: {path_info["path_id"]}')
-        self.get_logger().info(f'Current route type: {self.current_route_type}')
-        self.get_logger().info(f'Node types: {list(set(node_types))}')
+        self.get_logger().debug(f'Received path with {path_info["total_nodes"]} nodes')
+        self.get_logger().debug(f'Path ID: {path_info["path_id"]}')
+        self.get_logger().debug(f'Current route type: {self.current_route_type}')
+        self.get_logger().debug(f'Node types: {list(set(node_types))}')
 
         # Update initial behavior
         if self.behavior_controller and self.path_manager.path_nodes:
@@ -548,6 +554,13 @@ class SimpleBehaviorPlannerNode(Node):
         self.latest_goal_distance = msg.distance_to_goal
         current_target = self.path_manager.get_current_target_node()
         if not current_target or msg.goal_id != current_target['id']:
+            # 진단: REACHED 인데 ID 불일치로 버려지는 경우를 가시화
+            # (2026-08-04 시뮬 교착 원인 판별 — 미수신 vs 불일치 구분)
+            if msg.goal_reached and current_target:
+                self.get_logger().warn(
+                    f'goal_status ignored: goal_id={msg.goal_id} != '
+                    f'target={current_target["id"]} (reached={msg.goal_reached})',
+                    throttle_duration_sec=2.0)
             return
 
         # Check for pause trigger (before goal reached)
@@ -563,7 +576,7 @@ class SimpleBehaviorPlannerNode(Node):
     def stop_flag_callback(self, msg: Bool):
         """장애물 감지 플래그 콜백"""
         self.safety_monitor.update_stop_flag(msg.data)
-        self.get_logger().info(f'Stop flag received: {msg.data}')
+        self.get_logger().debug(f'Stop flag received: {msg.data}')
 
     def traffic_light_callback(self, msg: Int32):
         """신호등 상태 콜백"""
@@ -577,17 +590,17 @@ class SimpleBehaviorPlannerNode(Node):
             return
 
         self.path_availability = msg.data
-        self.get_logger().info(f'Path availability received: {self.path_availability} for node {self.current_trigger_node_id}')
+        self.get_logger().debug(f'Path availability received: {self.path_availability} for node {self.current_trigger_node_id}')
 
         # Only trigger replanning if path is NOT available (false)
         if not self.path_availability:
-            self.get_logger().info(f'Current route {self.current_route_type} is NOT available, triggering replanning...')
+            self.get_logger().debug(f'Current route {self.current_route_type} is NOT available, triggering replanning...')
             # Get current trigger node type
             current_target = self.path_manager.get_current_target_node()
             trigger_node_type = current_target.get('node_type') if current_target else None
             self._trigger_replanning(trigger_node_type)
         else:
-            self.get_logger().info(f'Current route {self.current_route_type} is available, continuing with existing path')
+            self.get_logger().debug(f'Current route {self.current_route_type} is available, continuing with existing path')
             # Mark as processed but don't trigger replanning
             self.replan_request_sent = True  # Prevent further processing for this trigger node
 
@@ -652,6 +665,17 @@ class SimpleBehaviorPlannerNode(Node):
         if not self.subgoal_published:
             self._publish_waypoints()
             self._wp_tf_at_publish = getattr(self, '_wp_tf_now', None)
+        else:
+            # TargetWaypoints 저주기 재발행 (1회 발행 래치의 유실/경합 자가치유).
+            # waypoint_manage 는 같은 target 이면 가드로 무시하므로 부작용 없음.
+            now_sec = self.get_clock().now().nanoseconds * 1e-9
+            if now_sec - getattr(self, '_last_target_republish', 0.0) >= 1.0:
+                current_target = self.path_manager.get_current_target_node()
+                if current_target:
+                    self._publish_target_waypoints(
+                        current_target, self.path_manager.get_next_nodes(),
+                        self.path_manager.get_path_info())
+                    self._last_target_republish = now_sec
 
     def _is_ready_for_planning(self) -> bool:
         """계획 준비 상태 확인"""
@@ -678,6 +702,21 @@ class SimpleBehaviorPlannerNode(Node):
                     current_node_type, self._is_final_target()):
                 self.safety_monitor.update_behavior_type(current_node_type)
 
+    def _publish_target_waypoints(self, current_target, next_nodes, path_info):
+        """waypoint_manage 로 의미 목표(TargetWaypoints) 발행"""
+        msg = TargetWaypoints()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.path_id = path_info.get('path_id', '')
+        msg.current_node_id = current_target['id']
+        msg.next_node_ids = [n['id'] for n in next_nodes]
+        msg.current_waypoint_index = path_info.get('current_index', 0)
+        msg.total_waypoints = path_info.get('total_nodes', 0)
+        msg.is_final_waypoint = path_info.get('is_final_node', False)
+        msg.speed_limit = 0.0              # 0 = 기본값 (BT 도입 시 행동별로 지정)
+        msg.goal_reached_threshold = 0.0
+        msg.recalc_mode = ''               # passthrough (BT 도입 시 densify/offset 등)
+        self.target_waypoints_pub.publish(msg)
+
     def _publish_waypoints(self):
         """웨이포인트 발행"""
         current_target = self.path_manager.get_current_target_node()
@@ -687,10 +726,14 @@ class SimpleBehaviorPlannerNode(Node):
         next_nodes = self.path_manager.get_next_nodes()
         path_info = self.path_manager.get_path_info()
 
-        self.waypoint_publisher.publish_waypoints(current_target, next_nodes, path_info)
+        # 의미 목표 (노드 ID) — waypoint_manage 가 좌표/프레임/가드 처리
+        self._publish_target_waypoints(current_target, next_nodes, path_info)
+        if self.waypoint_mode != 'external':
+            # 레거시 경로: BP 가 직접 odom waypoint 발행 (waypoint_manage 미사용 시)
+            self.waypoint_publisher.publish_waypoints(current_target, next_nodes, path_info)
         self.subgoal_published = True
 
-        self.get_logger().info(f'Published waypoints: current={current_target["id"]}, '
+        self.get_logger().debug(f'Published waypoints: current={current_target["id"]}, '
                              f'next_count={len(next_nodes)}')
 
     def _set_probe(self, on: bool):
@@ -835,10 +878,23 @@ class SimpleBehaviorPlannerNode(Node):
                 self.pause_signal_sent = True
                 self.pause_until = time.time() + pause_duration + 1.0
 
-                self.get_logger().info(f"Pause command sent: {pause_duration}s for node {msg.goal_id}")
+                self.get_logger().debug(f"Pause command sent: {pause_duration}s for node {msg.goal_id}")
 
     def _handle_goal_success(self, msg: ControllerGoalStatus):
         """목표 성공 처리"""
+        # pause 노드(7/8)인데 아직 pause 미발동이면 노드를 넘기기 전에 발동.
+        # (goal_reached_threshold > pause_trigger_distance 면 거리 트리거가
+        #  발동하기 전에 SUCCEEDED 가 먼저 와서 정지 없이 통과되는 문제 방지)
+        current_target = self.path_manager.get_current_target_node()
+        if current_target and not self.pause_signal_sent:
+            node_type = current_target.get('node_type', 1)
+            if node_type in [7, 8]:
+                pause_duration = 2.0 if node_type == 7 else 4.0
+                self._send_pause_command(pause_duration, current_target['id'],
+                                         f"Node type {node_type} pause (on reach)")
+                self.get_logger().debug(
+                    f"Pause command sent on reach: {pause_duration}s for node {msg.goal_id}")
+
         self.path_manager.mark_goal_completed(msg.goal_id)
         self.pause_signal_sent = False
         self.subgoal_published = False
@@ -846,11 +902,11 @@ class SimpleBehaviorPlannerNode(Node):
         if self.path_manager.advance_to_next_node():
             next_target = self.path_manager.get_current_target_node()
             if next_target:
-                self.get_logger().info(f'Advanced to next node: {next_target["id"]} '
+                self.get_logger().debug(f'Advanced to next node: {next_target["id"]} '
                                      f'({self.path_manager.current_target_index + 1}/'
                                      f'{len(self.path_manager.path_nodes)})')
         else:
-            self.get_logger().info('Path following completed!')
+            self.get_logger().debug('Path following completed!')
 
     def _handle_goal_failure(self, msg: ControllerGoalStatus):
         """목표 실패 처리"""
@@ -876,7 +932,7 @@ class SimpleBehaviorPlannerNode(Node):
             pause_msg.reason = reason
 
             self.pause_command_pub.publish(pause_msg)
-            self.get_logger().info(f"Pause command sent: {reason}")
+            self.get_logger().debug(f"Pause command sent: {reason}")
 
         except Exception as e:
             self.get_logger().error(f"Failed to send pause command: {e}")
@@ -911,8 +967,8 @@ class SimpleBehaviorPlannerNode(Node):
             self.path_query_sent = True
             self.replan_request_sent = False  # Reset replan flag for new trigger
 
-            self.get_logger().info(f'Node type trigger detected: {current_node_type} at node {current_node_id}')
-            self.get_logger().info(f'Querying perception system for route availability...')
+            self.get_logger().debug(f'Node type trigger detected: {current_node_type} at node {current_node_id}')
+            self.get_logger().debug(f'Querying perception system for route availability...')
             # Here we would query perception system, but for now we assume it responds via path_availability_callback
         else:
             # Not a trigger node, reset flags when moving to different node type
@@ -971,9 +1027,9 @@ class SimpleBehaviorPlannerNode(Node):
             # NOTE: Don't update current_route_type here - wait until new path is received
             # self.current_route_type will be updated when planned_path_callback receives new path
 
-            self.get_logger().info(f'Replan request sent: route_type={route_type}, '
+            self.get_logger().debug(f'Replan request sent: route_type={route_type}, '
                                  f'start: {start_node_id}, goal: {goal_node_id}')
-            self.get_logger().info(f'Waiting for new planned path from Global Planner...')
+            self.get_logger().debug(f'Waiting for new planned path from Global Planner...')
 
         except Exception as e:
             self.get_logger().error(f'Failed to send replan request: {e}')
