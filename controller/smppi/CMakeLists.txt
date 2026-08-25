@@ -15,6 +15,8 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/OptimalPath.msg"
   "msg/HighCostPath.msg"
+  "msg/MPPIState.msg"
+  "msg/ProcessedObstacles.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
