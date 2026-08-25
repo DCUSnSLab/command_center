@@ -125,6 +125,14 @@ def generate_launch_description():
                         "start/goal pinned (drive on from wherever you are); "
                         "'graph' uses gmserver + A* between named endpoints."),
         DeclareLaunchArgument(
+            'pcd_loc', default_value='false',
+            description='true: PCD 지도 정합 측위(/pcd/global_pose) 기동 + '
+                        'map_anchor 융합(map_anchor_pcd 자동 활성). '
+                        'GPS 열화 환경 강건화 (2026-08-25 통합).'),
+        DeclareLaunchArgument(
+            'bundle_dir', default_value='/home/scv/MAP/DCU_0819_clean',
+            description='pcd_loc 용 map_provider 번들 (기본: 클린맵)'),
+        DeclareLaunchArgument(
             'goal_node', default_value='',
             description='Scenario goal: route to this node at startup '
                         '(nearest-node start unless start_node is set). '
@@ -179,7 +187,8 @@ def generate_launch_description():
                         "'RC 10 m 전진' 수렴 절차의 정지 대체. 기준 지도는 "
                         'capture_yaw_ref.sh 로 출발 지점마다 1회 촬영.'),
         DeclareLaunchArgument(
-            'map_anchor_pcd', default_value='0',
+            # pcd_loc 활성 시 자동 연동 (명시 지정으로 오버라이드 가능)
+            'map_anchor_pcd', default_value=LaunchConfiguration('pcd_loc'),
             description='1/true: 본선 PCD 정합기(/pcd/global_pose) 하이브리드 '
                         '앵커링. SCV_NEW_MAP0721 계열 지도 필요. '
                         'scan_yaw_init 과는 배타(둘 다 켜면 scan 우선).'),
@@ -206,12 +215,22 @@ def generate_launch_description():
         # Owns odom->base_link AND map->odom TF; datum = graph-map node[0].
         # The anchor rate/covariance limits are the 2026-07-30 field fix and
         # must be passed through, not left to the include's own defaults.
+        # --- t=4: PCD 지도 정합 측위 (pcd_loc:=true) ------------------------
+        TimerAction(period=4.0, actions=[
+            _include('command_center_launch', 'pcd_localization.launch.py', {
+                'use_sim_time': use_sim_time,
+                'bundle_dir': LaunchConfiguration('bundle_dir'),
+            }, condition=IfCondition(LaunchConfiguration('pcd_loc'))),
+        ]),
+
         TimerAction(period=5.0, actions=[
             _include('robot_localization', 'scv_dual_ekf.launch.py', {
                 'use_sim_time': use_sim_time,
                 'with_fastlio': with_fastlio,
+                # pcd_loc 이면 map_anchor 가 /pcd/global_pose 를 융합
                 'map_anchor_pcd': LaunchConfiguration(
-                    'map_anchor_pcd', default='0'),
+                    'map_anchor_pcd',
+                    default=LaunchConfiguration('pcd_loc')),
                 # 정지 스캔 정합으로 yaw 를 초기화한다(2026-08-13 챔버 검증).
                 # standstill_yaw_init.py 를 같은 지점에서 돌려 주면 전진
                 # 없이 map_anchor/yaw_converged 가 통과한다.
@@ -238,6 +257,8 @@ def generate_launch_description():
                 'explicit_endpoints': 'false',
                 'goal_node': LaunchConfiguration('goal_node', default=''),
                 'start_node': LaunchConfiguration('start_node', default=''),
+                # scenario_drive: false 면 goal 수신까지 경로 미발행 (GPS 게이트용)
+                'auto_start': LaunchConfiguration('sequential_auto_start', default='true'),
             }, condition=IfCondition(
                 PythonExpression(["'", route_source, "' == 'sequential'"]))),
             _include('scv_global_planner', 'path_planner.launch.py', {
@@ -251,7 +272,9 @@ def generate_launch_description():
         # curb_detection_node (/velodyne_points -> /velodyne_points_curb with
         # below-grade walls) + local_costmap consuming the augmented cloud.
         TimerAction(period=9.0, actions=[
-            _include('pcd_ground_filter', 'curb_costmap.launch.py', sim_args),
+            _include('pcd_ground_filter', 'curb_costmap.launch.py',
+                     dict(sim_args, curb_method=LaunchConfiguration(
+                         'curb_method', default='below_grade'))),
         ]),
 
         # --- t=12: SMPPI controller stack (L2 + L4) -------------------------
@@ -301,6 +324,8 @@ def generate_launch_description():
                      'simple_behavior_planner.launch.py', {
                          'use_sim_time': use_sim_time,
                          'current_position_topic': '/odometry/global',
+                         'probe_enabled': LaunchConfiguration(
+                             'probe', default='false'),
                      }),
         ]),
     ])
