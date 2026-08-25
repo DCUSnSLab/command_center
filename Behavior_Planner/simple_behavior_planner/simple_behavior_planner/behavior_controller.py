@@ -81,17 +81,31 @@ class BehaviorController:
         for behavior_type, description in behaviors.items():
             self.node.get_logger().info(f"  {behavior_type}: {description}")
 
-    def update_behavior(self, node_type: int) -> bool:
-        """행동 업데이트"""
+    def update_behavior(self, node_type: int, is_final: bool = False) -> bool:
+        """행동 업데이트.
+
+        is_final: 현재 추종 노드가 경로의 최종 목표 노드인지. 노드 추종
+        이원화(2026-08-25): 경유 노드는 goal_distance_via(기본 1.6 m)로
+        러프하게 통과, 최종 노드는 goal_distance_final(기본 0.4 m)로 정밀
+        도달. MPPIParams.goal_reached_threshold 로 컨트롤러에 전달된다.
+        """
         if not self.param_manager or not self.mppi_param_pub:
             return False
 
-        if node_type == self.current_node_type:
+        if (node_type == self.current_node_type
+                and is_final == getattr(self, 'current_is_final', None)):
             return False  # No change needed
 
         try:
             # Get behavior parameters
-            behavior_params = self.param_manager.get_behavior_params(node_type)
+            behavior_params = dict(self.param_manager.get_behavior_params(node_type))
+            try:
+                via = float(self.node.get_parameter('goal_distance_via').value)
+                fin = float(self.node.get_parameter('goal_distance_final').value)
+            except Exception:
+                via, fin = 1.6, 0.4
+            behavior_params['goal_reached_threshold'] = fin if is_final else via
+            self.current_is_final = is_final
 
             # Validate parameters
             if not self.param_manager.validate_behavior_params(behavior_params):

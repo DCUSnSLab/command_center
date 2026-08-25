@@ -102,6 +102,6 @@ def generate_launch_description():
         DeclareLaunchArgument('sigma_ok', default_value='0.15'),
         DeclareLaunchArgument('min_wait', default_value='175.0'),
         DeclareLaunchArgument('max_wait', default_value='420.0'),
-        DeclareLaunchArgument('arrive_radius', default_value='3.0'),
+        DeclareLaunchArgument('arrive_radius', default_value='0.6'),
         OpaqueFunction(function=setup),
     ])

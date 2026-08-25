@@ -46,7 +46,15 @@ class SimpleBehaviorPlannerNode(Node):
         self.behavior_controller = BehaviorController(
             self, self.behavior_config_path) if self.enable_behavior_control else None
         self.safety_monitor = SafetyMonitor(self)
+        self.declare_parameter('probe.enabled', False)
+        self.declare_parameter('probe.max_dist_m', 2.0)
+        self.declare_parameter('probe.near_clear_m', 3.0)
+        self.declare_parameter('probe.far_range_m', 10.0)
+        self.declare_parameter('probe.wall_frac', 0.6)
+        self.declare_parameter('probe.lethal_min', 90)
         self.blocked_monitor = BlockedWaitMonitor(
+            probe_enabled=self.get_parameter('probe.enabled').value,
+            probe_max_dist=self.get_parameter('probe.max_dist_m').value,
             blocked_detect_sec=self.get_parameter('blocked.detect_sec').value,
             progress_eps=self.get_parameter('blocked.progress_eps').value,
             wait_timeout=self.get_parameter('blocked.wait_timeout').value,
@@ -109,6 +117,9 @@ class SimpleBehaviorPlannerNode(Node):
 
         # Behavior parameters
         self.declare_parameter('pause_trigger_distance', 0.8)
+        # 노드 추종 이원화 (2026-08-25): 경유/최종 도달 판정 거리
+        self.declare_parameter('goal_distance_via', 1.6)
+        self.declare_parameter('goal_distance_final', 0.4)
 
         # Blocked-wait (회피 불가 시 정지·대기) parameters
         self.declare_parameter('blocked.detect_sec', 4.0)
@@ -221,6 +232,12 @@ class SimpleBehaviorPlannerNode(Node):
             String, '/behavior_status', self.reliable_qos)
         self.assist_request_pub = self.create_publisher(
             String, '/blocked_assist_request', self.reliable_qos)
+        # probe advance (2026-08-22): 원거리 가짜 벽(램프 오판) 탐침 전진.
+        # 기본 off — 챔버 검증 후 launch 에서 활성화.
+        from std_msgs.msg import Bool as _Bool
+        self._probe_pub = self.create_publisher(
+            _Bool, '/behavior/probe_advance', self.reliable_qos)
+        self._probe_state = False
 
     def _link_module_publishers(self):
         """모듈에 발행자 연결"""
@@ -522,7 +539,8 @@ class SimpleBehaviorPlannerNode(Node):
             first_node = self.path_manager.get_current_target_node()
             if first_node:
                 first_node_type = first_node.get('node_type', 1)
-                self.behavior_controller.update_behavior(first_node_type)
+                self.behavior_controller.update_behavior(
+                    first_node_type, self._is_final_target())
                 self.safety_monitor.update_behavior_type(first_node_type)
 
     def goal_status_callback(self, msg: ControllerGoalStatus):
@@ -641,6 +659,13 @@ class SimpleBehaviorPlannerNode(Node):
                 self.current_pose is not None and
                 self.path_manager.path_nodes)
 
+    def _is_final_target(self) -> bool:
+        """현재 추종 노드가 경로 최종 노드인지 (노드 추종 이원화)"""
+        pm = self.path_manager
+        if not pm.path_nodes:
+            return False
+        return pm.current_target_index >= len(pm.path_nodes) - 1
+
     def _update_behavior_if_needed(self):
         """필요시 행동 업데이트"""
         if not self.behavior_controller:
@@ -649,7 +674,8 @@ class SimpleBehaviorPlannerNode(Node):
         current_target = self.path_manager.get_current_target_node()
         if current_target:
             current_node_type = current_target.get('node_type', 1)
-            if self.behavior_controller.update_behavior(current_node_type):
+            if self.behavior_controller.update_behavior(
+                    current_node_type, self._is_final_target()):
                 self.safety_monitor.update_behavior_type(current_node_type)
 
     def _publish_waypoints(self):
@@ -666,6 +692,72 @@ class SimpleBehaviorPlannerNode(Node):
 
         self.get_logger().info(f'Published waypoints: current={current_target["id"]}, '
                              f'next_count={len(next_nodes)}')
+
+    def _set_probe(self, on: bool):
+        from std_msgs.msg import Bool as _Bool
+        if on != self._probe_state:
+            self.get_logger().warn(f'[PROBE] advance {"ON" if on else "OFF"}')
+        self._probe_state = on
+        m = _Bool(); m.data = bool(on)
+        self._probe_pub.publish(m)
+
+    def _classify_far_wall(self, xy) -> bool:
+        """차단 패턴 분류: 근거리(0.5~near_clear) 청정 + 원거리(~far_range)에
+        회랑 전폭 lethal 행이 존재 — 램프 오판형 가짜 벽의 시그니처.
+        진짜 근접 장애물(보행자·연석)은 근거리부터 lethal 이라 False."""
+        cm = self._costmap
+        if cm is None or self.current_pose is None or xy is None:
+            return False
+        import numpy as _np
+        q = self.current_pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        c, s = math.cos(yaw), math.sin(yaw)
+        res = cm.info.resolution
+        ox, oy = cm.info.origin.position.x, cm.info.origin.position.y
+        W, H = cm.info.width, cm.info.height
+        data = _np.asarray(cm.data, dtype=_np.int8).reshape(H, W)
+        near_m = float(self.get_parameter('probe.near_clear_m').value)
+        far_m = float(self.get_parameter('probe.far_range_m').value)
+        wall_frac = float(self.get_parameter('probe.wall_frac').value)
+        lethal_min = int(self.get_parameter('probe.lethal_min').value)
+        # 판정을 MPPI 가 겪는 조건과 동형으로: 산개된 lethal 점이라도
+        # 차폭(gap_w) 이상의 무-lethal 간격이 없으면 그 행은 '차단'이다.
+        # (행 점유율 임계는 합성 벽점의 희소성 때문에 실측 0.1 수준 — 무효했음)
+        lat = _np.arange(-1.2, 1.201, 0.15)
+        gap_need = int(round(0.9 / 0.15))     # 차폭 0.9 m = 연속 free 6칸
+        near_bad = 0; near_rows = 0; far_hits = []
+        for dist in _np.arange(0.6, far_m, 0.25):
+            px = xy[0] + c * dist - s * lat
+            py = xy[1] + s * dist + c * lat
+            gx = ((px - ox) / res).astype(_np.int32)
+            gy = ((py - oy) / res).astype(_np.int32)
+            ok = (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+            if ok.sum() < len(lat) * 0.5:
+                continue
+            leth = _np.zeros(len(lat), bool)
+            leth[ok] = data[gy[ok], gx[ok]] >= lethal_min
+            if dist < near_m:
+                near_rows += 1
+                # 근거리는 직진 풋프린트 대역(|y|<0.45)만 본다
+                if bool(leth[_np.abs(lat) <= 0.45].any()):
+                    near_bad += 1
+            else:
+                # 원거리 lethal 반점 수집 (행 단위가 아니라 fan 전체로 판정 —
+                # 램프 오판 벽은 깊이 수 m 에 산개된 반점 field 라 행마다
+                # 틈이 있어도 경로가 없다. t1b/t1c 실측으로 확인)
+                if leth.any():
+                    far_hits.append((dist, int(leth.sum())))
+        near_clean = near_rows > 0 and near_bad == 0
+        n_far = sum(n for _, n in far_hits)
+        spread = (max(d for d, _ in far_hits) - min(d for d, _ in far_hits)) \
+            if len(far_hits) >= 2 else 0.0
+        far_wall = n_far >= 8 and spread >= 2.0
+        self.get_logger().info(
+            f'[PROBE-CLS] near_bad={near_bad} far_n={n_far} '
+            f'spread={spread:.1f} -> {bool(near_clean and far_wall)}',
+            throttle_duration_sec=3.0)
+        return bool(near_clean and far_wall)
 
     def _tick_blocked_monitor(self):
         """Blocked-wait 상태기계 틱"""
@@ -685,7 +777,14 @@ class SimpleBehaviorPlannerNode(Node):
             and (self.latest_goal_distance is None
                  or self.latest_goal_distance > self.blocked_near_goal_hold_off))
 
-        actions = self.blocked_monitor.update(time.time(), xy, should_be_moving)
+        if not getattr(self, '_probe_en_logged', False):
+            self._probe_en_logged = True
+            self.get_logger().info(
+                f'[PROBE-CLS] probe_enabled={self.blocked_monitor.probe_enabled}')
+        far_wall = self._classify_far_wall(xy) if \
+            self.blocked_monitor.probe_enabled else False
+        actions = self.blocked_monitor.update(time.time(), xy, should_be_moving,
+                                              far_wall=far_wall)
         for action in actions:
             self._handle_blocked_action(action)
 
@@ -707,6 +806,10 @@ class SimpleBehaviorPlannerNode(Node):
         elif action == 'creep_off':
             if self.behavior_controller:
                 self.behavior_controller.reapply_current_behavior()
+        elif action == 'probe_on':
+            self._set_probe(True)
+        elif action == 'probe_off':
+            self._set_probe(False)
         elif action == 'assist':
             msg = String()
             current = self.path_manager.get_current_target_node()

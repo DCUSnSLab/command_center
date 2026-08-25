@@ -42,7 +42,7 @@ class ScenarioRunner(Node):
         self.declare_parameter('plateau_window', 30.0)
         self.declare_parameter('plateau_eps', 0.03)
         self.declare_parameter('max_wait', 420.0)
-        self.declare_parameter('arrive_radius', 3.0)
+        self.declare_parameter('arrive_radius', 0.6)
         self.declare_parameter('arrive_hold', 2.0)
         self.declare_parameter('goal_repeat', 4)           # 목표 재발행 횟수(1 Hz)
 
