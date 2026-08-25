@@ -27,6 +27,12 @@ from sensor_msgs.msg import NavSatFix
 # Custom messages
 from command_center_interfaces.msg import PlannedPath
 from gmserver.msg import MapData, MapNode, MapLink, GpsInfo, UtmInfo
+# PlannedPath.path_data 스키마 이행 (main GEN-1195): gmserver/MapData ->
+# map_interfaces/GraphLayer. 규약: easting/northing 필드에 **map 프레임 좌표**
+# (절대 UTM - 원점)를 채운다 — 소비자 path_manager 가 그대로 x/y 로 쓴다.
+from map_interfaces.msg import GraphLayer
+from map_interfaces.msg import MapNode as GMapNode
+from map_interfaces.msg import MapLink as GMapLink
 
 
 class SequentialPlannerNode(Node):
@@ -414,79 +420,39 @@ class SequentialPlannerNode(Node):
         planned_path.total_distance = 0.0  # Can calculate if needed
         planned_path.total_time = 0.0      # Can calculate if needed
 
-        # Create MapData with nodes and links
-        map_data = MapData()
+        # GraphLayer 조립 (스키마 이행 — 위 import 주석 참조)
+        map_data = GraphLayer()
 
-        # Convert nodes to MapNode messages
         for node_id in seq:
             node_data = self.nodes_data[node_id]
-            
-            map_node = MapNode()
-            map_node.id = node_id
-            map_node.admin_code = node_data.get('AdminCode', '110')
-            map_node.node_type = node_data.get('NodeType', 1)
-            map_node.its_node_id = node_data.get('ITSNodeID', f'ITS_{node_id}')
-            map_node.maker = node_data.get('Maker', '한국도로공사')
-            map_node.update_date = node_data.get('UpdateDate', '20250418')
-            map_node.version = node_data.get('Version', '2021')
-            map_node.remark = node_data.get('Remark', '')
-            map_node.hist_type = node_data.get('HistType', '02A')
-            map_node.hist_remark = node_data.get('HistRemark', '')
-            # Handle heading field - use value if present, default to 0.0 if missing
+            gn = GMapNode()
+            gn.id = node_id
+            gn.node_type = int(node_data.get('NodeType', 1))
+            # main GEN-1195 규약: **절대 UTM** 기입 — waypoint_publisher 가
+            # /map_provider_node/utm datum 을 빼서 map 좌표로 변환한다.
+            gn.easting = float(node_data['UtmInfo']['Easting'])
+            gn.northing = float(node_data['UtmInfo']['Northing'])
+            gn.latitude = float(node_data.get('GpsInfo', {}).get('Lat', 0.0))
+            gn.longitude = float(node_data.get('GpsInfo', {}).get('Long', 0.0))
             if routed:
-                # 저장 헤딩은 그래프 순방향 기준 — 역방향 구간에서 정반대가
-                # 되므로 진행 방향으로 재계산한 값을 쓴다.
-                map_node.heading = route_headings.get(node_id, 0.0)
-            elif 'Heading' in node_data:
-                map_node.heading = node_data['Heading']
+                gn.heading_deg = float(route_headings.get(node_id, 0.0))
             else:
-                map_node.heading = 0.0
-                self.get_logger().debug(f"Node {node_id} has no Heading key, using default 0.0")
-            
-            # GPS info
-            map_node.gps_info.lat = node_data['GpsInfo']['Lat']
-            map_node.gps_info.longitude = node_data['GpsInfo']['Long']
-            map_node.gps_info.alt = node_data['GpsInfo']['Alt']
-            
-            # PlannedPath 의 utm_info 는 **map 원점 상대 좌표**다. 절대 UTM 이
-            # 아니다 — A* 플래너도 발행 직전에 node[0] UTM 을 빼고
-            # (path_planner_node.cpp:1361), 소비자인 behavior planner 는 이 값을
-            # 그대로 map 프레임 x/y 로 써서 /odometry/global 과 거리 비교를 한다
-            # (path_manager.py:33,52).
-            #
-            # 여기서만 절대 UTM 을 넣고 있었다. 그러면 48만 대 −35 를 비교하게
-            # 되어 "최근접 노드"가 기하와 무관해진다 — 실측: 로봇을 B060 위에
-            # 놓았는데 28.6 m 떨어진 B032 를 골랐다. 같은 파일의
-            # create_nav_path_message 는 이미 원점을 빼고 있어 한 파일 안에서
-            # 두 메시지가 서로 다른 프레임을 쓰고 있었다.
-            map_node.utm_info.easting = (
-                node_data['UtmInfo']['Easting'] - self.map_origin_utm_easting)
-            map_node.utm_info.northing = (
-                node_data['UtmInfo']['Northing'] - self.map_origin_utm_northing)
-            map_node.utm_info.zone = node_data['UtmInfo']['Zone']
-            
-            map_data.nodes.append(map_node)
-        
-        # Add relevant links
+                gn.heading_deg = float(node_data.get('Heading', 0.0))
+            gn.source = str(node_data.get('src', 'slam'))
+            map_data.nodes.append(gn)
+
         for link_data in self.links_data:
             from_id = link_data['FromNodeID']
             to_id = link_data['ToNodeID']
-            
-            # Only include links that are part of the published sequence
             if from_id in seq and to_id in seq:
-                map_link = MapLink()
-                map_link.id = link_data.get('ID', '')
-                map_link.admin_code = link_data.get('AdminCode', '110')
-                map_link.road_rank = link_data.get('RoadRank', 1)
-                map_link.road_type = link_data.get('RoadType', 1)
-                map_link.road_no = link_data.get('RoadNo', '20')
-                map_link.link_type = link_data.get('LinkType', 3)
-                map_link.lane_no = link_data.get('LaneNo', 2)
-                map_link.from_node_id = from_id
-                map_link.to_node_id = to_id
-                map_link.length = link_data.get('Length', 0.1)
-                
-                map_data.links.append(map_link)
+                gl = GMapLink()
+                gl.id = str(link_data.get('ID', ''))
+                gl.from_node_id = from_id
+                gl.to_node_id = to_id
+                gl.length = float(link_data.get('Length', 0.1))
+                # 2026-08-02 운용 규약: 그래프 링크는 무방향 취급
+                gl.bidirectional = bool(link_data.get('Bidirectional', True))
+                map_data.links.append(gl)
         
         # Calculate headings for nodes with heading = 0.0
         self.calculate_node_headings(map_data)
