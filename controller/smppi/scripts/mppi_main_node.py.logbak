@@ -102,7 +102,7 @@ class MPPIMainNode(Node):
         self.last_control_time = time.time()
         self.control_count = 0
         
-        self.get_logger().info("smppi controller ready")
+        self.get_logger().info("SMPPI Main Controller Node initialized")
     
     def _declare_parameters(self):
         """Declare ROS2 parameters"""
@@ -244,13 +244,13 @@ class MPPIMainNode(Node):
     def _init_motion_model(self):
         """Initialize motion model"""
         self.motion_model = AckermannModel(self.vehicle_params)
-        self.get_logger().debug("Ackermann motion model initialized")
+        self.get_logger().info("Ackermann motion model initialized")
     
     def _init_optimizer(self):
         """Initialize SMPPI optimizer"""
         self.optimizer = SMPPIOptimizer(self.optimizer_params)
         self.optimizer.set_motion_model(self.motion_model)
-        self.get_logger().debug("SMPPI optimizer initialized")
+        self.get_logger().info("SMPPI optimizer initialized")
     
     def _init_critics(self):
         """Initialize critic functions"""
@@ -281,7 +281,7 @@ class MPPIMainNode(Node):
         self.goal_critic = GoalCritic(goal_params)
         self.optimizer.add_critic(self.goal_critic)
         
-        self.get_logger().debug("Critics initialized")
+        self.get_logger().info("Critics initialized")
     
     
     def _setup_topics(self):
@@ -305,11 +305,11 @@ class MPPIMainNode(Node):
         if self.waypoint_mode == 'single':
             self.goal_sub = self.create_subscription(
                 PoseStamped, self.goal_topic, self.goal_callback, reliable_qos)
-            self.get_logger().debug(f"Single waypoint mode: subscribed to {self.goal_topic}")
+            self.get_logger().info(f"Single waypoint mode: subscribed to {self.goal_topic}")
         elif self.waypoint_mode == 'multiple':
             self.multiple_waypoints_sub = self.create_subscription(
                 MultipleWaypoints, self.multiple_waypoints_topic, self.multiple_waypoints_callback, reliable_qos)
-            self.get_logger().debug(f"Multiple waypoints mode: subscribed to {self.multiple_waypoints_topic}")
+            self.get_logger().info(f"Multiple waypoints mode: subscribed to {self.multiple_waypoints_topic}")
         else:
             # Fallback - subscribe to both but with priority to multiple waypoints
             self.goal_sub = self.create_subscription(
@@ -340,7 +340,7 @@ class MPPIMainNode(Node):
         self.target_direction_pub = self.create_publisher(
             PointStamped, '/smppi_visualization/target_direction', reliable_qos)
         
-        self.get_logger().debug(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
+        self.get_logger().info(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
     
     def odom_callback(self, msg: Odometry):
         """Receive odometry directly and adapt to internal robot state"""
@@ -388,7 +388,7 @@ class MPPIMainNode(Node):
         else:
             self.current_goal_id = f"goal_{int(time.time())}"
             
-        self.get_logger().debug(f"New goal received: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), ID: {self.current_goal_id}")
+        self.get_logger().info(f"New goal received: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), ID: {self.current_goal_id}")
     
     def multiple_waypoints_callback(self, msg: MultipleWaypoints):
         """Process multiple waypoints"""
@@ -419,7 +419,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.set_multiple_waypoints(msg)
         
-        # self.get_logger().debug(f"New multiple waypoints: current={self.current_goal_id}, "
+        # self.get_logger().info(f"New multiple waypoints: current={self.current_goal_id}, "
         #                      f"next_count={len(msg.next_waypoints)}, final={msg.is_final_waypoint}")
     
     def params_update_callback(self, msg: MPPIParams):
@@ -434,15 +434,15 @@ class MPPIMainNode(Node):
         if msg.update_obstacle_critic: update_types.append('obstacle_critic')
         if msg.update_control: update_types.append('control')
         
-        self.get_logger().debug(f"📨 [MPPI PARAM UPDATE] Types: {update_types}")
-        self.get_logger().debug(f"   Behavior: {msg.current_behavior_type} - {msg.current_behavior_desc}")
+        self.get_logger().info(f"📨 [MPPI PARAM UPDATE] Types: {update_types}")
+        self.get_logger().info(f"   Behavior: {msg.current_behavior_type} - {msg.current_behavior_desc}")
         
         if msg.update_vehicle:
-            self.get_logger().debug(f"   Vehicle: max_v={msg.max_linear_velocity}, min_v={msg.min_linear_velocity}")
+            self.get_logger().info(f"   Vehicle: max_v={msg.max_linear_velocity}, min_v={msg.min_linear_velocity}")
         if msg.update_goal_critic:
-            self.get_logger().debug(f"   Goal: respect_reverse={msg.respect_reverse_heading}")
+            self.get_logger().info(f"   Goal: respect_reverse={msg.respect_reverse_heading}")
         if msg.update_lookahead:
-            self.get_logger().debug(f"   Lookahead: base={msg.lookahead_base_distance}, vel_factor={msg.lookahead_velocity_factor}")
+            self.get_logger().info(f"   Lookahead: base={msg.lookahead_base_distance}, vel_factor={msg.lookahead_velocity_factor}")
         
         try:
             # Validate and update optimizer parameters
@@ -488,9 +488,9 @@ class MPPIMainNode(Node):
                 self.current_behavior_desc = msg.current_behavior_desc if msg.current_behavior_desc else f"Behavior {msg.current_behavior_type}"
                 
                 if prev_behavior != self.current_behavior_type:
-                    self.get_logger().debug(f"🎨 [BEHAVIOR MODE CHANGE] {prev_behavior} -> {self.current_behavior_type}")
+                    self.get_logger().info(f"🎨 [BEHAVIOR MODE CHANGE] {prev_behavior} -> {self.current_behavior_type}")
                 
-            self.get_logger().debug("✅ MPPI parameters updated successfully")
+            self.get_logger().info("✅ MPPI parameters updated successfully")
             
         except Exception as e:
             self.get_logger().error(f"Failed to update MPPI parameters: {e}")
@@ -503,7 +503,7 @@ class MPPIMainNode(Node):
             self.pause_duration = msg.pause_duration
             self.pause_node_id = msg.node_id
             
-            self.get_logger().debug(f"Pause activated: {msg.pause_duration}s for node {msg.node_id} ({msg.reason})@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            self.get_logger().info(f"Pause activated: {msg.pause_duration}s for node {msg.node_id} ({msg.reason})@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             
         except Exception as e:
             self.get_logger().error(f"Failed to process pause command: {e}")
@@ -541,7 +541,7 @@ class MPPIMainNode(Node):
             else:
                 # Pause completed
                 self.is_paused = False
-                self.get_logger().debug(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
+                self.get_logger().info(f"Pause completed for node {self.pause_node_id} (duration: {elapsed_time:.2f}s)")
         
         start_time = time.perf_counter()
         
@@ -575,7 +575,7 @@ class MPPIMainNode(Node):
             cmd_vel = self.optimizer.get_control_command()
             _tc = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] optimize=%.1fms cmd=%.1fms (prep+rest below)" % (
                         (_tb - _ta) * 1000.0, (_tc - _tb) * 1000.0))
                 self._t_opt = _tb - _ta
@@ -596,7 +596,7 @@ class MPPIMainNode(Node):
                 
                 # # Check if goal reached
                 # if goal_distance_float < self.goal_reached_threshold:
-                #     self.get_logger().debug(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
+                #     self.get_logger().info(f'Goal reached! Distance: {goal_distance_float:.3f}m, {self.current_goal_id}')
             
             # Shift control sequence for next iteration
             self.optimizer.shift_control_sequence()
@@ -612,7 +612,7 @@ class MPPIMainNode(Node):
                 self.publish_lookahead_point()
             _te = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] publish_path+lookahead=%.1fms | prepare+goal+shift=%.1fms" % (
                         (_te - _td) * 1000.0,
                         ((_ta - start_time) + (_td - _tc)) * 1000.0))
@@ -782,9 +782,9 @@ class MPPIMainNode(Node):
             if hasattr(self.optimizer, 'update_parameters'):
                 self.optimizer.update_parameters(self.optimizer_params)
             else:
-                self.get_logger().debug("Optimizer doesn't support parameter updates - parameters stored for future use")
+                self.get_logger().info("Optimizer doesn't support parameter updates - parameters stored for future use")
         
-        self.get_logger().debug("Optimizer parameters updated")
+        self.get_logger().info("Optimizer parameters updated")
     
     def _update_vehicle_params(self, msg: MPPIParams):
         """Update vehicle parameters"""
@@ -845,9 +845,9 @@ class MPPIMainNode(Node):
             # Reset control sequence to prevent oscillation after parameter changes
             if hasattr(self.optimizer, 'reset'):
                 self.optimizer.reset()
-                self.get_logger().debug("SMPPI control sequence reset after parameter update")
+                self.get_logger().info("SMPPI control sequence reset after parameter update")
         
-        # self.get_logger().debug(f"Vehicle parameters updated: "
+        # self.get_logger().info(f"Vehicle parameters updated: "
         #                      f"max_v={self.vehicle_params['max_linear_velocity']:.1f}m/s, "
         #                      f"max_w={self.vehicle_params['max_angular_velocity']:.2f}rad/s")
     
@@ -879,7 +879,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.update_parameters(goal_params)
             
-        self.get_logger().debug("Goal critic parameters updated")
+        self.get_logger().info("Goal critic parameters updated")
     
     def _update_cost_weights(self, msg: MPPIParams):
         """Update cost function weights"""
@@ -888,7 +888,7 @@ class MPPIMainNode(Node):
         if msg.goal_weight >= 0:
             self.critic_weights['goal_weight'] = msg.goal_weight
             
-        # self.get_logger().debug(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
+        # self.get_logger().info(f"Cost weights updated: obstacle={self.critic_weights['obstacle_weight']}, goal={self.critic_weights['goal_weight']}")
     
     def _update_lookahead_params(self, msg: MPPIParams):
         """Update lookahead parameters"""
@@ -919,7 +919,7 @@ class MPPIMainNode(Node):
                 'lookahead_max_distance': self.lookahead_params['max_distance']
             })
             
-        self.get_logger().debug(f"Lookahead parameters updated: base={self.lookahead_params['base_distance']}, "
+        self.get_logger().info(f"Lookahead parameters updated: base={self.lookahead_params['base_distance']}, "
                              f"vel_factor={self.lookahead_params['velocity_factor']}")
     
     def _update_obstacle_critic_params(self, msg: MPPIParams):
@@ -944,7 +944,7 @@ class MPPIMainNode(Node):
                     critic.update_parameters(obstacle_params)
                     break
                     
-        self.get_logger().debug("Obstacle critic parameters updated")
+        self.get_logger().info("Obstacle critic parameters updated")
     
     def _update_control_params(self, msg: MPPIParams):
         """Update control parameters"""
@@ -953,9 +953,9 @@ class MPPIMainNode(Node):
             self.control_frequency = msg.control_frequency
         if msg.goal_reached_threshold > 0:
             self.goal_reached_threshold = msg.goal_reached_threshold
-            self.get_logger().debug(f"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@update {self.goal_reached_threshold}@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            self.get_logger().info(f"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@update {self.goal_reached_threshold}@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             
-        self.get_logger().debug("Control parameters updated")
+        self.get_logger().info("Control parameters updated")
     
     def _update_waypoints_params(self, msg: MPPIParams):
         """Update waypoints parameters"""
@@ -974,7 +974,7 @@ class MPPIMainNode(Node):
         if goal_critic is not None:
             goal_critic.update_parameters({'use_multiple_waypoints': msg.use_multiple_waypoints})
             
-        self.get_logger().debug("Waypoints parameters updated")
+        self.get_logger().info("Waypoints parameters updated")
     
     def _update_debug_params(self, msg: MPPIParams):
         """Update debug parameters"""
@@ -989,7 +989,7 @@ class MPPIMainNode(Node):
                 if hasattr(critic, 'update_parameters'):
                     critic.update_parameters(debug_params)
                     
-        self.get_logger().debug("Debug parameters updated")
+        self.get_logger().info("Debug parameters updated")
     
     def _apply_velocity_limits(self, cmd_vel: Twist) -> Twist:
         """Apply velocity limits to command - MPPI already applies internal limits, so this is just a safety check"""
@@ -1137,8 +1137,8 @@ class MPPIMainNode(Node):
                 f"Cost:{total_cost:.1f} | Obs:{closest_obstacle:.1f}m | Prog:{progress:.2f}"
             )
             
-            self.get_logger().debug(f"[SMPPI] {monitoring_msg_line1}")
-            self.get_logger().debug(f"[SMPPI] {monitoring_msg_line2}")
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line1}")
+            self.get_logger().info(f"[SMPPI] {monitoring_msg_line2}")
             
         except Exception as e:
             self.get_logger().warn(f"Failed to publish monitoring info: {e}")
@@ -1210,7 +1210,7 @@ class MPPIMainNode(Node):
     
     def shutdown(self):
         """Shutdown controller"""
-        self.get_logger().debug("Shutting down SMPPI main controller")
+        self.get_logger().info("Shutting down SMPPI main controller")
         # Stop the robot
         cmd_vel = Twist()
         self.cmd_pub.publish(cmd_vel)

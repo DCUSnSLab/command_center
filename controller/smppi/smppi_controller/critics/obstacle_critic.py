@@ -49,18 +49,6 @@ class ObstacleCritic(BaseCritic):
         # (e.g. sensor timeout) stops the robot instead of freeing all space
         self.unknown_is_lethal = params.get('unknown_is_lethal', True)
 
-        # [병합 이식: park feature/fgo-integration → main GEN-1249 커널]
-        # Hard-lethal: 연석 벽/keepout 셀은 목표 비용과 절대 교환 불가 —
-        # 합산 soft cost 는 좋은 goal 점수에 밀려 연석을 넘던 실측 원인.
-        self.lethal_hard = bool(params.get('lethal_hard', True))
-        self.hard_lethal_cost = float(params.get('hard_lethal_cost', 1.0e6))
-        # probe advance (2026-08-22): behavior 가 '원거리 가짜 벽' 패턴에서
-        # 탐침 전진을 요청하면 로봇에서 probe_near_r 밖 occupied 만 유한
-        # 비용으로 완화. 근거리 occupied·OOB·UNKNOWN 은 항상 hard.
-        self.probe_active = False
-        self.probe_near_r = float(params.get('probe_near_r', 3.0))
-        self.probe_far_cost = float(params.get('probe_far_cost', 500.0))
-
         # Vehicle footprint polygon [x1,y1,x2,y2,...] in base frame
         default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
         self.footprint = list(params.get('footprint', default_footprint))
@@ -168,18 +156,6 @@ class ObstacleCritic(BaseCritic):
         else:
             collision = ~inside | ((g >= 10.0) & (g < 20.0))  # collision only
 
-        probe_cost = None
-        if self.probe_active and robot_state is not None:
-            # [병합 이식] probe: 로봇 기준 probe_near_r 밖의 occupied(10.0)만
-            # hard 에서 제외하고 pose 당 유한 비용으로 과금. OOB(~inside)와
-            # UNKNOWN(20.0), 근거리 occupied 는 그대로 hard 유지.
-            rs = robot_state.to(wx.device, wx.dtype)
-            dist = torch.hypot(wx - rs[0], wy - rs[1])          # [K, T+1, P]
-            occupied = inside & (g >= 10.0) & (g < 20.0)
-            far_occ = occupied & (dist > self.probe_near_r)
-            collision = collision & ~far_occ
-            probe_cost = far_occ.any(dim=2).to(self.dtype) * self.probe_far_cost
-
         pose_collision = collision.any(dim=2)  # [K, T+1]
 
         # Continuous repulsion over the inflation gradient: max sample value
@@ -192,12 +168,7 @@ class ObstacleCritic(BaseCritic):
                                 self.repulsion_factor * pose_max * 100.0)
 
         total_costs = repulsion.sum(dim=1)
-        # [병합 이식] hard-lethal 모드: 충돌 궤적 페널티를 1e6 으로 상향 —
-        # GEN-1249 의 1회 부과 구조는 유지하되 크기만 절대 우위로.
-        penalty = self.hard_lethal_cost if self.lethal_hard else self.collision_cost
-        total_costs = total_costs + pose_collision.any(dim=1).to(total_costs.dtype) * penalty
-        if probe_cost is not None:
-            total_costs = total_costs + probe_cost.sum(dim=1)
+        total_costs = total_costs + pose_collision.any(dim=1).to(total_costs.dtype) * self.collision_cost
 
         return self.apply_weight(total_costs)
 
@@ -238,10 +209,6 @@ class ObstacleCritic(BaseCritic):
                              torch.full_like(packed, 10.0), packed)
         packed = torch.where(tensor < 0, torch.full_like(packed, 20.0), packed)
         return packed
-
-    def set_probe(self, active: bool):
-        """[병합 이식] behavior 탐침 전진 신호 — mppi_main probe_callback 이 호출"""
-        self.probe_active = bool(active)
 
     def update_parameters(self, params: dict):
         """

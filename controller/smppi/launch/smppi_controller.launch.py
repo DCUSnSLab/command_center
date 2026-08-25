@@ -10,7 +10,6 @@ Modular 3-node architecture for optimal performance:
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.conditions import IfCondition
@@ -44,27 +43,7 @@ def generate_launch_description():
         default_value='smppi',
         description='Node namespace'
     )
-
-    # Overrides the value in smppi_params.yaml. Field runs sometimes need a
-    # wider corridor than the mapped sidewalk (the route can sit off-map), and
-    # editing the installed yaml to do it loses the change on the next build.
-    corridor_half_width_arg = DeclareLaunchArgument(
-        'corridor_half_width',
-        default_value='1.4',
-        description='Keepout corridor half-width in metres'
-    )
-
-    # 순항 제어기 선택 (2026-08-12, 3분할 구조): 'mppi' = 종전 MPPI 노드,
-    # 'mpc' = 외부 Frenet MPC 가 /cmd_vel 을 맡는다 — 이 경우 이 파일은
-    # 인지 체인(costmap processor + corridor keepout)만 띄우고 MPPI 본체는
-    # 띄우지 않는다 (/smppi/robot_state·/costmap_keepout 은 MPC 도 소비).
-    controller_arg = DeclareLaunchArgument(
-        'controller',
-        default_value='mppi',
-        description="'mppi' launches mppi_main_node; 'mpc' skips it "
-                    "(external Frenet MPC owns /cmd_vel)"
-    )
-
+    
     # Get configuration
     use_sim_time = LaunchConfiguration('use_sim_time')
     enable_visualization = LaunchConfiguration('enable_visualization')
@@ -75,55 +54,12 @@ def generate_launch_description():
     smppi_dir = get_package_share_directory('smppi')
     default_config_path = os.path.join(smppi_dir, 'config', 'smppi_params.yaml')
     
-    # Costmap Processing Node (replaces sensor_processor_node)
-    costmap_processor_node = Node(
-        package='smppi',
-        executable='costmap_processor_node.py',
-        name='costmap_processor',
-        namespace=namespace,
-        parameters=[
-            default_config_path,
-            {
-                'use_sim_time': use_sim_time,
-            }
-        ],
-        output='screen',
-        emulate_tty=True,
-        respawn=True,
-        respawn_delay=1.0,
-        arguments=['--ros-args', '--log-level', 'info']
-    )
-    
-    # Corridor Keepout Node (sidewalk keep-in; /costmap -> /costmap_keepout)
-    corridor_keepout_node = Node(
-        package='smppi',
-        executable='corridor_keepout_node.py',
-        name='corridor_keepout',
-        namespace=namespace,
-        parameters=[
-            default_config_path,
-            {
-                'use_sim_time': use_sim_time,
-                'corridor_half_width': ParameterValue(
-                    LaunchConfiguration('corridor_half_width'), value_type=float),
-            }
-        ],
-        output='screen',
-        emulate_tty=True,
-        respawn=True,
-        respawn_delay=1.0,
-        arguments=['--ros-args', '--log-level', 'info']
-    )
-
     # MPPI Main Controller Node
-    from launch.substitutions import PythonExpression
     mppi_main_node = Node(
         package='smppi',
         executable='mppi_main_node.py',
         name='mppi_main_controller',
         namespace=namespace,
-        condition=IfCondition(PythonExpression(
-            ["'", LaunchConfiguration('controller'), "' == 'mppi'"])),
         parameters=[
             default_config_path,
             {
@@ -132,8 +68,6 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
-        respawn=True,
-        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
     
@@ -152,8 +86,6 @@ def generate_launch_description():
         ],
         output='screen',
         emulate_tty=True,
-        respawn=True,
-        respawn_delay=1.0,
         arguments=['--ros-args', '--log-level', 'info']
     )
     
@@ -163,14 +95,10 @@ def generate_launch_description():
         enable_visualization_arg,
         config_file_arg,
         namespace_arg,
-        corridor_half_width_arg,
-        controller_arg,
         
         # Group all nodes
         GroupAction([
-            costmap_processor_node,
-            corridor_keepout_node,
-            mppi_main_node,
+                mppi_main_node,
             visualization_node,
         ])
     ])

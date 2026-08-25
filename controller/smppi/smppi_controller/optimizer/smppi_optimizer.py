@@ -121,10 +121,6 @@ class SMPPIOptimizer:
 
             # importance weights
             beta = torch.min(total_costs)
-            # expose the best (lowest) total cost so the controller node can
-            # detect the "every sampled trajectory is lethal" condition and
-            # command a safe stop instead of averaging lethal rollouts.
-            self.last_best_cost = float(total_costs.min().item())
             weights = torch.exp(-(total_costs - beta) / max(1e-9, self.temperature))
             weights = weights / (torch.sum(weights) + 1e-12)
 

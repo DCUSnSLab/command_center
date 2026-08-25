@@ -15,8 +15,6 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/OptimalPath.msg"
   "msg/HighCostPath.msg"
-  "msg/MPPIState.msg"
-  "msg/ProcessedObstacles.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
@@ -25,8 +23,6 @@ ament_python_install_package(smppi_controller)
 
 # --- executables ---
 install(PROGRAMS
-  scripts/costmap_processor_node.py
-  scripts/corridor_keepout_node.py
   scripts/mppi_main_node.py
   scripts/visualization_node.py
   DESTINATION lib/${PROJECT_NAME}
