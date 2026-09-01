@@ -46,6 +46,8 @@ def generate_launch_description():
                 "use_sim_time": use_sim_time,
                 # 번들 토픽 수신 규약 — 실제 PCD 경로는 map_provider 가 배송
                 "map_dir": "/tmp/nomap",
+                "corner_map_path_topic": "/map_provider_node/pcd/full/corner_path",
+                "surf_map_path_topic": "/map_provider_node/pcd/full/surf_path",
                 "localizer_config": PathJoinSubstitution(
                     [pkg_loc, "config",
                      "fixed_map_localization_bundle.yaml"]),

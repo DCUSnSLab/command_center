@@ -274,7 +274,7 @@ class SequentialPlannerNode(Node):
     def calculate_node_headings(self, map_data: MapData) -> None:
         """Calculate headings for nodes with heading = 0.0 based on sequential order"""
         for i, node in enumerate(map_data.nodes):
-            if abs(node.heading) < 1e-6:  # heading is approximately 0.0
+            if abs(node.heading_deg) < 1e-6:  # heading is approximately 0.0
                 if i > 0:
                     # Calculate heading from previous node
                     prev_node = map_data.nodes[i-1]
@@ -282,7 +282,7 @@ class SequentialPlannerNode(Node):
                         prev_node.utm_info.easting, prev_node.utm_info.northing,
                         node.utm_info.easting, node.utm_info.northing
                     )
-                    node.heading = calculated_heading
+                    node.heading_deg = calculated_heading
                     
                     self.get_logger().debug(
                         f'Calculated heading for node {node.id}: {calculated_heading:.2f} degrees'
