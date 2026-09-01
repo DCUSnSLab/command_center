@@ -1,19 +1,10 @@
-# --- Python ---
+# 파이썬 바이트코드 — 추적하면 매 실행마다 git diff 가 더러워지고,
+# 소스보다 새 .pyc 가 커밋돼 리뷰에서 옛 코드를 보게 된다.
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
-*.egg
 
-# --- ROS 2 / colcon (워크스페이스 빌드 산출물) ---
+# colcon 산출물
 build/
 install/
 log/
-
-# --- 편집기 / OS ---
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
+*.logbak

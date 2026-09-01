@@ -17,6 +17,7 @@ endif()
 # Install main script with executable permissions
 install(PROGRAMS
   scripts/sequential_planner_node.py
+  scripts/scenario_runner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

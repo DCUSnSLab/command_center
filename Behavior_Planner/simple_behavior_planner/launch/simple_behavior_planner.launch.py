@@ -12,6 +12,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='false') # 시뮬레이션 환경인 경우 true, 밖이면 false
 
     # Launch arguments
+    probe_enabled_arg = DeclareLaunchArgument(
+        'probe_enabled', default_value='false',
+        description='probe advance: 원거리 가짜 벽 탐침 전진 (2026-08, 기본 off)')
     current_position_topic_arg = DeclareLaunchArgument(
         'current_position_topic',
         default_value='/odom',
@@ -78,7 +81,8 @@ def generate_launch_description():
         executable='simple_behavior_planner_node.py',
         name='simple_behavior_planner',
         output='screen',
-        parameters=[{
+        parameters=[
+            {'probe.enabled': LaunchConfiguration('probe_enabled')},{
             'current_position_topic': LaunchConfiguration('current_position_topic'),
             'planned_path_topic': LaunchConfiguration('planned_path_topic'),
             'perception_topic': LaunchConfiguration('perception_topic'),
@@ -97,6 +101,7 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
+        probe_enabled_arg,
         current_position_topic_arg,
         planned_path_topic_arg,
         perception_topic_arg,

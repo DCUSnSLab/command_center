@@ -81,17 +81,31 @@ class BehaviorController:
         for behavior_type, description in behaviors.items():
             self.node.get_logger().debug(f"  {behavior_type}: {description}")
 
-    def update_behavior(self, node_type: int) -> bool:
-        """행동 업데이트"""
+    def update_behavior(self, node_type: int, is_final: bool = False) -> bool:
+        """행동 업데이트.
+
+        is_final: 현재 추종 노드가 경로의 최종 목표 노드인지. 노드 추종
+        이원화(2026-08-25): 경유 노드는 goal_distance_via(기본 1.6 m)로
+        러프하게 통과, 최종 노드는 goal_distance_final(기본 0.4 m)로 정밀
+        도달. MPPIParams.goal_reached_threshold 로 컨트롤러에 전달된다.
+        """
         if not self.param_manager or not self.mppi_param_pub:
             return False
 
-        if node_type == self.current_node_type:
+        if (node_type == self.current_node_type
+                and is_final == getattr(self, 'current_is_final', None)):
             return False  # No change needed
 
         try:
             # Get behavior parameters
-            behavior_params = self.param_manager.get_behavior_params(node_type)
+            behavior_params = dict(self.param_manager.get_behavior_params(node_type))
+            try:
+                via = float(self.node.get_parameter('goal_distance_via').value)
+                fin = float(self.node.get_parameter('goal_distance_final').value)
+            except Exception:
+                via, fin = 1.6, 0.4
+            behavior_params['goal_reached_threshold'] = fin if is_final else via
+            self.current_is_final = is_final
 
             # Validate parameters
             if not self.param_manager.validate_behavior_params(behavior_params):
@@ -189,6 +203,38 @@ class BehaviorController:
 
         except Exception as e:
             self.node.get_logger().error(f"Failed to send MPPI parameters: {e}")
+
+    def apply_creep(self, creep_speed: float) -> bool:
+        """BLOCKED 상황 서행 모드: 현재 행동 파라미터에 저속만 덮어써 전송"""
+        if not self.param_manager or not self.mppi_param_pub:
+            return False
+        try:
+            params = dict(self.param_manager.get_behavior_params(self.current_node_type))
+            params['max_linear_velocity'] = float(creep_speed)
+            params['min_linear_velocity'] = 0.0
+            params['behavior_description'] = (
+                f"BLOCKED creep ({params.get('behavior_description', '')})")
+            self._send_mppi_parameters(params)
+            self.node.get_logger().warn(
+                f"[BLOCKED] creep mode ON: max_v={creep_speed} m/s")
+            return True
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to apply creep: {e}")
+            return False
+
+    def reapply_current_behavior(self) -> bool:
+        """현재 노드 타입의 정상 파라미터 재전송 (creep 해제 등 복원용)"""
+        if not self.param_manager or not self.mppi_param_pub:
+            return False
+        try:
+            params = self.param_manager.get_behavior_params(self.current_node_type)
+            self._send_mppi_parameters(params)
+            self.node.get_logger().info(
+                f"[BLOCKED] behavior params restored (type {self.current_node_type})")
+            return True
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to reapply behavior: {e}")
+            return False
 
     def get_current_behavior_type(self) -> int:
         """현재 행동 타입 반환"""
