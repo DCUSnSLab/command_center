@@ -1,0 +1,175 @@
+/**:
+  ros__parameters:
+    # 제어 파라미터
+    control_frequency: 10.0               # 제어 주기 [Hz]
+    visualization_frequency: 5.0          # 시각화 주기 [Hz]
+    enable_visualization: true            # 시각화 활성화
+    goal_reached_threshold: 3.0           # 목표 도달 거리 임계값 [m]
+    passed_goal_max_distance: 8.0         # 통과 판정 상한 [m]: goal 을 이 거리 이내에서
+                                          # 지나쳤으면(진입 방향 평면 기준) 도달로 인정.
+                                          # 최종/pause(7,8)/행동전환 노드는 제외. 0 이하 비활성.
+    waypoint_mode: 'multiple'             # 웨이포인트 모드: 'single' 또는 'multiple'
+
+    # 최적화 파라미터 (base MPPI 코어 + SA 기법)
+    optimizer:
+      batch_size: 4096                    # 샘플 궤적 수 K (실험값)
+      time_steps: 70                      # 예측 시간 스텝 T (실험값, 7s @ dt=0.1)
+      model_dt: 0.1                       # 시뮬레이션 시간 간격 [s]
+      iteration_count: 1                  # MPPI 반복 횟수 [회]
+      # temperature = lambda (작을수록 탐욕적). 실험 표준-MPPI λ=20 기준.
+      #   주의: command_center critic 비용 스케일이 실험과 달라 실차/시뮬 재확인 권장(비용↑→λ↑).
+      temperature: 20.0                   # base MPPI λ (실험값)
+      noise_sigma: [0.15, 0.2]            # 제어 노이즈 std [v, delta] (실험 grid-search 값)
+  
+    # 차량 파라미터
+    vehicle:
+      wheelbase: 0.65                     # 휠베이스 길이 [m]
+      max_linear_velocity: 1.0            # 최대 선속도 [m/s]
+      min_linear_velocity: 0.0            # 최소 선속도 [m/s] (후진 불가)
+      # max_angular_velocity: 1.16          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)
+      # min_angular_velocity: -1.16         # 최소 각속도 [rad/s]
+      max_angular_velocity: 0.8          # 최대 각속도 [rad/s] = (v_max/wheelbase)*tan(max_steering_angle)  
+      min_angular_velocity: -0.8         # 최소 각속도 [rad/s]
+      max_steering_angle: 0.3665          # 최대 조향각 [rad] (21도)
+      min_turning_radius: 1.70            # 최소 회전 반경 [m] (wheelbase/tan(max_steering_angle))
+      
+      # HUNTER 2.0 실제 footprint (980x745mm)
+      footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]  # [x1,y1,x2,y2,x3,y3,x4,y4]
+      footprint_padding: 0.15             # 안전 마진 [m]
+      use_polygon_collision: true         # polygon vs circle 충돌 감지
+      use_footprint_filtering: true       # sensor processor에서 footprint 기반 필터링 활성화
+      
+      # 기존 원형 근사 (fallback)
+      radius: 0.6                         # 원형 근사 반지름 [m] (대각선/2 + padding)
+
+    # 비용 함수 가중치
+    costs:
+      obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
+      goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
+
+      lookahead:
+        base_distance: 10.0                # 기본 lookahead 거리 [m] (보수적 증가)
+        velocity_factor: 1.3              # 속도 비례 팩터 [s] (고속 안정성)
+        min_distance: 0.1                 # 최소 lookahead 거리 [m] (저속 방지)
+        max_distance: 10.0                 # 최대 lookahead 거리 [m] (고속 여유)
+      
+      # 디버깅 설정
+      debug: false                        # 디버깅 활성화
+      debug_level: 1                      # 디버깅 레벨 (1: 요약, 2: 상세)
+
+    # 센서 처리 파라미터
+    sensor:
+      scan_downsample_ratio: 2            # 레이저 스캔 다운샘플링 비율 [정수]
+      obstacle_cost_threshold: 0.5        # 장애물 비용 임계값 [무단위]
+      max_obstacle_distance: 3.5          # 최대 장애물 감지 거리 [m]
+      obstacle_margin: 0.3                # 장애물 안전 여유 거리 [m]
+
+    # ROS 토픽 설정
+    topics:
+      input:
+        laser_scan: '/scan'           # 레이저 스캔 입력 토픽
+        odometry: '/odom'                 # 오도메트리 입력 토픽
+        goal_pose: '/sub_goal'             # 단일 목표 위치 입력 토픽
+        multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
+        processed_obstacles: '/sa_mppi/processed_obstacles'  # 처리된 장애물 토픽
+        robot_state: '/sa_mppi/robot_state' # 로봇 상태 토픽
+      output:
+        cmd_vel: '/ackermann_like_controller/cmd_vel'  # 속도 명령 출력 토픽
+        goal_status: '/goal_status'                    # 목표 상태 출력 토픽
+        optimal_path: '/mppi_optimal_path'             # 최적 경로 출력 토픽
+        markers: '/sa_mppi_visualization'                # 시각화 마커 출력 토픽
+
+    # TF 프레임 설정
+    frames:
+      target_frame: 'odom'                # 목표 좌표계
+      laser_frame: 'base_link'            # 레이저 좌표계
+
+    # ===== SA-MPPI: 상황 인지(2축) 적응 =====
+    # 내부축(Curved: 회전 운동) / 외부축(Crowded: 주변 밀도)을 분류해
+    # 샘플링 분포(noise σ)·속도(speed_scale)·temperature(lambda_scale)를 적응시키고,
+    # 적응 proposal에 대한 Importance Sampling 보정을 가중치에 더한다.
+    # 적응이 0(Normal)이면 항등 → plain SMPPI와 동일.
+    situation_aware:
+      # 안전/CBF (적응형 v_max = sqrt(2*a_max*(d-eps)))
+      max_decel: 1.5                      # 가정 최대 제동 감속도 [m/s^2]
+      enable_cbf: true                    # ablation: false = 제동거리 CBF 속도상한 끄기
+      enable_dynamic_aware: true          # 움직이는 장애물에만 감속/분산증가 (costmap 시간차분); 정적 기하는 obstacle cost로만 회피
+      dynamic_min_cluster: 5              # 신뢰할 이동 셀 연결블롭 최소 크기 (flicker 거부)
+      dynamic_hold_frames: 25             # 모션 persistence ~2.5s: 이동했던 셀은 점유 유지 동안 dynamic 유지 (멈춘 보행자 대응)
+      dynamic_gate_cbf: true              # 속도상한을 '이동' 셀에만 반응 (false=모든 장애물=legacy)
+      dynamic_gate_covariance: true       # 공분산 증가를 '이동' 셀에만 반응 (false=정적 밀도=legacy)
+      dynamic_mask_source: 'detector'     # 실차는 항상 detector ('oracle'은 시뮬 전용: GT 위치 필요)
+      sensor_error: 0.3                   # 인지 불확실성 마진 [m]
+
+      # 내부축① 횡가속 캡: v <= sqrt(a_lat_max/kappa)  [기본 off]
+      # max_v 1.5에서는 구속되지 않음(sqrt(2.0/0.766)=1.6 m/s) → 1.6 m/s 초과 주행 시에만 의미
+      enable_lat_acc: false
+      max_lat_acc: 2.0                    # 스키드/전복 마진 [m/s^2] (안락·적재 사양이면 1.0)
+
+      # 내부축② 정지 탈출 (정적 포켓 회복)  [기본 off — 첫 실차 주행에서는 끄고 시작]
+      # 3s 창에서 0.5m 미변위가 30s 지속 ∧ 외부(이동체) 부재 → σ_v×2.5, λ×2로 탐색 재배치
+      enable_escape: false
+      escape_progress_window_s: 3.0
+      escape_progress_m: 0.5
+      escape_trigger_s: 30.0              # 최후수단(군중 서행 중앙값 3.1s vs 포켓 208s로 결정)
+      escape_ramp_s: 2.0
+      min_safety_range: 1.0               # 안전 범위 하한 [m]
+      max_safety_range: 6.0               # 안전 범위 상한 [m]
+      lookahead_time: 3.0                 # 감지 범위 시간지평 [s]
+
+      # 외부축 (Crowded: 주변 밀도)
+      crowded_cost_threshold: 10.0        # 밀도 산정용 costmap 점유 임계값
+      max_reachable_half_angle_deg: 80.0  # 도달 가능 섹터 반각 상한 [deg]
+      crowded_density_entry: 0.03         # 밀도 ramp 시작 (0~1)
+      crowded_density_exit: 0.03          # 히스테리시스 종료 임계
+      crowded_density_saturation: 0.10    # 점수 포화 밀도
+      crowded_near_distance: 2.5          # 근접도 기준 거리 [m]
+      crowded_proximity_weight: 0.80      # 점수 블렌드: 근접 vs 밀도
+
+      # 내부축 (Curved: 회전 운동)
+      curved_angle_entry_deg: 45.0        # |누적 곡률| ramp 시작 [deg]
+      curved_angle_exit_deg: 30.0         # 히스테리시스 종료 임계 [deg]
+      curved_angle_saturation_deg: 70.0   # 점수 포화 곡률 [deg]
+      curved_window_steps: 10             # 곡률 적분 윈도우 [제어 스텝]
+
+      # 안정화
+      context_activation_score: 0.10      # Normal 이탈 임계 (max(internal,external))
+      context_exit_score: 0.06            # 현재 라벨 유지 임계
+      switch_dwell_ticks: 3               # 상황 전환 dwell [tick]
+      adapt_smoothing_alpha: 0.70         # 적응 EMA 평활 계수 [0,1]
+
+      # 적응 프로파일: Normal(항등 base) + Crowded(외부축) + Curved(내부축)
+      # 가산 블렌딩: result = base + s_int*(curved-base) + s_ext*(crowded-base)
+      adaptation:
+        normal:
+          noise_scale: 1.00
+          noise_scale_v: 1.00
+          noise_scale_delta: 1.00
+          speed_scale: 1.00
+          reverse_scale: 1.00
+          v_bias: 0.00
+          lambda_scale: 1.00
+        crowded:                          # 외부축 (밀도): 조향 노이즈↑, 속도↓
+          noise_scale: 1.50
+          noise_scale_v: 1.00
+          noise_scale_delta: 1.80
+          speed_scale: 0.70
+          reverse_scale: 1.00
+          v_bias: 0.00
+          lambda_scale: 1.00
+        curved:                           # 내부축 (회전): 조향 노이즈↑ (속도는 CBF가 유도)
+          noise_scale: 1.00
+          noise_scale_v: 1.00
+          noise_scale_delta: 1.80         # 실험 최종값 (조향 탐색 다양성)
+          speed_scale: 1.00               # 실험 최종값 (감속은 CBF가 담당, 프로파일 고정감속 제거)
+          reverse_scale: 1.00
+          v_bias: 0.00
+          lambda_scale: 1.00
+        escape:                           # 내부축② 정지 탈출 (enable_escape=true일 때만 발화)
+          noise_scale: 2.15
+          noise_scale_v: 2.50             # 속도축 확대 → 제동/후진 샘플 생성 (정지 시 δ노이즈는 무효)
+          noise_scale_delta: 1.80
+          speed_scale: 1.00
+          reverse_scale: 1.00
+          v_bias: 0.00
+          lambda_scale: 2.00              # 평탄 가중 → 일시적 비용 증가 수용
