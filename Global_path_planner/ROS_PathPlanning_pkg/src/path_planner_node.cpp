@@ -21,6 +21,11 @@
 #include <gmserver/msg/map_data.hpp>
 #include <gmserver/msg/map_node.hpp>
 #include <gmserver/msg/map_link.hpp>
+// PlannedPath.path_data 스키마 이행 (GEN-1195): map_interfaces/GraphLayer.
+// 규약: 생산자는 easting/northing 에 **절대 UTM** 기입, behavior planner 의
+// waypoint_publisher 가 /map_provider_node/utm datum 을 빼서 map 좌표로 변환.
+#include <map_interfaces/msg/map_node.hpp>
+#include <map_interfaces/msg/map_link.hpp>
 #include <gmserver/msg/gps_info.hpp>
 #include <gmserver/msg/utm_info.hpp>
 #include <command_center_interfaces/msg/planned_path.hpp>
@@ -1314,137 +1319,60 @@ private:
         detailed_path.total_distance = total_distance;
         detailed_path.total_time = total_distance / 10.0; // 평균 속도 10m/s 가정
         
-        // Convert path nodes to MapNode messages
+        // GraphLayer 노드 조립 (스키마 이행 — include 주석 참조)
         detailed_path.path_data.nodes.clear();
         for (size_t i = 0; i < path_nodes.size(); ++i) {
-            gmserver::msg::MapNode map_node;
-            
+            map_interfaces::msg::MapNode gn;
             int node_idx = path_nodes[i]->id;
-            
-            // Temporary nodes에 대한 처리
+            bool is_temp = (node_idx == temp_start_node_id_ || node_idx == temp_goal_node_id_);
+
             if (node_idx == temp_start_node_id_) {
-                map_node.id = "GPS_START";
-                map_node.remark = "Temporary start node from GPS position";
+                gn.id = "GPS_START";
             } else if (node_idx == temp_goal_node_id_) {
-                map_node.id = "GPS_GOAL";
-                map_node.remark = "Temporary goal node from RViz goal";
+                gn.id = "GPS_GOAL";
             } else if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.map_data.nodes.size())) {
-                // 실제 맵 노드에서 정보 복사
-                map_node = graph_map_.map_data.nodes[node_idx];
+                const auto& src = graph_map_.map_data.nodes[node_idx];
+                gn.id = src.id;
+                gn.node_type = src.node_type;
+                gn.latitude = src.gps_info.lat;
+                gn.longitude = src.gps_info.longitude;
+                gn.heading_deg = src.heading;
+                // 절대 UTM 그대로 (구현주의: 구 코드의 map 원점 차감을 하지 않는다)
+                gn.easting = src.utm_info.easting;
+                gn.northing = src.utm_info.northing;
             } else {
-                // Fallback for unknown nodes
-                map_node.id = "NODE_" + std::to_string(node_idx);
-                map_node.remark = "Unknown node";
+                gn.id = "NODE_" + std::to_string(node_idx);
             }
-            
-            // UTM 좌표는 그대로 유지 (visualization용은 따로 조정됨)
-            if (node_idx >= 0 && node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
-                node_idx != temp_start_node_id_ && node_idx != temp_goal_node_id_) {
-                // 실제 맵 노드의 경우 GPS 정보는 원본 유지, UTM은 odom frame으로 변환
-                map_node.gps_info = graph_map_.map_data.nodes[node_idx].gps_info;
-                map_node.utm_info = graph_map_.map_data.nodes[node_idx].utm_info;
-                map_node.heading = graph_map_.map_data.nodes[node_idx].heading;
-                // If heading is -1.0, calculate from previous node in path
-                if (std::abs(map_node.heading + 1.0) < 1e-6 && i > 0) {
-                    double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
-                    double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
-                    double heading_rad = std::atan2(dy, dx);
-                    double heading_deg = heading_rad * 180.0 / M_PI;
-                    if (heading_deg < 0) {
-                        heading_deg += 360.0;
-                    }
-                    map_node.heading = heading_deg;
-                }
-                // UTM 좌표를 odom frame으로 변환 (일관성을 위해)
-                //map_node.utm_info.easting -= gps_ref_utm_easting_;
-                //map_node.utm_info.northing -= gps_ref_utm_northing_;
-                map_node.utm_info.easting -= map_utm_easting_;
-                map_node.utm_info.northing -= map_utm_northing_;
-                
-            } else {
-                // Temporary 노드의 경우 pose에서 역산
-                map_node.gps_info.lat = 0.0; // GPS 역변환은 복잡하므로 생략
-                map_node.gps_info.longitude = 0.0;
-                map_node.gps_info.alt = path_nodes[i]->pose.position.z;
-                
-                // Calculate heading from previous node if available
-                if (i > 0) {
-                    double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
-                    double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
-                    double heading_rad = std::atan2(dy, dx);
-                    double heading_deg = heading_rad * 180.0 / M_PI;
-                    if (heading_deg < 0) {
-                        heading_deg += 360.0;
-                    }
-                    map_node.heading = heading_deg;
-                } else {
-                    map_node.heading = 0.0;
-                }
-                // UTM 좌표를 odom frame으로 변환 (gps_ref_utm offset 제거)
-                //map_node.utm_info.easting = path_nodes[i]->pose.position.x - gps_ref_utm_easting_;
-                //map_node.utm_info.northing = path_nodes[i]->pose.position.y - gps_ref_utm_northing_;
-                map_node.utm_info.easting = path_nodes[i]->pose.position.x - map_utm_easting_;
-                map_node.utm_info.northing = path_nodes[i]->pose.position.y - map_utm_northing_;
-                map_node.utm_info.zone = "52N"; // K-City 기본 zone
+
+            if (is_temp || gn.id.rfind("NODE_", 0) == 0) {
+                // temporary/미상 노드: map 프레임 pose -> 절대 UTM 역산
+                gn.easting = path_nodes[i]->pose.position.x + map_utm_easting_;
+                gn.northing = path_nodes[i]->pose.position.y + map_utm_northing_;
+                gn.node_type = 1;
             }
-            
-            detailed_path.path_data.nodes.push_back(map_node);
+
+            // heading 미지(-1.0)면 진행 방향으로 계산 (기존 로직 유지)
+            if (std::abs(gn.heading_deg + 1.0) < 1e-6 && i > 0) {
+                double dx = path_nodes[i]->pose.position.x - path_nodes[i-1]->pose.position.x;
+                double dy = path_nodes[i]->pose.position.y - path_nodes[i-1]->pose.position.y;
+                double hd = std::atan2(dy, dx) * 180.0 / M_PI;
+                if (hd < 0) hd += 360.0;
+                gn.heading_deg = hd;
+            }
+            gn.source = "slam";
+            detailed_path.path_data.nodes.push_back(gn);
         }
         
-        // Create links between consecutive path nodes
+        // GraphLayer 링크 조립
         detailed_path.path_data.links.clear();
         for (size_t i = 1; i < path_nodes.size(); ++i) {
-            gmserver::msg::MapLink map_link;
-            
-            int from_node_idx = path_nodes[i-1]->id;
-            int to_node_idx = path_nodes[i]->id;
-            
-            // Set link metadata
-            map_link.id = "PATH_LINK_" + std::to_string(i-1) + "_" + std::to_string(i);
-            map_link.from_node_id = detailed_path.path_data.nodes[i-1].id;
-            map_link.to_node_id = detailed_path.path_data.nodes[i].id;
-            
-            // Calculate link length
-            double distance = calculateDistance(path_nodes[i-1]->pose, path_nodes[i]->pose);
-            map_link.length = distance / 1000.0; // Convert to km
-            
-            // Try to find existing link in graph for more details
-            bool found_existing_link = false;
-            if (from_node_idx >= 0 && from_node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
-                to_node_idx >= 0 && to_node_idx < static_cast<int>(graph_map_.map_data.nodes.size()) &&
-                from_node_idx != temp_start_node_id_ && from_node_idx != temp_goal_node_id_ &&
-                to_node_idx != temp_start_node_id_ && to_node_idx != temp_goal_node_id_) {
-                
-                std::string from_id = graph_map_.map_data.nodes[from_node_idx].id;
-                std::string to_id = graph_map_.map_data.nodes[to_node_idx].id;
-                
-                // Find existing link in GraphMap
-                for (const auto& original_link : graph_map_.map_data.links) {
-                    if ((original_link.from_node_id == from_id && original_link.to_node_id == to_id) ||
-                        (original_link.from_node_id == to_id && original_link.to_node_id == from_id)) {
-                        // Copy original link information
-                        map_link = original_link;
-                        // Ensure correct direction
-                        map_link.from_node_id = from_id;
-                        map_link.to_node_id = to_id;
-                        found_existing_link = true;
-                        break;
-                    }
-                }
-            }
-            
-            // If no existing link found, use calculated data
-            if (!found_existing_link) {
-                map_link.admin_code = "PATH";
-                map_link.road_rank = 1;
-                map_link.road_type = 1;
-                map_link.link_type = 3;
-                map_link.lane_no = 2;
-                map_link.maker = "Path Planner";
-                map_link.remark = "Generated path link";
-            }
-            
-            detailed_path.path_data.links.push_back(map_link);
+            map_interfaces::msg::MapLink gl;
+            gl.id = "PATH_LINK_" + std::to_string(i-1) + "_" + std::to_string(i);
+            gl.from_node_id = detailed_path.path_data.nodes[i-1].id;
+            gl.to_node_id = detailed_path.path_data.nodes[i].id;
+            gl.length = calculateDistance(path_nodes[i-1]->pose, path_nodes[i]->pose);  // [m]
+            gl.bidirectional = true;  // 2026-08-02 운용 규약
+            detailed_path.path_data.links.push_back(gl);
         }
         
         RCLCPP_DEBUG(this->get_logger(), 
