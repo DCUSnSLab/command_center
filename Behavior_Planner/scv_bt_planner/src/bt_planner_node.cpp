@@ -341,6 +341,7 @@ private:
       nodes.push_back({n.id, n.easting, n.northing, static_cast<int>(n.node_type), n.heading_deg});
     }
     ctx_.path.setPath(std::move(nodes), m.path_id);
+    completed_logged_ = false;
     ctx_.waypoints_published = false;
     ctx_.pause_sent_for.clear();
     pause_signal_sent_ = false;
@@ -384,8 +385,10 @@ private:
         const PathNode* n = ctx_.target();
         RCLCPP_INFO(get_logger(), "advanced to %s (%d/%zu)", n ? n->id.c_str() : "?", ctx_.path.currentIndex() + 1,
                     ctx_.path.size());
-      } else {
+      } else if (!completed_logged_) {
+        // 제어기는 최종 목표 도달 후에도 goal_reached=true 를 계속 보낸다 — 한 번만 기록
         RCLCPP_INFO(get_logger(), "Path following completed!");
+        completed_logged_ = true;
       }
     } else if (m.status_code == 2) {
       RCLCPP_WARN(get_logger(), "goal %s failed (d=%.2f)", m.goal_id.c_str(), m.distance_to_goal);
@@ -692,7 +695,7 @@ private:
   double join_max_approach_ = 40.0, join_clear_half_w_ = 0.45, join_pass_radius_ = 2.0, realign_move_m_ = 2.0;
   int join_clear_lethal_ = 90;
   std::optional<double> origin_e_, origin_n_;
-  bool unpinned_route_ = false, pause_signal_sent_ = false, creep_active_ = false;
+  bool unpinned_route_ = false, pause_signal_sent_ = false, creep_active_ = false, completed_logged_ = false;
   std::optional<Pose2D> align_pose_, last_tf_, tf_at_publish_;
   double prev_pose_t_ = 0.0, last_safety_pause_t_ = 0.0, last_target_republish_t_ = 0.0;
   std::string last_behavior_key_, last_behavior_pub_, last_hint_, last_desc_;
