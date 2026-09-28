@@ -69,7 +69,7 @@ private:
     declare_parameter("subgoal_topic", "/sub_goal");
     declare_parameter("multiple_waypoints_topic", "/multiple_waypoints");
     declare_parameter("target_waypoints_topic", "/target_waypoints");
-    declare_parameter("mppi_params_topic", "/mppi_params");
+    declare_parameter("mppi_params_topic", "/mppi_update_params");   // smppi params_update_sub 와 동일
     declare_parameter("emergency_stop_topic", "/emergency_stop");
     declare_parameter("stop_flag_topic", "/stop_flag");
     declare_parameter("pause_command_topic", "/pause_command");

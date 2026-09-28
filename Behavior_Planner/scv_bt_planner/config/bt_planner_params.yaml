@@ -14,7 +14,7 @@ bt_planner:
     subgoal_topic: "/sub_goal"
     multiple_waypoints_topic: "/multiple_waypoints"
     target_waypoints_topic: "/target_waypoints"
-    mppi_params_topic: "/mppi_params"
+    mppi_params_topic: "/mppi_update_params"   # smppi 가 구독하는 토픽 (simple BP 와 동일)
     emergency_stop_topic: "/emergency_stop"
     stop_flag_topic: "/stop_flag"
     pause_command_topic: "/pause_command"
