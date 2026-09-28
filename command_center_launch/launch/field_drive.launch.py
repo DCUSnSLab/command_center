@@ -319,6 +319,12 @@ def generate_launch_description():
         # /odometry/global, not the package default /odom: the graph nodes are
         # map-frame, and /odom drifts away from map by however much the anchor
         # has corrected. Matching against /odom picks the wrong nearest node.
+        # A/B 스위치 (2026-09-28): simple = 현행, bt = scv_bt_planner 가 명령(simple 미기동),
+        # shadow = simple 이 명령하고 scv_bt_planner 는 /bt/* 로 결정만 방송(무위험 비교).
+        DeclareLaunchArgument(
+            'behavior_planner', default_value='simple',
+            description="'simple'(현행) | 'bt'(scv_bt_planner active) | "
+                        "'shadow'(simple + scv_bt_planner shadow 동시 기동)"),
         TimerAction(period=15.0, actions=[
             _include('simple_behavior_planner',
                      'simple_behavior_planner.launch.py', {
@@ -326,6 +332,27 @@ def generate_launch_description():
                          'current_position_topic': '/odometry/global',
                          'probe_enabled': LaunchConfiguration(
                              'probe', default='false'),
-                     }),
+                     }, condition=IfCondition(PythonExpression([
+                         "'", LaunchConfiguration('behavior_planner'),
+                         "' in ('simple', 'shadow')"]))),
+            # 경로를 지연 치환으로 둔다 — scv_bt_planner 미설치 워크스페이스에서도
+            # behavior_planner:=simple 이면 런치가 깨지지 않게 (robot_localization 의
+            # faster_lio 참조 지연 치환과 같은 이유).
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(PathJoinSubstitution([
+                    FindPackageShare('scv_bt_planner'), 'launch',
+                    'bt_planner.launch.py'])),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'mode': PythonExpression([
+                        "'active' if '", LaunchConfiguration('behavior_planner'),
+                        "' == 'bt' else 'shadow'"]),
+                    'current_position_topic': '/odometry/global',
+                    'map_file_path': map_file_path,
+                    'probe_enabled': LaunchConfiguration('probe', default='false'),
+                }.items(),
+                condition=IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('behavior_planner'),
+                    "' in ('bt', 'shadow')"]))),
         ]),
     ])
