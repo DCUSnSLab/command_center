@@ -47,7 +47,8 @@ REALIGN=${3:-true}
 LOGD=$(dirname "$RESULT")/logs_$(basename "$RESULT" .json)
 
 # --- 실차와 맞춘 설정 -------------------------------------------------------
-export SCV_URDF=$G/scv_sim_robot_chamber.urdf SCV_XVFB=1
+# SCV_URDF 를 미리 주면 존중한다 (GPU 노드에서는 scv_sim_robot_chamber_gpu.urdf + SCV_VGL=1).
+export SCV_URDF=${SCV_URDF:-$G/scv_sim_robot_chamber.urdf} SCV_XVFB=1
 export SCV_ZONES=$G/zones/rtk_clean.yaml
 # 종전 chamber_graph(y=0, x 0~21)는 **물리적으로 통행 불가**였다. x=8.75 에서
 # 보도 폭이 y>=-0.5 로 좁아지는데 obs_255 가 y 0~0.5 를 차지해 남는 폭이
@@ -206,7 +207,7 @@ rc_phase() {
   # "베이스가 자율 명령을 듣지 않는다"를 그대로 모사한다.
   sleep 1
 
-  x0=$(gt_x); y0=$(gt_y)
+  read -r x0 y0 <<< "$(timeout 15 python3 "$G/rc_watch.py" 0 0 0 2>/dev/null)"
   echo "[rc] 전진 시작 (x,y)=($x0,$y0)" >> "$log"
   # 실차 RC 전진 속도대(최고 1.3 m/s)에서 1.0 m/s 를 지령한다.
   timeout "$RC_SECS" ros2 topic pub -r 20 /rc_cmd geometry_msgs/msg/Twist \
@@ -216,20 +217,18 @@ rc_phase() {
   # 이동량은 **직선거리**로 잰다. x 증분만 보면 기수방위가 +x 가 아닌 챔버
   # (설계된 경로는 아무 방향으로나 뻗는다)에서 영영 조건을 못 채우고 RC 창이
   # 타임아웃까지 늘어진다. 종전 차선 챔버는 +x 로 달렸으므로 결과가 같다.
+  # 2026-09-29: 폴링(sleep 2 + topic echo ×2 ≈ 5~7 s) → 구독 즉시 판정(rc_watch.py).
+  # RTF ~0.8 인 V100 Pod 에서 폴링은 한 번에 4~5 m 를 지나쳐 10 m RC 가 14 m 가 됐다.
+  # rc_watch 는 도달 즉시 /rc_cmd 정지도 직접 발행한다(정지 명령 스폰 지연 제거).
   local t0=$SECONDS xnow="$x0" ynow="$y0"
-  while kill -0 $PUBPID 2>/dev/null; do
-    sleep 2
-    xnow=$(gt_x); ynow=$(gt_y)
-    [ -z "$xnow" ] || [ -z "$ynow" ] && continue
-    awk -v a="$xnow" -v b="$x0" -v c="$ynow" -v e="$y0" -v d="$RC_DIST" \
-      'BEGIN{exit !(sqrt((a-b)^2+(c-e)^2) >= d)}' \
-      && { echo "[rc] 목표 거리 $RC_DIST m 달성 ((x,y)=($xnow,$ynow), ${SECONDS}-${t0}s)" >> "$log"; break; }
-  done
+  read -r xnow ynow <<< "$(timeout "$RC_SECS" python3 "$G/rc_watch.py" "$x0" "$y0" "$RC_DIST" 2>/dev/null)"
   kill $PUBPID 2>/dev/null
+  [ -n "$xnow" ] && echo "[rc] 목표 거리 $RC_DIST m 달성 ((x,y)=($xnow,$ynow), ${SECONDS}-${t0}s)" >> "$log" \
+    || echo "[rc] !! RC 거리 미달성 (RC_SECS=$RC_SECS 초과)" >> "$log"
   # 정지 명령을 명시적으로 한 번 — RC 를 놓으면 실차도 선다
   ros2 topic pub --once /rc_cmd geometry_msgs/msg/Twist '{linear: {x: 0.0}}' \
     > /dev/null 2>&1
-  x1=$(gt_x); y1=$(gt_y)
+  read -r x1 y1 <<< "$(timeout 15 python3 "$G/rc_watch.py" 0 0 0 2>/dev/null)"
   echo "[rc] 전진 종료 (x,y)=($x1,$y1)" >> "$log"
 
   echo "[rc] === 자율 전환 (control_mode 3 -> 1) $(date +%s) ===" >> "$log"

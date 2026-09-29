@@ -38,6 +38,10 @@ URDF_FILE=${SCV_URDF:-$G/scv_sim_robot.urdf}
 # URDF's depth camera (headless gzserver renders nothing without X; P2-verified)
 GZ_PREFIX=""
 [ "${SCV_XVFB:-0}" = "1" ] && GZ_PREFIX="xvfb-run -a"
+# SCV_VGL=1: OGRE 렌더를 GPU 로 돌린다(VirtualGL → EGL). xvfb-run 만으로는 llvmpipe
+# 소프트웨어 래스터라이저다 — V100 Pod 실측(8/27): xvfb-run 단독 llvmpipe / +vglrun -d egl
+# 은 Tesla V100·OpenGL 4.6. gpu_ray·depth 카메라는 이 경로여야 GPU 를 쓴다.
+[ "${SCV_VGL:-0}" = "1" ] && GZ_PREFIX="$GZ_PREFIX vglrun -d ${VGL_DISPLAY:-egl}"
 setsid nohup $GZ_PREFIX gzserver -s libgazebo_ros_init.so -s libgazebo_ros_factory.so \
   "$WORLD_FILE" > "$LOGD/gzserver.log" 2>&1 < /dev/null &
 sleep 12
@@ -49,7 +53,7 @@ sleep 12
 # 설계된 챔버는 경로가 아무 방향으로나 뻗으므로 RC 진입 방향을 맞추려면
 # 기수방위가 필요하다 — 0 으로 고정하면 RC 전진이 경로에서 멀어진다.
 ros2 run gazebo_ros spawn_entity.py -entity scv -file "$URDF_FILE" \
-  -x ${SCV_SPAWN_X:-0} -y ${SCV_SPAWN_Y:-0} -z 0.05 -Y ${SCV_SPAWN_YAW:-0} \
+  -x ${SCV_SPAWN_X:-0} -y ${SCV_SPAWN_Y:-0} -z ${SCV_SPAWN_Z:-0.05} -Y ${SCV_SPAWN_YAW:-0} \
   > "$LOGD/spawn.log" 2>&1
 # NB: inline -p robot_description:=<urdf> breaks rcl argument parsing
 # (silent rsp crash -> no sensor TF -> empty costmap). Use a params file.
