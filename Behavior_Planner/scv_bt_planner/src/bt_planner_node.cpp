@@ -280,6 +280,32 @@ private:
     }
   }
 
+  // shadow 전용: 제어기가 보고하는 goal_id 가 내 목표보다 경로상 앞이면 그 노드로 빨리감기한다.
+  // shadow 에서는 목표를 내가 아니라 현행 플래너가 주므로, 전환 시점 재합류가 현행보다 0.5~1 s 늦으면
+  // (10/01 Pod run2 shadow1: 현행 C02→C03 전진 뒤에 내가 C02 로 재합류) 내 목표 노드의 도달 보고가
+  // 영영 오지 않아 C07 완주를 "C02 차단" 으로 오판해 BLOCKED_WAIT→CREEP→ASSIST 를 헛발동한다.
+  // active 에서는 목표를 내가 내므로 이 경로가 생기지 않는다 — 결정 로직은 건드리지 않는다.
+  void shadowResync(const std::string& goal_id)
+  {
+    const auto& nodes = ctx_.path.nodes();
+    int j = -1;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      if (nodes[i].id == goal_id) { j = static_cast<int>(i); break; }
+    }
+    const int cur = ctx_.path.currentIndex();
+    if (j <= cur) return;
+    while (ctx_.path.currentIndex() < j) {
+      const PathNode* t = ctx_.target();
+      if (t) ctx_.path.markGoalCompleted(t->id);
+      if (!ctx_.path.advanceToNextNode()) break;
+    }
+    pause_signal_sent_ = false;
+    ctx_.waypoints_published = false;
+    ctx_.goal_distance.reset();
+    RCLCPP_WARN(get_logger(), "[shadow] target resync %s -> %s (현행 플래너 목표가 앞섬, %d 노드 건너뜀)",
+                nodes[cur].id.c_str(), goal_id.c_str(), j - cur);
+  }
+
   bool alignStartToPose()
   {
     if (!ctx_.pose || !ctx_.path.hasPath() || !origin_e_) return false;
@@ -356,6 +382,8 @@ private:
   void onGoalStatus(const cci::ControllerGoalStatus& m)
   {
     const PathNode* t = ctx_.target();
+    if (t && m.goal_id != t->id && mode_ != "active") shadowResync(m.goal_id);
+    t = ctx_.target();
     if (!t || m.goal_id != t->id) {
       if (m.goal_reached && t) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "goal_status ignored: goal_id=%s != target=%s",

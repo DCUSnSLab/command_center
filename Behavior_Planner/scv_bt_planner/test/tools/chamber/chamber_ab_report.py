@@ -52,6 +52,11 @@ if os.path.isdir(sh):
     s_join = re.findall(r'join idx (\d+) \(([A-Za-z0-9]+)\)', beh)
     b_join = re.findall(r'join idx (\d+) \(([A-Za-z0-9]+)\)', bt)
     s_adv = re.findall(r'Advanced to next node: ([A-Za-z0-9]+)', beh)
+    if not s_adv:
+        # simple 은 advance 를 debug 로만 찍는다 — 도달 보고를 무시한 로그의 target= 열(목표 변경 순서)로 복원
+        for tgt in re.findall(r'!= target=([A-Za-z0-9]+)', beh):
+            if not s_adv or s_adv[-1] != tgt:
+                s_adv.append(tgt)
     b_adv = re.findall(r'advanced to ([A-Za-z0-9]+)', bt)
     print('\nshadow1: join simple', s_join, ' bt', b_join)
     print('shadow1: advance simple', s_adv, '\n         advance bt    ', b_adv)

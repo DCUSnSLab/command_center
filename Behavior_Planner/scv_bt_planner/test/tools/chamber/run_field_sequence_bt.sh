@@ -209,10 +209,8 @@ rc_phase() {
 
   read -r x0 y0 <<< "$(timeout 15 python3 "$G/rc_watch.py" 0 0 0 2>>"$LOGD/rc_watch.err")"
   echo "[rc] 전진 시작 (x,y)=($x0,$y0)" >> "$log"
-  # 실차 RC 전진 속도대(최고 1.3 m/s)에서 1.0 m/s 를 지령한다.
-  timeout "$RC_SECS" ros2 topic pub -r 20 /rc_cmd geometry_msgs/msg/Twist \
-    '{linear: {x: 1.0}}' > /dev/null 2>&1 &
-  local PUBPID=$!
+  # 실차 RC 전진 속도대(최고 1.3 m/s)에서 1.0 m/s 를 지령한다 — 지령도 rc_watch 가 낸다(--drive).
+  # 10/01: 별도 `topic pub` + 도달 후 kill 은 kill 지연 동안 1.0/0 이 섞여 정지 거리가 1.7~3.6 m 로 흔들렸다.
   # 10 m 를 채우면 바로 멈춘다 — 운전자가 절차상 거리를 보고 손을 떼는 것과 같다
   # 이동량은 **직선거리**로 잰다. x 증분만 보면 기수방위가 +x 가 아닌 챔버
   # (설계된 경로는 아무 방향으로나 뻗는다)에서 영영 조건을 못 채우고 RC 창이
@@ -221,8 +219,7 @@ rc_phase() {
   # RTF ~0.8 인 V100 Pod 에서 폴링은 한 번에 4~5 m 를 지나쳐 10 m RC 가 14 m 가 됐다.
   # rc_watch 는 도달 즉시 /rc_cmd 정지도 직접 발행한다(정지 명령 스폰 지연 제거).
   local t0=$SECONDS xnow="$x0" ynow="$y0"
-  read -r xnow ynow <<< "$(timeout "$RC_SECS" python3 "$G/rc_watch.py" "$x0" "$y0" "$RC_DIST" 2>>"$LOGD/rc_watch.err")"
-  kill $PUBPID 2>/dev/null
+  read -r xnow ynow <<< "$(timeout "$RC_SECS" python3 "$G/rc_watch.py" "$x0" "$y0" "$RC_DIST" --drive 1.0 2>>"$LOGD/rc_watch.err")"
   [ -n "$xnow" ] && echo "[rc] 목표 거리 $RC_DIST m 달성 ((x,y)=($xnow,$ynow), ${SECONDS}-${t0}s)" >> "$log" \
     || echo "[rc] !! RC 거리 미달성 (RC_SECS=$RC_SECS 초과)" >> "$log"
   # 정지 명령을 명시적으로 한 번 — RC 를 놓으면 실차도 선다
