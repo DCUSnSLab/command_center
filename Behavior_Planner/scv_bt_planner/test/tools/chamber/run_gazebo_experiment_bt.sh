@@ -3,7 +3,7 @@
 # Usage: run_gazebo_experiment.sh <result.json> [duration=120] [ped=1|0]
 source /opt/ros/humble/setup.bash
 source ${SCV_WS:-$HOME/SCV/vehicle_ws}/install/setup.bash
-export ROS_DOMAIN_ID=96 ROS_LOCALHOST_ONLY=1
+export ROS_DOMAIN_ID=${SCV_DOMAIN:-96} ROS_LOCALHOST_ONLY=1
 # 파이썬 노드 로그를 줄 단위로 즉시 흘린다 — rc_phase 가 behavior.log 의
 # "join idx" 를 폴링하는데, 블록 버퍼링이면 grep 이 헛돌아 목표를 최대 15회
 # 재발행하고 주행 중 재합류 churn 을 만든다(8/12 실측).
@@ -131,6 +131,7 @@ ros2 topic pub --qos-durability transient_local --qos-reliability reliable \
   /map_provider_node/utm map_interfaces/msg/UtmLayer \
   "{utm_zone: 52, zone_letter: 'S', northern: true, origin_easting: ${SCV_DATUM_E:-0.0}, origin_northing: ${SCV_DATUM_N:-0.0}}" \
   > "$LOGD/datum.log" 2>&1 &
+UTM_PID=$!   # latched pub 는 kill_stack 패턴 밖 — 종료 시 PID 로 정리(런마다 1개씩 누수 → 도메인 디스커버리 불능, 10/01 Pod 실측)
 # SCV_BP: simple(현행) | bt(scv_bt_planner active, simple 미기동) | shadow(simple 명령 + BT 결정만)
 BP_MODE=${SCV_BP:-simple}
 if [ "$BP_MODE" != "bt" ]; then
@@ -191,7 +192,7 @@ JUDGE_ARGS=""
 timeout $((DUR + 30)) python3 $G/gz_judge.py "$RESULT" $DUR $JUDGE_ARGS > "$LOGD/judge.log" 2>&1
 RC=$?
 
-kill_stack
+kill "${UTM_PID:-}" 2>/dev/null; kill_stack
 echo "=== RESULT ==="
 cat "$RESULT" 2>/dev/null || tail -8 "$LOGD/judge.log"
 exit $RC
