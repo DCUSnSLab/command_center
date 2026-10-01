@@ -168,7 +168,10 @@ rc_phase() {
 
   until ros2 topic list 2>/dev/null | grep -q groundtruth; do sleep 3; done
   # 대기(0) 상태를 먼저 알린다 — 실차도 기동 직후는 대기다
-  python3 "$G/hunter_status_pub.py" 0 --ros-args -p use_sim_time:=true > "$LOGD/hs0.log" 2>&1 &
+  # 10/01: 모드별 프로세스 kill/재기동 → 한 프로세스 + 모드 파일. 재기동한 참여자가 간헐적으로
+  # 디스커버리되지 않아(run3 bt3: 자율 전환이 BT·base_mux 에 미도달) 런이 RC 뒤에 멈추는 플레이크를 없앤다.
+  echo 0 > "$LOGD/hunter_mode"
+  python3 "$G/hunter_status_pub.py" 0 --mode-file "$LOGD/hunter_mode" --ros-args -p use_sim_time:=true > "$LOGD/hs.log" 2>&1 &
   local HS=$!
 
   # 베이스 명령 중재 — control_mode 에 따라 자율/RC 를 통과시킨다.
@@ -196,9 +199,7 @@ rc_phase() {
   sleep "$RC_START"
 
   echo "[rc] === RC 수동 전환 (control_mode 3) $(date +%s) ===" >> "$log"
-  kill $HS 2>/dev/null
-  python3 "$G/hunter_status_pub.py" 3 --ros-args -p use_sim_time:=true > "$LOGD/hs3.log" 2>&1 &
-  HS=$!
+  echo 3 > "$LOGD/hunter_mode"
 
   # 실차에서 RC 는 mux 를 거치지 않고 CAN 레벨에서 베이스를 잡는다 — 그
   # 동안 자율 파이프라인의 /cmd_vel 은 베이스가 **무시한다**. 시뮬은 둘 다
@@ -207,30 +208,19 @@ rc_phase() {
   # "베이스가 자율 명령을 듣지 않는다"를 그대로 모사한다.
   sleep 1
 
-  read -r x0 y0 <<< "$(timeout 15 python3 "$G/rc_watch.py" 0 0 0 2>>"$LOGD/rc_watch.err")"
+  # 10/01: 시작 표본·전진 지령·도달 판정·정지·정지 후 표본을 rc_watch 한 프로세스가 맡는다(--drive).
+  #   별도 `topic pub` + 도달 후 kill 은 kill 지연 동안 1.0/0 이 섞여 정지 거리가 1.7~3.6 m 로 흔들렸고(run2 bt3 추락),
+  #   호출마다 새 DDS 참여자를 만드는 것(rc_watch ×3, topic pub ×2)은 늦게 뜬 참여자가 간헐적으로
+  #   디스커버리되지 않는 Pod 플레이크(run2 view_bt)의 노출면이었다.
+  local t0=$SECONDS
+  read -r x0 y0 xnow ynow x1 y1 <<< "$(timeout "$RC_SECS" python3 "$G/rc_watch.py" 0 0 "$RC_DIST" --drive 1.0 --settle 2 2>>"$LOGD/rc_watch.err")"
   echo "[rc] 전진 시작 (x,y)=($x0,$y0)" >> "$log"
-  # 실차 RC 전진 속도대(최고 1.3 m/s)에서 1.0 m/s 를 지령한다 — 지령도 rc_watch 가 낸다(--drive).
-  # 10/01: 별도 `topic pub` + 도달 후 kill 은 kill 지연 동안 1.0/0 이 섞여 정지 거리가 1.7~3.6 m 로 흔들렸다.
-  # 10 m 를 채우면 바로 멈춘다 — 운전자가 절차상 거리를 보고 손을 떼는 것과 같다
-  # 이동량은 **직선거리**로 잰다. x 증분만 보면 기수방위가 +x 가 아닌 챔버
-  # (설계된 경로는 아무 방향으로나 뻗는다)에서 영영 조건을 못 채우고 RC 창이
-  # 타임아웃까지 늘어진다. 종전 차선 챔버는 +x 로 달렸으므로 결과가 같다.
-  # 2026-09-29: 폴링(sleep 2 + topic echo ×2 ≈ 5~7 s) → 구독 즉시 판정(rc_watch.py).
-  # RTF ~0.8 인 V100 Pod 에서 폴링은 한 번에 4~5 m 를 지나쳐 10 m RC 가 14 m 가 됐다.
-  # rc_watch 는 도달 즉시 /rc_cmd 정지도 직접 발행한다(정지 명령 스폰 지연 제거).
-  local t0=$SECONDS xnow="$x0" ynow="$y0"
-  read -r xnow ynow <<< "$(timeout "$RC_SECS" python3 "$G/rc_watch.py" "$x0" "$y0" "$RC_DIST" --drive 1.0 2>>"$LOGD/rc_watch.err")"
   [ -n "$xnow" ] && echo "[rc] 목표 거리 $RC_DIST m 달성 ((x,y)=($xnow,$ynow), ${SECONDS}-${t0}s)" >> "$log" \
     || echo "[rc] !! RC 거리 미달성 (RC_SECS=$RC_SECS 초과)" >> "$log"
-  # 정지 명령을 명시적으로 한 번 — RC 를 놓으면 실차도 선다
-  ros2 topic pub --once /rc_cmd geometry_msgs/msg/Twist '{linear: {x: 0.0}}' \
-    > /dev/null 2>&1
-  read -r x1 y1 <<< "$(timeout 15 python3 "$G/rc_watch.py" 0 0 0 2>>"$LOGD/rc_watch.err")"
   echo "[rc] 전진 종료 (x,y)=($x1,$y1)" >> "$log"
 
   echo "[rc] === 자율 전환 (control_mode 3 -> 1) $(date +%s) ===" >> "$log"
-  kill $HS 2>/dev/null; sleep 0.5
-  python3 "$G/hunter_status_pub.py" 1 --ros-args -p use_sim_time:=true > "$LOGD/hs1.log" 2>&1 &
+  echo 1 > "$LOGD/hunter_mode"
   echo "[rc] 자율 상태 유지" >> "$log"
 }
 
