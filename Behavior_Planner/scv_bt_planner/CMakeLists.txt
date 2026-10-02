@@ -28,6 +28,7 @@ find_package(ament_index_cpp REQUIRED)
 # ---- ROS 무의존 코어 (단위시험 대상) -------------------------------------
 add_library(${PROJECT_NAME}_core
   src/path_manager.cpp
+  src/hazard_waypoints.cpp
   src/blocked_wait_monitor.cpp
   src/zone_table.cpp
   src/profiles.cpp
@@ -63,6 +64,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_blocked_wait_monitor ${PROJECT_NAME}_core)
   ament_add_gtest(test_zone_and_profiles test/test_zone_and_profiles.cpp)
   target_link_libraries(test_zone_and_profiles ${PROJECT_NAME}_core)
+  ament_add_gtest(test_hazard_waypoints test/test_hazard_waypoints.cpp)
+  target_link_libraries(test_hazard_waypoints ${PROJECT_NAME}_core)
   target_compile_definitions(test_zone_and_profiles PRIVATE
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
 endif()

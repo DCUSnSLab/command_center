@@ -88,6 +88,15 @@ private:
     declare_parameter("join_check_approach", true);
     declare_parameter("join_clear_half_width_m", 0.45);
     declare_parameter("join_clear_lethal", 90);
+    // 위험 지대 경유점 재배치(AvoidHazardWaypoints 노드가 쓴다). 코스트맵 값 >= hazard.lethal 을 위험으로 본다.
+    // 50 = SMPPI obstacle_cost_threshold 0.5 와 같은 기준. 구덩이는 코스트맵에서 100 이 되지 않는다 —
+    // 가까운 가장자리만 ~61 이고 내부는 0(10/02 챔버 실측, 라이다가 구덩이 안을 못 본다).
+    declare_parameter("hazard.enable", true);
+    declare_parameter("hazard.lethal", 50);
+    // 위험 셀 뒤쪽(진행 방향) 그림자 길이. 구덩이는 가까운 가장자리만 보이고 안쪽은 라이다 그림자라 코스트 0 —
+    // 보이는 가장자리 뒤 이 길이까지 위험으로 본다(10/02 scen6: 그림자 없이 1.0 m 비켜 놓은 경유점이 구덩이를 스쳐 추락).
+    declare_parameter("hazard.shadow_m", 1.2);
+    declare_parameter("hazard.reach_m", 0.6);   // 재배치 경유점이 목표일 때 도달 임계 [m]
     declare_parameter("join_pass_radius_m", 2.0);
     declare_parameter("realign_on_engage", true);
     declare_parameter("realign_manual_move_m", 2.0);
@@ -131,6 +140,16 @@ private:
     join_check_approach_ = get_parameter("join_check_approach").as_bool();
     join_clear_half_w_ = get_parameter("join_clear_half_width_m").as_double();
     join_clear_lethal_ = get_parameter("join_clear_lethal").as_int();
+    hazard_enable_ = get_parameter("hazard.enable").as_bool();
+    hazard_lethal_ = get_parameter("hazard.lethal").as_int();
+    if (hazard_enable_) {
+      hazard_shadow_m_ = get_parameter("hazard.shadow_m").as_double();
+      hazard_reach_m_ = get_parameter("hazard.reach_m").as_double();
+      ctx_.hazard_blocked = [this](double ux, double uy) { return shadowBlocked(ux, uy); };
+      ctx_.hazard_segment_clear = [this](double x0, double y0, double x1, double y1) {
+        return snapSegmentClear(x0, y0, x1, y1);
+      };
+    }
     join_pass_radius_ = get_parameter("join_pass_radius_m").as_double();
     realign_on_engage_ = get_parameter("realign_on_engage").as_bool();
     realign_move_m_ = get_parameter("realign_manual_move_m").as_double();
@@ -227,7 +246,7 @@ private:
     hunter_sub_ = create_subscription<hunter_msgs::msg::HunterStatus>(
       get_parameter("hunter_status_topic").as_string(), 10,
       [this](hunter_msgs::msg::HunterStatus::ConstSharedPtr m) { onHunterStatus(*m); });
-    if (join_check_approach_) {
+    if (join_check_approach_ || hazard_enable_) {
       costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         get_parameter("join_costmap_topic").as_string(), 1,
         [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr m) { costmap_ = m; });
@@ -254,6 +273,7 @@ private:
     const std::optional<Pose2D> prev = ctx_.pose;
     const double t = rclcpp::Time(m.header.stamp).seconds();
     ctx_.pose = p;
+    if (origin_e_) ctx_.pose_utm = std::make_pair(p.x + *origin_e_, p.y + *origin_n_);
 
     if (ctx_.path.hasPath()) {
       // 통과 이력은 노드 좌표(절대 UTM)와 같은 프레임이어야 한다 → map 좌표를 UTM 으로 올린다
@@ -323,6 +343,67 @@ private:
     return true;
   }
 
+  // 틱마다 한 번 코스트맵·TF(map→grid) 스냅샷 — 위험 경유점 재배치가 점/직선 질의를 수백 번 하므로 TF 를 매번 찾지 않는다.
+  void takeGridSnap()
+  {
+    snap_ok_ = false;
+    snap_grid_ = costmap_;
+    if (!snap_grid_ || !origin_e_) return;
+    try {
+      const auto tr = tf_buffer_->lookupTransform(snap_grid_->header.frame_id, "map", tf2::TimePointZero);
+      snap_tx_ = tr.transform.translation.x; snap_ty_ = tr.transform.translation.y;
+      const double th = yawOf(tr.transform.rotation);
+      snap_c_ = std::cos(th); snap_s_ = std::sin(th);
+      snap_ok_ = true;
+    } catch (...) {
+    }
+  }
+
+  // 절대 UTM 점의 코스트(0-100). 스냅샷 없음·격자 밖·미지는 0(통행 가능, fail-open).
+  int snapCost(double ux, double uy) const
+  {
+    if (!snap_ok_) return 0;
+    const double mx = ux - *origin_e_, my = uy - *origin_n_;
+    const double gx = snap_c_ * mx - snap_s_ * my + snap_tx_, gy = snap_s_ * mx + snap_c_ * my + snap_ty_;
+    const auto& info = snap_grid_->info;
+    const int col = static_cast<int>(std::floor((gx - info.origin.position.x) / info.resolution));
+    const int row = static_cast<int>(std::floor((gy - info.origin.position.y) / info.resolution));
+    if (col < 0 || row < 0 || col >= static_cast<int>(info.width) || row >= static_cast<int>(info.height)) return 0;
+    const int v = snap_grid_->data[row * info.width + col];
+    return v < 0 ? 0 : v;
+  }
+
+  // 점 (ux,uy) 가 위험 셀이거나, 진행 방향(차량 yaw) 뒤쪽 shadow_m 안에 위험 셀이 있으면(= 그 셀의 그림자 안) 위험.
+  bool shadowBlocked(double ux, double uy) const
+  {
+    if (snapCost(ux, uy) >= hazard_lethal_) return true;
+    if (hazard_shadow_m_ <= 0.0 || !ctx_.pose) return false;
+    const double cx = std::cos(ctx_.pose->yaw), cy = std::sin(ctx_.pose->yaw);
+    const double step = snap_ok_ ? std::max<double>(snap_grid_->info.resolution, 0.1) : 0.1;
+    for (double s = step; s <= hazard_shadow_m_ + 1e-9; s += step) {
+      if (snapCost(ux - s * cx, uy - s * cy) >= hazard_lethal_) return true;
+    }
+    return false;
+  }
+
+  bool snapSegmentClear(double x0, double y0, double x1, double y1) const
+  {
+    if (!snap_ok_) return true;
+    const double d = std::hypot(x1 - x0, y1 - y0);
+    if (d <= 1e-6) return true;
+    const double nx = -(y1 - y0) / d, ny = (x1 - x0) / d;
+    const double step = std::max<double>(snap_grid_->info.resolution, 0.05);
+    const int steps = std::max(2, static_cast<int>(d / step));
+    for (int k = 0; k <= steps; ++k) {
+      const double t = static_cast<double>(k) / steps;
+      const double bx = x0 + (x1 - x0) * t, by = y0 + (y1 - y0) * t;
+      for (double off : {-join_clear_half_w_, 0.0, join_clear_half_w_}) {
+        if (shadowBlocked(bx + nx * off, by + ny * off)) return false;
+      }
+    }
+    return true;
+  }
+
   // (x0,y0)->(x1,y1) 절대 UTM 직선의 코스트맵 통행성. 정보 부족은 통행 가능(fail-open).
   bool approachClear(double x0, double y0, double x1, double y1)
   {
@@ -367,6 +448,7 @@ private:
       nodes.push_back({n.id, n.easting, n.northing, static_cast<int>(n.node_type), n.heading_deg});
     }
     ctx_.path.setPath(std::move(nodes), m.path_id);
+    ctx_.hazard.clear();
     completed_logged_ = false;
     ctx_.waypoints_published = false;
     ctx_.pause_sent_for.clear();
@@ -455,7 +537,9 @@ private:
     ctx_.resetTick();
     updateAnchorDelta();
 
+    if (hazard_enable_) takeGridSnap();
     tree_.tickOnce();
+    for (const auto& s : ctx_.hazard_log) RCLCPP_WARN(get_logger(), "[HAZARD] %s", s.c_str());
 
     if (ctx_.request_stop) {
       std_msgs::msg::Bool b; b.data = true;
@@ -522,20 +606,27 @@ private:
   {
     const int node_type = ctx_.effectiveNodeType();
     const bool is_final = ctx_.path.isFinalNode();
-    const std::string key = std::to_string(node_type) + "|" + ctx_.overlay + "|" + (is_final ? "F" : "V");
+    // 현재 목표가 위험 지대 재배치 경유점이면 도달 임계를 좁힌다 — 경유 1.6 m 그대로면 1.5 m 옆으로 옮긴 점이
+    // 원래 경로 위(구덩이 바로 앞)에서 '도달' 처리돼 재배치가 궤적에 반영되지 않는다(10/02 scen7).
+    const PathNode* tgt = ctx_.target();
+    const auto toff = tgt ? ctx_.hazard.offset(tgt->id) : std::make_pair(0.0, 0.0);
+    const bool shifted = (toff.first != 0.0 || toff.second != 0.0);
+    const std::string key = std::to_string(node_type) + "|" + ctx_.overlay + "|" + (is_final ? "F" : "V") +
+                            (shifted ? "|S" : "");
     if (key == last_behavior_key_ && !creep_active_) return;
     if (creep_active_) return;   // creep 중에는 creep_off 에서 복원
     std::string desc; int code = 0;
     ParamMap p = profiles_.compute(node_type, ctx_.overlay, &desc, &code);
-    p["goal_reached_threshold"] = is_final ? goal_final_ : goal_via_;
+    p["goal_reached_threshold"] = is_final ? goal_final_ : (shifted ? std::min(goal_via_, hazard_reach_m_) : goal_via_);
     std::string why;
     if (!Profiles::validate(p, &why)) {
       RCLCPP_ERROR(get_logger(), "invalid behavior params (%s): %s", key.c_str(), why.c_str());
       return;
     }
     sendMppiParams(p, code, desc);
-    RCLCPP_INFO(get_logger(), "[BEHAVIOR] %s type=%d overlay='%s' final=%d max_v=%.2f", desc.c_str(), node_type,
-                ctx_.overlay.c_str(), is_final ? 1 : 0, p["max_linear_velocity"]);
+    RCLCPP_INFO(get_logger(), "[BEHAVIOR] %s type=%d overlay='%s' final=%d max_v=%.2f reach=%.2f%s", desc.c_str(), node_type,
+                ctx_.overlay.c_str(), is_final ? 1 : 0, p["max_linear_velocity"], p["goal_reached_threshold"],
+                shifted ? " (hazard-shifted target)" : "");
     last_behavior_key_ = key;
     last_params_ = p; last_code_ = code; last_desc_ = desc;
   }
@@ -624,8 +715,9 @@ private:
     geometry_msgs::msg::PoseStamped mp;
     mp.header.stamp = now();
     mp.header.frame_id = "map";
-    mp.pose.position.x = n.x - *origin_e_;
-    mp.pose.position.y = n.y - *origin_n_;
+    const auto off = ctx_.hazard.offset(n.id);   // 위험 지대 재배치(없으면 0)
+    mp.pose.position.x = n.x + off.first - *origin_e_;
+    mp.pose.position.y = n.y + off.second - *origin_n_;
     mp.pose.position.z = 0.0;
     const double yaw = std::fmod(n.heading_deg, 360.0) * M_PI / 180.0;
     mp.pose.orientation.z = std::sin(yaw / 2.0);
@@ -722,6 +814,13 @@ private:
   bool join_nearest_ = false, join_check_approach_ = true, realign_on_engage_ = true;
   double join_max_approach_ = 40.0, join_clear_half_w_ = 0.45, join_pass_radius_ = 2.0, realign_move_m_ = 2.0;
   int join_clear_lethal_ = 90;
+  bool hazard_enable_ = true;
+  int hazard_lethal_ = 50;
+  double hazard_shadow_m_ = 1.2;
+  double hazard_reach_m_ = 0.6;
+  nav_msgs::msg::OccupancyGrid::ConstSharedPtr snap_grid_;
+  bool snap_ok_ = false;
+  double snap_tx_ = 0.0, snap_ty_ = 0.0, snap_c_ = 1.0, snap_s_ = 0.0;
   std::optional<double> origin_e_, origin_n_;
   bool unpinned_route_ = false, pause_signal_sent_ = false, creep_active_ = false, completed_logged_ = false;
   std::optional<Pose2D> align_pose_, last_tf_, tf_at_publish_;

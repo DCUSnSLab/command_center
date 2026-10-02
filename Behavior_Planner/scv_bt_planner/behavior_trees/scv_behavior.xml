@@ -25,6 +25,10 @@
       <!-- node_type 9 + stop_flag: 안전 pause (원본 safety_monitor 와 동일, 항상 SUCCESS) -->
       <SafetyPause/>
 
+      <!-- 위험 지대 경유점: 목표·다음 경유점이 코스트맵 치명 영역(구덩이·장애물) 안이면 경로 옆 빈 곳으로
+           비켜 놓고, 빈 곳이 없으면 현재 목표를 건너뛴다(최종 노드 제외). 항상 SUCCESS (2026-10-02) -->
+      <AvoidHazardWaypoints clear_radius="0.75" max_shift="2.0" lookahead="3" min_dist="1.5" max_dist="6.5" allow_skip="true"/>
+
       <!-- 구역 진입 규칙: 행동 선택과 무관하게 항상 평가 (회전 중이어도 횡단보도 진입 전 정지) -->
       <ForceSuccess>
         <Sequence name="ZoneEntryRules">

@@ -1,5 +1,7 @@
 #include "scv_bt_planner/bt_nodes.hpp"
 
+#include <cstdio>
+
 #include <cmath>
 #include <limits>
 
@@ -19,6 +21,7 @@ void Context::resetTick()
   blocked_actions.clear();
   pause_requests.clear();
   localization_hint.reset();
+  hazard_log.clear();
 }
 
 std::string Context::zone() const
@@ -183,6 +186,56 @@ BT::NodeStatus RefreshWaypoints::tick()
   return BT::NodeStatus::SUCCESS;
 }
 
+BT::NodeStatus AvoidHazardWaypoints::tick()
+{
+  if (!ctx_.hazard_blocked || !ctx_.hazard_segment_clear || !ctx_.pose_utm || !ctx_.path.hasPath() ||
+      !ctx_.path.isFollowing()) {
+    return BT::NodeStatus::SUCCESS;
+  }
+  HazardParams hp = ctx_.hazard.params();
+  getInput("clear_radius", hp.clear_radius);
+  getInput("max_shift", hp.max_shift);
+  getInput("lookahead", hp.lookahead);
+  getInput("min_dist", hp.min_dist);
+  getInput("max_dist", hp.max_dist);
+  bool allow_skip = true;
+  getInput("allow_skip", allow_skip);
+  ctx_.hazard.setParams(hp);
+
+  const auto& nodes = ctx_.path.nodes();
+  const int cur = ctx_.path.currentIndex();
+  std::vector<PathNode> upcoming(nodes.begin() + cur, nodes.end());
+  const PathNode* prev = cur > 0 ? &nodes[cur - 1] : nullptr;
+  const auto pls = ctx_.hazard.plan(upcoming, prev, ctx_.pose_utm->first, ctx_.pose_utm->second,
+                                    ctx_.hazard_blocked, ctx_.hazard_segment_clear);
+  bool republish = false;
+  for (size_t i = 0; i < pls.size(); ++i) {
+    const auto& pl = pls[i];
+    const PathNode& nd = upcoming[i];
+    if (pl.changed && !pl.skip) {
+      char buf[200];
+      std::snprintf(buf, sizeof(buf), "shift %s by (%+.2f, %+.2f) m -> at (%.2f, %.2f)", pl.id.c_str(), pl.dx, pl.dy,
+                    nd.x + pl.dx, nd.y + pl.dy);
+      ctx_.hazard_log.push_back(pl.dx == 0.0 && pl.dy == 0.0 ? "restore " + pl.id + " (clear)" : buf);
+      republish = true;
+    }
+    if (i == 0 && pl.skip && !pl.out_of_range) {
+      if (allow_skip && !ctx_.path.isFinalNode()) {
+        ctx_.hazard_log.push_back("skip " + pl.id + ": lethal, no free spot within " +
+                                  std::to_string(hp.max_shift).substr(0, 4) + " m");
+        ctx_.path.markGoalCompleted(pl.id);
+        ctx_.path.advanceToNextNode();
+        ctx_.goal_distance.reset();
+        republish = true;
+        break;   // 다음 틱에 새 목표 기준으로 다시 본다
+      }
+      ctx_.hazard_log.push_back("target " + pl.id + " lethal, no free spot (final or skip disabled) — kept");
+    }
+  }
+  if (republish) ctx_.waypoints_published = false;
+  return BT::NodeStatus::SUCCESS;
+}
+
 // ---------------- 데코레이터 ----------------
 
 BT::NodeStatus BlockedEscalation::tick()
@@ -210,6 +263,7 @@ void registerScvNodes(BT::BehaviorTreeFactory& factory, Context& ctx)
   factory.registerNodeType<PauseBeforeEntry>("PauseBeforeEntry", std::ref(ctx));
   factory.registerNodeType<Drive>("Drive", std::ref(ctx));
   factory.registerNodeType<RefreshWaypoints>("RefreshWaypoints", std::ref(ctx));
+  factory.registerNodeType<AvoidHazardWaypoints>("AvoidHazardWaypoints", std::ref(ctx));
   factory.registerNodeType<BlockedEscalation>("BlockedEscalation", std::ref(ctx));
 }
 

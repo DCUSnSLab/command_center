@@ -126,8 +126,11 @@ LOG_PATTERNS = [
     ('resync', re.compile(r'\[shadow\] target resync (\S+ -> \S+)')),
     ('done', re.compile(r'Path following completed!')),
 ]
+HAZ_SHIFT_RE = re.compile(r'\[HAZARD\] shift (\S+) by .*-> at \(([-\d.]+), ([-\d.]+)\)')
+HAZ_RESTORE_RE = re.compile(r'\[HAZARD\] restore (\S+)')
+HAZ_SKIP_RE = re.compile(r'\[HAZARD\] skip (\S+):')
 EVENT_RE = re.compile(r'\[(?:INFO|WARN|ERROR)\] \[(\d+\.\d+)\] \[bt_planner\]: (.*)')
-EVENT_KEEP = re.compile(r'MODE\]|advanced to|BEHAVIOR\]|BLOCKED\]|\[shadow\]|join idx|completed|assist')
+EVENT_KEEP = re.compile(r'MODE\]|advanced to|BEHAVIOR\]|BLOCKED\]|\[shadow\]|\[HAZARD\]|join idx|completed|assist')
 
 
 class LogTail:
@@ -163,6 +166,21 @@ class LogTail:
             if m and EVENT_KEEP.search(m.group(2)):
                 info['events'].append((float(m.group(1)), m.group(2)))
         info['events'] = info['events'][-7:]
+        # 위험 지대 경유점 재배치: 노드 → 재배치된 절대 좌표(UTM — 챔버는 datum 0 이라 월드 좌표와 같다)
+        shifted, skipped = {}, []
+        for line in text.splitlines():
+            m = HAZ_SHIFT_RE.search(line)
+            if m:
+                shifted[m.group(1)] = (float(m.group(2)), float(m.group(3)))
+                continue
+            m = HAZ_RESTORE_RE.search(line)
+            if m:
+                shifted.pop(m.group(1), None)
+                continue
+            m = HAZ_SKIP_RE.search(line)
+            if m and m.group(1) not in skipped:
+                skipped.append(m.group(1))
+        info['shifted'], info['skipped'] = shifted, skipped
         return info
 
 
@@ -695,6 +713,25 @@ class MapView(QtWidgets.QWidget):
                 qp.drawEllipse(p, 13, 13)
             fm = QtGui.QFontMetrics(QtGui.QFont('DejaVu Sans', 9, QtGui.QFont.Bold))
             self.label(qp, p + QtCore.QPointF(-fm.horizontalAdvance(nid) / 2, -11), nid, '#0d1117', bold=True, halo=True)
+        # 위험 지대 재배치 경유점(주황 마름모) · 건너뛴 노드(X)
+        inf = self.bt.info or {}
+        ids = {nid: i for i, (nid, _, _) in enumerate(self.route)}
+        for nid, (sx, sy) in (inf.get('shifted') or {}).items():
+            if nid not in ids:
+                continue
+            q = self.to_px(sx, sy)
+            qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['target']), 1.5, QtCore.Qt.DashLine))
+            qp.drawLine(pts[ids[nid]], q)
+            qp.setPen(QtGui.QPen(QtGui.QColor('#0d1117'), 1.2))
+            qp.setBrush(QtGui.QColor(MAP_C['target']))
+            qp.drawPolygon(QtGui.QPolygonF([q + QtCore.QPointF(0, -7), q + QtCore.QPointF(7, 0),
+                                            q + QtCore.QPointF(0, 7), q + QtCore.QPointF(-7, 0)]))
+        for nid in inf.get('skipped') or []:
+            if nid in ids:
+                q = pts[ids[nid]]
+                qp.setPen(QtGui.QPen(QtGui.QColor('#d4473f'), 2.5))
+                qp.drawLine(q + QtCore.QPointF(-6, -6), q + QtCore.QPointF(6, 6))
+                qp.drawLine(q + QtCore.QPointF(-6, 6), q + QtCore.QPointF(6, -6))
         # 목표 연결선 + 차량
         if self.pose:
             x, y, yaw = self.pose
@@ -702,7 +739,8 @@ class MapView(QtWidgets.QWidget):
             if tgt is not None and not done:
                 pen = QtGui.QPen(QtGui.QColor(MAP_C['target']), 2, QtCore.Qt.DashLine)
                 qp.setPen(pen)
-                qp.drawLine(vp, pts[tgt])
+                sh = (inf.get('shifted') or {}).get(self.route[tgt][0])
+                qp.drawLine(vp, self.to_px(*sh) if sh else pts[tgt])
             mode = ((self.bt.info or {}).get('mode') or ('0',))[0]
             col = MAP_C['vehicle_auto'] if mode == '1' else MAP_C['vehicle_rc'] if mode == '3' else MAP_C['vehicle_idle']
             L, W = 0.98, 0.74          # Hunter 2.0 외곽(대략)
@@ -778,7 +816,7 @@ class MapView(QtWidgets.QWidget):
         # 범례 + 축척
         leg = [(MAP_C['route'], '경로'), (MAP_C['trail'], '궤적'), (MAP_C['target'], '목표 노드'),
                (MAP_C['passed'], '지나온 노드'), (MAP_C['sidewalk'], '보도'), (MAP_C['obstacle'], '장애물'),
-               (MAP_C['pit'], '구덩이')]
+               (MAP_C['pit'], '구덩이'), (MAP_C['target'], '◆ 재배치 경유점')]
         qp.setFont(QtGui.QFont('DejaVu Sans', 8))
         lx = self.width() - 10
         ly = self.height() - 12

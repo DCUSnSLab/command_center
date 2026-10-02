@@ -13,6 +13,7 @@
 #include <behaviortree_cpp/bt_factory.h>
 
 #include "scv_bt_planner/blocked_wait_monitor.hpp"
+#include "scv_bt_planner/hazard_waypoints.hpp"
 #include "scv_bt_planner/path_manager.hpp"
 #include "scv_bt_planner/profiles.hpp"
 #include "scv_bt_planner/zone_table.hpp"
@@ -50,6 +51,12 @@ struct Context {
   double near_goal_hold_off = 0.8;
   bool probe_far_wall = false;
   BlockedWaitMonitor blocked;
+  // 위험 지대 경유점 재배치 (AvoidHazardWaypoints). 코스트맵 질의는 노드가 채워 넣는다(미설정이면 비활성).
+  HazardWaypoints hazard;
+  HazardWaypoints::BlockedAt hazard_blocked;          // 절대 UTM 점이 치명인가
+  HazardWaypoints::SegmentClear hazard_segment_clear; // 절대 UTM 직선이 통행 가능한가
+  std::optional<std::pair<double, double>> pose_utm;   // 차량 절대 UTM (datum 수신 후)
+  std::vector<std::string> hazard_log;                // 이번 틱의 재배치·건너뜀 기록(노드가 로그로 출력)
 
   // ---------- 출력 (트리가 채우고 ROS 노드가 소비) ----------
   bool request_stop = false;
@@ -126,6 +133,23 @@ private: Context& ctx_;
 };
 
 // ---- 액션 ----
+// 목표·다음 경유점이 코스트맵 치명 영역 안이면 경로 옆으로 비켜 놓거나(재배치) 현재 목표를 건너뛴다. 항상 SUCCESS.
+class AvoidHazardWaypoints : public BT::SyncActionNode {
+public:
+  AvoidHazardWaypoints(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::SyncActionNode(n, c), ctx_(ctx) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<double>("clear_radius", 0.75, "경유점 주변 무치명 반경 [m]"),
+            BT::InputPort<double>("max_shift", 2.0, "경로 법선 방향 최대 이동 [m]"),
+            BT::InputPort<int>("lookahead", 3, "현재 목표 뒤로 검사할 노드 수"),
+            BT::InputPort<double>("min_dist", 1.5, "차량에서 이 거리보다 가까운 노드는 판정 안 함 [m]"),
+            BT::InputPort<double>("max_dist", 6.5, "차량에서 이 거리보다 먼 노드는 판정 안 함 [m]"),
+            BT::InputPort<bool>("allow_skip", true, "빈 곳이 없으면 현재 목표를 건너뛴다(최종 노드 제외)")};
+  }
+  BT::NodeStatus tick() override;
+private: Context& ctx_;
+};
+
 class Stop : public BT::SyncActionNode {
 public:
   Stop(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::SyncActionNode(n, c), ctx_(ctx) {}
