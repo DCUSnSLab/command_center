@@ -398,8 +398,9 @@ MAP_C = {
     'road': '#3b4148', 'sidewalk': '#c9ccd1', 'obstacle': '#8a5a35', 'route': '#2f81f7', 'node': '#ffffff',
     'passed': '#2f9e57', 'target': '#e5a23a', 'trail': '#d4473f', 'vehicle_auto': '#2f81f7',
     'vehicle_rc': '#e5a23a', 'vehicle_idle': '#8b949e', 'ink': '#e6e8ea', 'muted': '#8b949e', 'panel': '#1c2024',
+    'pit': '#111111',
 }
-POSE_RE = re.compile(r'pose \{ name: "scv" id: \d+ position \{ x: (\S+) y: (\S+) z: \S+ \} '
+POSE_RE = re.compile(r'pose \{ name: "scv" id: \d+ position \{ x: (\S+) y: (\S+) z: (\S+) \} '
                      r'orientation \{ x: (\S+) y: (\S+) z: (\S+) w: (\S+) \}')
 TIME_RE = re.compile(r'^time \{ sec: (\d+) nsec: (\d+) \}')
 
@@ -408,7 +409,7 @@ def load_world(path):
     """월드 SDF → (보도 rect 목록, 장애물 rect 목록, 월드 이름). rect = (x, y, sx, sy, yaw)."""
     root = ET.parse(path).getroot()
     world = root.find('world')
-    sidewalks, obstacles = [], []
+    sidewalks, obstacles, pits = [], [], []
     for m in world.findall('model'):
         name = m.get('name', '')
         pose = [float(v) for v in (m.findtext('pose') or '0 0 0 0 0 0').split()]
@@ -419,9 +420,11 @@ def load_world(path):
         rect = (pose[0], pose[1], sx, sy, pose[5] if len(pose) > 5 else 0.0)
         if name.startswith('sw'):
             sidewalks.append(rect)
-        elif name.startswith('obs'):
+        elif name.startswith('obs') or name.startswith('hz'):
             obstacles.append(rect)
-    return sidewalks, obstacles, world.get('name', 'default')
+        elif name.startswith('pit'):
+            pits.append(rect)
+    return sidewalks, obstacles, pits, world.get('name', 'default')
 
 
 def load_route(path):
@@ -439,7 +442,10 @@ class MapView(QtWidgets.QWidget):
     def __init__(self, design_path, bt_view):
         super().__init__()
         d = __import__('json').load(open(os.path.expanduser(design_path)))
-        self.sidewalks, self.obstacles, self.world = load_world(d['world'])
+        self.sidewalks, self.obstacles, self.pits, self.world = load_world(d['world'])
+        self.scn = __import__('json').load(open(d['scenario'])) if d.get('scenario') else None
+        self.scn_state = {h['id']: dict(status='대기', clear=None) for h in (self.scn or {}).get('hazards', [])}
+        self.scn_failed = False
         self.route = load_route(d['graph'])
         sp = d.get('spawn') or {}
         self.spawn = (sp['x'], sp['y']) if 'x' in sp else None
@@ -455,6 +461,11 @@ class MapView(QtWidgets.QWidget):
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         pad = 3.5
         self.bounds = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+        if self.scn:      # 보도 폭 전체가 보이도록
+            sw = self.scn.get('sidewalk', {})
+            ext = [self.course_to_world(u, v) for u in (0.0,) for v in (sw.get('y_left', 0) + 1.5, sw.get('y_right', 0) - 1.5)]
+            ys2 = ys + [e[1] for e in ext]
+            self.bounds = (self.bounds[0], self.bounds[1], min(ys2) - 1.0, max(ys2) + 1.0)
         self.proc = None
         self.start_stream()
         self.timer = QtCore.QTimer(self)
@@ -480,8 +491,9 @@ class MapView(QtWidgets.QWidget):
             m = POSE_RE.search(line)
             if not m:
                 continue
-            x, y, qx, qy, qz, qw = map(float, m.groups())
+            x, y, z, qx, qy, qz, qw = map(float, m.groups())
             yaw = __import__('math').atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            self.update_scenario(x, y, z, yaw)
             tm = TIME_RE.search(line)
             t = int(tm.group(1)) + int(tm.group(2)) * 1e-9 if tm else None
             self.pose, self.sim_t = (x, y, yaw), t
@@ -500,6 +512,93 @@ class MapView(QtWidgets.QWidget):
         if self.proc.state() == QtCore.QProcess.NotRunning and time.monotonic() - self.stream_started > 2.0:
             self.start_stream()
         self.update()
+
+    # ---- 연속 위험 시나리오 실시간 추정 (판정 정본은 gz_judge --scenario)
+    def update_scenario(self, x, y, z, yaw):
+        if not self.scn:
+            return
+        math = __import__('math')
+        x, y, yaw = self.to_course(x, y, yaw)
+        fp = self.scn.get('footprint', {})
+        L, W = fp.get('length', 0.98), fp.get('width', 0.74)
+        c, s = math.cos(yaw), math.sin(yaw)
+        pts = [(x + u * c - v * s, y + u * s + v * c)
+               for u in (-L / 2, 0, L / 2) for v in (-W / 2, 0, W / 2)]
+        for h in sorted(self.scn['hazards'], key=lambda h: h['rect'][0]):
+            st = self.scn_state[h['id']]
+            if st['status'] in ('통과', '실패: 추락', '실패: 충돌', '미시험'):
+                continue
+            if self.scn_failed:
+                st['status'] = '미시험'
+                continue
+            if x < h['start_x']:
+                continue
+            r = h['rect']
+            d = min(math.hypot(max(r[0] - px, 0, px - r[1]), max(r[2] - py, 0, py - r[3])) for px, py in pts)
+            st['clear'] = d if st['clear'] is None else min(st['clear'], d)
+            st['status'] = '진행 중'
+            pen = max((min(px - r[0], r[1] - px, py - r[2], r[3] - py)
+                       if r[0] <= px <= r[1] and r[2] <= py <= r[3] else 0.0) for px, py in pts)
+            if z < -0.10 or (pen > self.scn.get('pit_fail_penetration', 0.15) and h['type'] == 'pit'):
+                st['status'], self.scn_failed = '실패: 추락', True
+            elif d <= 0.0 and h['type'] == 'obstacle':
+                st['status'], self.scn_failed = '실패: 충돌', True
+            elif x >= h['pass_x']:
+                st['status'] = '통과'
+
+    def _frame(self):
+        fr = (self.scn or {}).get('frame', {})
+        return fr.get('x0', 0.0), fr.get('y0', 0.0), __import__('math').radians(fr.get('heading_deg', 0.0))
+
+    def to_course(self, x, y, yaw):
+        math = __import__('math')
+        x0, y0, h = self._frame()
+        dx, dy = x - x0, y - y0
+        return dx * math.cos(h) + dy * math.sin(h), -dx * math.sin(h) + dy * math.cos(h), yaw - h
+
+    def course_to_world(self, u, v):
+        math = __import__('math')
+        x0, y0, h = self._frame()
+        return x0 + u * math.cos(h) - v * math.sin(h), y0 + u * math.sin(h) + v * math.cos(h)
+
+    def draw_scenario(self, qp):
+        if not self.scn:
+            return
+        col = {'대기': MAP_C['muted'], '진행 중': MAP_C['target'], '통과': MAP_C['passed'],
+               '실패: 추락': '#d4473f', '실패: 충돌': '#d4473f', '미시험': MAP_C['muted']}
+        hz = sorted(self.scn['hazards'], key=lambda h: h['rect'][0])
+        w, rh = 300, 22
+        x0, y0 = self.width() - w - 40, 10
+        qp.setPen(QtCore.Qt.NoPen)
+        qp.setBrush(QtGui.QColor(28, 32, 36, 225))
+        qp.drawRoundedRect(QtCore.QRectF(x0, y0, w, 26 + rh * len(hz)), 5, 5)
+        qp.setFont(QtGui.QFont('DejaVu Sans', 8))
+        qp.setPen(QtGui.QColor(MAP_C['muted']))
+        qp.drawText(int(x0 + 10), int(y0 + 16), '시나리오 (실시간 추정 · 정본은 판정기)')
+        for i, h in enumerate(hz):
+            st = self.scn_state[h['id']]
+            y = y0 + 26 + i * rh
+            qp.setBrush(QtGui.QColor(col.get(st['status'], MAP_C['muted'])))
+            qp.setPen(QtCore.Qt.NoPen)
+            qp.drawEllipse(QtCore.QPointF(x0 + 16, y + 9), 5, 5)
+            qp.setFont(QtGui.QFont('DejaVu Sans', 9, QtGui.QFont.Bold))
+            qp.setPen(QtGui.QColor(MAP_C['ink']))
+            qp.drawText(int(x0 + 28), int(y + 13), f"{h['id']} {h.get('name', h['type'])}")
+            qp.setFont(QtGui.QFont('DejaVu Sans', 9))
+            qp.setPen(QtGui.QColor(col.get(st['status'], MAP_C['muted'])))
+            extra = f"  최소 이격 {st['clear']:.2f} m" if st['clear'] is not None else ''
+            qp.drawText(int(x0 + 128), int(y + 13), st['status'] + extra)
+        # 구간 경계(진입·통과선)
+        sw = self.scn.get('sidewalk', {})
+        vl, vr = sw.get('y_left', 3.0), sw.get('y_right', -3.0)
+        for h in hz:
+            for uu, dash in ((h['start_x'], QtCore.Qt.DotLine), (h['pass_x'], QtCore.Qt.DashLine)):
+                qp.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 110), 1, dash))
+                qp.drawLine(self.to_px(*self.course_to_world(uu, vr - 1.0)),
+                            self.to_px(*self.course_to_world(uu, vl + 1.0)))
+            cu = (h['rect'][0] + h['rect'][1]) / 2
+            p = self.to_px(*self.course_to_world(cu, vl + 0.6))
+            self.label(qp, p + QtCore.QPointF(-8, 0), h['id'], '#0d1117', bold=True, halo=True)
 
     # ---- 좌표
     def setup_xf(self):
@@ -540,6 +639,8 @@ class MapView(QtWidgets.QWidget):
             self.draw_rect(qp, r, QtGui.QColor(MAP_C['sidewalk']))
         for r in self.obstacles:
             self.draw_rect(qp, r, QtGui.QColor(MAP_C['obstacle']))
+        for r in self.pits:
+            self.draw_rect(qp, r, QtGui.QColor(MAP_C['pit']))
         qp.setRenderHint(QtGui.QPainter.Antialiasing, True)
         # 1 m 격자
         qp.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 28), 1))
@@ -610,6 +711,7 @@ class MapView(QtWidgets.QWidget):
             qp.setBrush(QtGui.QColor('#ffffff'))
             qp.drawPolygon(tri)
             qp.restore()
+        self.draw_scenario(qp)
         self.draw_overlay(qp, tgt, done)
         qp.end()
 
@@ -668,7 +770,8 @@ class MapView(QtWidgets.QWidget):
             y += 17
         # 범례 + 축척
         leg = [(MAP_C['route'], '경로'), (MAP_C['trail'], '궤적'), (MAP_C['target'], '목표 노드'),
-               (MAP_C['passed'], '지나온 노드'), (MAP_C['sidewalk'], '보도'), (MAP_C['obstacle'], '장애물')]
+               (MAP_C['passed'], '지나온 노드'), (MAP_C['sidewalk'], '보도'), (MAP_C['obstacle'], '장애물'),
+               (MAP_C['pit'], '구덩이')]
         qp.setFont(QtGui.QFont('DejaVu Sans', 8))
         lx = self.width() - 10
         ly = self.height() - 12

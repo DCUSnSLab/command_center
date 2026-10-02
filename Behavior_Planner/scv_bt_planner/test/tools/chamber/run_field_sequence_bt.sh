@@ -89,6 +89,9 @@ print(f"export SCV_GOAL_X={r['goal'][0]} SCV_GOAL_Y={r['goal'][1]} SCV_REACH_D=1
 print(f"export SCV_SPAWN_YAW=${{SCV_SPAWN_YAW:-{s['yaw_to_route']}}}")
 print(f"export SCV_SPAWN_X={s['x']} SCV_SPAWN_Y={s['y']}")
 print(f"export RC_DIST=${{RC_DIST:-{s['rc_distance_m']}}}")
+# 연속 위험 시나리오(scenario_world.py): 판정기가 구간별로 판정한다
+if d.get('scenario'):
+    print(f"export SCV_SCENARIO=${{SCV_SCENARIO:-{d['scenario']}}}")
 # 존(SCV_ZONES)은 일부러 건드리지 않는다 — 설계 파일이 GNSS 시나리오까지
 # 정하면 기준선 런과 열화 런의 구분이 사라진다. 호출자가 고른다.
 PYEOF

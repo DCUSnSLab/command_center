@@ -189,6 +189,7 @@ if [ "$PED" = "1" ]; then
 fi
 JUDGE_ARGS=""
 [ -n "${SCV_ZONES:-}" ] && JUDGE_ARGS="--zones $SCV_ZONES"
+[ -n "${SCV_SCENARIO:-}" ] && JUDGE_ARGS="$JUDGE_ARGS --scenario $SCV_SCENARIO"
 timeout $((DUR + 30)) python3 $G/gz_judge.py "$RESULT" $DUR $JUDGE_ARGS > "$LOGD/judge.log" 2>&1
 RC=$?
 
