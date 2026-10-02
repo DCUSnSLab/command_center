@@ -22,7 +22,7 @@ case "${1:-start}" in
       # 창이 뜨면 Gazebo 를 왼쪽 위(1380x500)로 줄이고, 오른쪽 540 px 에 BT 뷰어·왼쪽 아래에 경로 지도를 띄운 뒤 녹화 시작
       for _ in $(seq 1 30); do xdotool search --name "^Gazebo$" >/dev/null 2>&1 && break; sleep 1; done
       for w in $(xdotool search --name "^Gazebo$" 2>/dev/null); do xdotool windowsize $w 1380 500 windowmove $w 0 29 2>/dev/null; done
-      python3 ~/bt_chamber/bt_viewer.py --port 1667 --geometry 540x1000+1380+29 --design "$DESIGN" --map-geometry 1380x500+0+529 > ~/bt_chamber/bt_viewer.log 2>&1 & BV=$!
+      python3 ~/bt_chamber/bt_viewer.py --port 1667 --geometry 540x1000+1380+29 --design "$(cat ~/bt_chamber/current_design 2>/dev/null || echo "$DESIGN")" --map-geometry 1380x500+0+529 > ~/bt_chamber/bt_viewer.log 2>&1 & BV=$!
       # 로봇(scv) 스폰 뒤 GUI 카메라를 로봇 추적으로 (gazebo 11 에는 gz model -l 이 없다 — -m scv -i 로 존재 확인) — 기본 시점은 멀어서 로봇이 점으로 보인다(10/01 녹화 확인)
       ( for _ in $(seq 1 40); do gz model -m scv -i >/dev/null 2>&1 && break; sleep 2; done
         gz camera -c gzclient_camera -f scv >/dev/null 2>&1 ) &

@@ -1,6 +1,6 @@
 # V100 Pod 용 BT 챔버 A/B 환경 — source 해서 쓴다
 export SCV_WS=$HOME/vehicle_ws
-export SCV_DESIGN=$HOME/bt_chamber/chamber_20260803.pod.design.json
+export SCV_DESIGN=${SCV_DESIGN:-$HOME/bt_chamber/chamber_20260803.pod.design.json}
 export SCV_ZONES=$HOME/scv_ws/tools/gazebo/zones/rtk_clean.yaml
 export SCV_URDF=$HOME/scv_ws/tools/gazebo/scv_sim_robot_chamber_gpu.urdf   # gpu_ray 라이다
 export SCV_VGL=1 VGL_DISPLAY=egl                                           # OGRE 렌더 → V100(EGL)
