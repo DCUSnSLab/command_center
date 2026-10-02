@@ -693,7 +693,8 @@ class MapView(QtWidgets.QWidget):
                 qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['target']), 3))
                 qp.setBrush(QtCore.Qt.NoBrush)
                 qp.drawEllipse(p, 13, 13)
-            self.label(qp, p + QtCore.QPointF(11, -9), nid, '#0d1117', bold=True, halo=True)
+            fm = QtGui.QFontMetrics(QtGui.QFont('DejaVu Sans', 9, QtGui.QFont.Bold))
+            self.label(qp, p + QtCore.QPointF(-fm.horizontalAdvance(nid) / 2, -11), nid, '#0d1117', bold=True, halo=True)
         # 목표 연결선 + 차량
         if self.pose:
             x, y, yaw = self.pose
