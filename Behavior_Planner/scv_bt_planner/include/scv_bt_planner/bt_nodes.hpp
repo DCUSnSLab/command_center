@@ -5,6 +5,7 @@
 // 매 틱 입력을 채운 뒤 트리를 한 번 돌리고 출력을 소비한다. RUNNING 은 쓰지 않는다.
 #pragma once
 
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -57,6 +58,8 @@ struct Context {
   HazardWaypoints::SegmentClear hazard_segment_clear; // 절대 UTM 직선이 통행 가능한가
   std::optional<std::pair<double, double>> pose_utm;   // 차량 절대 UTM (datum 수신 후)
   std::vector<std::string> hazard_log;                // 이번 틱의 재배치·건너뜀 기록(노드가 로그로 출력)
+  double hazard_seen_t = -1e9;                        // 판정 범위 안에서 위험(재배치·빈 곳 없음)을 마지막으로 본 시각(steady)
+  bool hazardRecent(double window = 3.0) const { return now - hazard_seen_t <= window; }
 
   // ---------- 출력 (트리가 채우고 ROS 노드가 소비) ----------
   bool request_stop = false;
@@ -147,7 +150,12 @@ public:
             BT::InputPort<bool>("allow_skip", true, "빈 곳이 없으면 현재 목표를 건너뛴다(최종 노드 제외)")};
   }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  std::string last_hold_;   // 같은 '정지 유지' 기록을 틱마다 반복하지 않는다
+  double last_hold_pause_t_ = -1e9;
+  std::map<std::string, int> skip_streak_;   // 노드별 연속 회피 불가 판정 틱 수
+  int hold_persist_ticks_ = 6;               // 0.3 s @20 Hz
 };
 
 class Stop : public BT::SyncActionNode {

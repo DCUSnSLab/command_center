@@ -91,12 +91,15 @@ private:
     // 위험 지대 경유점 재배치(AvoidHazardWaypoints 노드가 쓴다). 코스트맵 값 >= hazard.lethal 을 위험으로 본다.
     // 50 = SMPPI obstacle_cost_threshold 0.5 와 같은 기준. 구덩이는 코스트맵에서 100 이 되지 않는다 —
     // 가까운 가장자리만 ~61 이고 내부는 0(10/02 챔버 실측, 라이다가 구덩이 안을 못 본다).
-    declare_parameter("hazard.enable", true);
+    // 기본 비활성(opt-in): 챔버 국소 코스트맵에 위험물 없는 경로 노드 주변에도 지속적인 위험 셀이 있어
+    // 정상 노드를 건너뛴다(10/02 scen10-11: H00~H03). 인지·코스트맵 쪽 표현이 정리되기 전에는 시나리오 시험에서만 켠다.
+    declare_parameter("hazard.enable", false);
     declare_parameter("hazard.lethal", 50);
     // 위험 셀 뒤쪽(진행 방향) 그림자 길이. 구덩이는 가까운 가장자리만 보이고 안쪽은 라이다 그림자라 코스트 0 —
     // 보이는 가장자리 뒤 이 길이까지 위험으로 본다(10/02 scen6: 그림자 없이 1.0 m 비켜 놓은 경유점이 구덩이를 스쳐 추락).
     declare_parameter("hazard.shadow_m", 1.2);
     declare_parameter("hazard.reach_m", 0.6);   // 재배치 경유점이 목표일 때 도달 임계 [m]
+    declare_parameter("hazard.slow_v", 0.5);    // 위험물 감지 중 최고 속도 [m/s]
     declare_parameter("join_pass_radius_m", 2.0);
     declare_parameter("realign_on_engage", true);
     declare_parameter("realign_manual_move_m", 2.0);
@@ -145,6 +148,7 @@ private:
     if (hazard_enable_) {
       hazard_shadow_m_ = get_parameter("hazard.shadow_m").as_double();
       hazard_reach_m_ = get_parameter("hazard.reach_m").as_double();
+      hazard_slow_v_ = get_parameter("hazard.slow_v").as_double();
       ctx_.hazard_blocked = [this](double ux, double uy) { return shadowBlocked(ux, uy); };
       ctx_.hazard_segment_clear = [this](double x0, double y0, double x1, double y1) {
         return snapSegmentClear(x0, y0, x1, y1);
@@ -611,13 +615,16 @@ private:
     const PathNode* tgt = ctx_.target();
     const auto toff = tgt ? ctx_.hazard.offset(tgt->id) : std::make_pair(0.0, 0.0);
     const bool shifted = (toff.first != 0.0 || toff.second != 0.0);
+    const bool hazard_slow = hazard_enable_ && ctx_.hazardRecent();
     const std::string key = std::to_string(node_type) + "|" + ctx_.overlay + "|" + (is_final ? "F" : "V") +
-                            (shifted ? "|S" : "");
+                            (shifted ? "|S" : "") + (hazard_slow ? "|H" : "");
     if (key == last_behavior_key_ && !creep_active_) return;
     if (creep_active_) return;   // creep 중에는 creep_off 에서 복원
     std::string desc; int code = 0;
     ParamMap p = profiles_.compute(node_type, ctx_.overlay, &desc, &code);
     p["goal_reached_threshold"] = is_final ? goal_final_ : (shifted ? std::min(goal_via_, hazard_reach_m_) : goal_via_);
+    // 위험물 감지 중 감속 — 제어기가 재배치 경유점을 따라 꺾을 시간을 번다
+    if (hazard_slow) p["max_linear_velocity"] = std::min(p["max_linear_velocity"], hazard_slow_v_);
     std::string why;
     if (!Profiles::validate(p, &why)) {
       RCLCPP_ERROR(get_logger(), "invalid behavior params (%s): %s", key.c_str(), why.c_str());
@@ -626,7 +633,7 @@ private:
     sendMppiParams(p, code, desc);
     RCLCPP_INFO(get_logger(), "[BEHAVIOR] %s type=%d overlay='%s' final=%d max_v=%.2f reach=%.2f%s", desc.c_str(), node_type,
                 ctx_.overlay.c_str(), is_final ? 1 : 0, p["max_linear_velocity"], p["goal_reached_threshold"],
-                shifted ? " (hazard-shifted target)" : "");
+                shifted ? " (hazard-shifted target)" : (hazard_slow ? " (hazard ahead)" : ""));
     last_behavior_key_ = key;
     last_params_ = p; last_code_ = code; last_desc_ = desc;
   }
@@ -673,6 +680,9 @@ private:
       status_pub_->publish(s);
       if (state == "NORMAL") RCLCPP_INFO(get_logger(), "[BLOCKED] cleared -> NORMAL");
       else RCLCPP_WARN(get_logger(), "[BLOCKED] state -> %s", state.c_str());
+    } else if (a == "creep_on" && hazard_enable_ && ctx_.hazardRecent()) {
+      // 위험물(구덩이·장애물) 앞 정체에서 저속 전진은 위험물 쪽으로 밀어 넣는다(10/02 scen8 추락) — 하지 않는다.
+      RCLCPP_WARN(get_logger(), "[BLOCKED] creep suppressed — hazard ahead (wait for assist)");
     } else if (a == "creep_on") {
       ParamMap p = last_params_.empty() ? profiles_.compute(ctx_.effectiveNodeType(), ctx_.overlay) : last_params_;
       p["max_linear_velocity"] = ctx_.blocked.params().creep_speed;
@@ -814,10 +824,11 @@ private:
   bool join_nearest_ = false, join_check_approach_ = true, realign_on_engage_ = true;
   double join_max_approach_ = 40.0, join_clear_half_w_ = 0.45, join_pass_radius_ = 2.0, realign_move_m_ = 2.0;
   int join_clear_lethal_ = 90;
-  bool hazard_enable_ = true;
+  bool hazard_enable_ = false;
   int hazard_lethal_ = 50;
   double hazard_shadow_m_ = 1.2;
   double hazard_reach_m_ = 0.6;
+  double hazard_slow_v_ = 0.5;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr snap_grid_;
   bool snap_ok_ = false;
   double snap_tx_ = 0.0, snap_ty_ = 0.0, snap_c_ = 1.0, snap_s_ = 0.0;

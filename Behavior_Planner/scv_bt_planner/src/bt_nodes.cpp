@@ -1,6 +1,7 @@
 #include "scv_bt_planner/bt_nodes.hpp"
 
 #include <cstdio>
+#include <map>
 
 #include <cmath>
 #include <limits>
@@ -206,12 +207,20 @@ BT::NodeStatus AvoidHazardWaypoints::tick()
   const int cur = ctx_.path.currentIndex();
   std::vector<PathNode> upcoming(nodes.begin() + cur, nodes.end());
   const PathNode* prev = cur > 0 ? &nodes[cur - 1] : nullptr;
-  const auto pls = ctx_.hazard.plan(upcoming, prev, ctx_.pose_utm->first, ctx_.pose_utm->second,
-                                    ctx_.hazard_blocked, ctx_.hazard_segment_clear);
+  const auto pls = ctx_.hazard.plan(upcoming, prev, ctx_.pose_utm->first, ctx_.pose_utm->second, ctx_.hazard_blocked);
   bool republish = false;
+  // 회피 불가(빈 곳 없음·닿을 수 없음) 판정은 hold_persist_ticks 틱 연속일 때만 행동한다 — 국소 코스트맵 잡음
+  // (차량 뒤·감지 경계 셀)에 위험물 없는 노드를 건너뛰던 것(10/02 scen10: H00~H03)을 막는다.
+  std::map<std::string, int> streak;
+  for (const auto& pl : pls) {
+    if (pl.skip && !pl.out_of_range) streak[pl.id] = skip_streak_.count(pl.id) ? skip_streak_[pl.id] + 1 : 1;
+  }
+  skip_streak_ = streak;
+  int unavoidable = -1;   // 판정 범위 안 첫 회피 불가 노드(지속 확인됨)
   for (size_t i = 0; i < pls.size(); ++i) {
     const auto& pl = pls[i];
     const PathNode& nd = upcoming[i];
+    if (!pl.out_of_range && (pl.skip || pl.dx != 0.0 || pl.dy != 0.0)) ctx_.hazard_seen_t = ctx_.now;
     if (pl.changed && !pl.skip) {
       char buf[200];
       std::snprintf(buf, sizeof(buf), "shift %s by (%+.2f, %+.2f) m -> at (%.2f, %.2f)", pl.id.c_str(), pl.dx, pl.dy,
@@ -219,18 +228,45 @@ BT::NodeStatus AvoidHazardWaypoints::tick()
       ctx_.hazard_log.push_back(pl.dx == 0.0 && pl.dy == 0.0 ? "restore " + pl.id + " (clear)" : buf);
       republish = true;
     }
-    if (i == 0 && pl.skip && !pl.out_of_range) {
-      if (allow_skip && !ctx_.path.isFinalNode()) {
-        ctx_.hazard_log.push_back("skip " + pl.id + ": lethal, no free spot within " +
-                                  std::to_string(hp.max_shift).substr(0, 4) + " m");
-        ctx_.path.markGoalCompleted(pl.id);
-        ctx_.path.advanceToNextNode();
-        ctx_.goal_distance.reset();
-        republish = true;
-        break;   // 다음 틱에 새 목표 기준으로 다시 본다
-      }
-      ctx_.hazard_log.push_back("target " + pl.id + " lethal, no free spot (final or skip disabled) — kept");
+    if (unavoidable < 0 && pl.skip && !pl.out_of_range && skip_streak_[pl.id] >= hold_persist_ticks_) {
+      unavoidable = static_cast<int>(i);
     }
+  }
+  if (unavoidable == 0) {
+    // 현재 목표가 회피 불가: 다음 목표(재배치 반영)까지 직선이 통행 가능하면 건너뛰고, 아니면 정지 유지.
+    // (10/02 scen8: 건너뛴 뒤 위험물 뒤 노드로 직진해 구덩이 진입)
+    bool next_clear = false;
+    if (upcoming.size() > 1) {
+      const auto off = ctx_.hazard.offset(upcoming[1].id);
+      next_clear = ctx_.hazard_segment_clear(ctx_.pose_utm->first, ctx_.pose_utm->second,
+                                             upcoming[1].x + off.first, upcoming[1].y + off.second);
+    }
+    if (allow_skip && !ctx_.path.isFinalNode() && next_clear) {
+      ctx_.hazard_log.push_back("skip " + pls[0].id + ": lethal, no reachable free spot; path to " + upcoming[1].id +
+                                " clear");
+      ctx_.path.markGoalCompleted(pls[0].id);
+      ctx_.path.advanceToNextNode();
+      ctx_.goal_distance.reset();
+      skip_streak_.clear();
+      last_hold_.clear();
+      republish = true;
+      unavoidable = -1;
+    }
+  }
+  if (unavoidable >= 0) {
+    // 앞쪽 노드가 회피 불가: 거기 닿기 전에 세운다(10/02 scen10: 그 노드가 현재 목표가 될 때까지 기다리다 늦었다).
+    const std::string& hid = pls[unavoidable].id;
+    if (last_hold_ != hid) {
+      ctx_.hazard_log.push_back("hold before " + hid + ": lethal, no reachable free spot — pause controller, "
+                                "creep suppressed (assist via blocked escalation)");
+      last_hold_ = hid;
+    }
+    if (ctx_.now - last_hold_pause_t_ >= 0.5) {
+      ctx_.pause_requests.push_back({1.0, hid, "hazard hold: no reachable avoidance"});
+      last_hold_pause_t_ = ctx_.now;
+    }
+  } else {
+    last_hold_.clear();
   }
   if (republish) ctx_.waypoints_published = false;
   return BT::NodeStatus::SUCCESS;

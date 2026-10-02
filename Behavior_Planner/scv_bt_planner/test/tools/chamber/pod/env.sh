@@ -9,4 +9,4 @@ export PATH=$HOME/.local/bin:$PATH                                          # to
 export RCUTILS_LOGGING_BUFFERED_STREAM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/bt_chamber/fastdds_udp_only.xml   # SHM 전송 비활성(UDP 만) — 공유 /dev/shm 잔재 없음
 export SCV_DOMAIN=97   # 96 은 누수된 utm latched pub 참여자 13개가 점유해 디스커버리 불능(10/01) — 새 도메인
-export SCV_BT_ARGS="-p groot2_port:=1667"   # BT 뷰어(bt_viewer.py)용 Groot2 ZMQ 서버(1667/1668). simple 런에선 BT 미기동
+export SCV_BT_ARGS="-p groot2_port:=1667 ${SCV_BT_EXTRA:-}"   # BT 뷰어(bt_viewer.py)용 Groot2 ZMQ 서버(1667/1668). simple 런에선 BT 미기동
