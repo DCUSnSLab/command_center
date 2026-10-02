@@ -41,3 +41,10 @@ colcon test --packages-select scv_bt_planner && colcon test-result --verbose
 - node_type 12/13 재계획 트리거(path_availability, 인지 의존) — 이번 범위 밖.
 - 후방 목표 자동 후진(`reverse.allow_behind_goal`) — 판정 미구현(초기 OFF 권장).
 - traffic_light(node_type 10) 안전 정지 — 인지 미사용 방침에 따라 미이식.
+
+## 실시간 BT 뷰어 (`test/tools/bt_viewer.py`)
+`groot2_port` 파라미터를 켜면(`-p groot2_port:=1667`) BT.CPP Groot2Publisher(ZMQ 1667/1668)가 열린다.
+`bt_viewer.py --port 1667` 은 Groot2 앱 없이 같은 프로토콜로 트리를 받아 **마지막 완료 틱에서 실제로 거친 노드**를
+SUCCESS/FAILURE 색으로 그린다(전이 기록 TOGGLE_RECORDING/GET_TRANSITIONS 사용 — 결정 트리는 틱마다 resetStatus 되므로
+STATUS 폴링으로는 이번 틱 경로를 구분할 수 없다). 하단 패널은 최신 bt.log 꼬리(제어 모드·목표 노드·행동·차단 상태)를
+읽어 ROS 참여자를 만들지 않는다. 의존성: PyQt5, pyzmq.
