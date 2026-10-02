@@ -524,7 +524,7 @@ class MapView(QtWidgets.QWidget):
         c, s = math.cos(yaw), math.sin(yaw)
         pts = [(x + u * c - v * s, y + u * s + v * c)
                for u in (-L / 2, 0, L / 2) for v in (-W / 2, 0, W / 2)]
-        for h in sorted(self.scn['hazards'], key=lambda h: h['rect'][0]):
+        for h in sorted(self.scn['hazards'], key=lambda h: h['start_x']):
             st = self.scn_state[h['id']]
             if st['status'] in ('통과', '실패: 추락', '실패: 충돌', '미시험'):
                 continue
@@ -533,17 +533,22 @@ class MapView(QtWidgets.QWidget):
                 continue
             if x < h['start_x']:
                 continue
-            r = h['rect']
-            d = min(math.hypot(max(r[0] - px, 0, px - r[1]), max(r[2] - py, 0, py - r[3])) for px, py in pts)
-            st['clear'] = d if st['clear'] is None else min(st['clear'], d)
             st['status'] = '진행 중'
-            pen = max((min(px - r[0], r[1] - px, py - r[2], r[3] - py)
-                       if r[0] <= px <= r[1] and r[2] <= py <= r[3] else 0.0) for px, py in pts)
-            if z < -0.10 or (pen > self.scn.get('pit_fail_penetration', 0.15) and h['type'] == 'pit'):
-                st['status'], self.scn_failed = '실패: 추락', True
-            elif d <= 0.0 and h['type'] == 'obstacle':
-                st['status'], self.scn_failed = '실패: 충돌', True
-            elif x >= h['pass_x']:
+            items = h.get('items') or [dict(type=h['type'], rect=h['rect'])]
+            for it in items:
+                r = it['rect']
+                d = min(math.hypot(max(r[0] - px, 0, px - r[1]), max(r[2] - py, 0, py - r[3])) for px, py in pts)
+                pen = max((min(px - r[0], r[1] - px, py - r[2], r[3] - py)
+                           if r[0] <= px <= r[1] and r[2] <= py <= r[3] else 0.0) for px, py in pts)
+                st['clear'] = d if st['clear'] is None else min(st['clear'], d)
+                if it['type'] == 'pit' and (pen > self.scn.get('pit_fail_penetration', 0.15)
+                                            or (z < -0.10 and d < 0.8)):
+                    st['status'], self.scn_failed = '실패: 추락', True
+                elif it['type'] == 'obstacle' and d <= 0.0:
+                    st['status'], self.scn_failed = '실패: 충돌', True
+                if self.scn_failed:
+                    break
+            if st['status'] == '진행 중' and x >= h['pass_x']:
                 st['status'] = '통과'
 
     def _frame(self):
@@ -566,8 +571,8 @@ class MapView(QtWidgets.QWidget):
             return
         col = {'대기': MAP_C['muted'], '진행 중': MAP_C['target'], '통과': MAP_C['passed'],
                '실패: 추락': '#d4473f', '실패: 충돌': '#d4473f', '미시험': MAP_C['muted']}
-        hz = sorted(self.scn['hazards'], key=lambda h: h['rect'][0])
-        w, rh = 300, 22
+        hz = sorted(self.scn['hazards'], key=lambda h: h['start_x'])
+        w, rh = 330, 22
         x0, y0 = self.width() - w - 40, 10
         qp.setPen(QtCore.Qt.NoPen)
         qp.setBrush(QtGui.QColor(28, 32, 36, 225))
@@ -583,11 +588,11 @@ class MapView(QtWidgets.QWidget):
             qp.drawEllipse(QtCore.QPointF(x0 + 16, y + 9), 5, 5)
             qp.setFont(QtGui.QFont('DejaVu Sans', 9, QtGui.QFont.Bold))
             qp.setPen(QtGui.QColor(MAP_C['ink']))
-            qp.drawText(int(x0 + 28), int(y + 13), f"{h['id']} {h.get('name', h['type'])}")
+            qp.drawText(int(x0 + 28), int(y + 13), f"{h['id']} {h.get('name', h['id'])}")
             qp.setFont(QtGui.QFont('DejaVu Sans', 9))
             qp.setPen(QtGui.QColor(col.get(st['status'], MAP_C['muted'])))
-            extra = f"  최소 이격 {st['clear']:.2f} m" if st['clear'] is not None else ''
-            qp.drawText(int(x0 + 128), int(y + 13), st['status'] + extra)
+            extra = f"  이격 {st['clear']:.2f} m" if st['clear'] is not None else ''
+            qp.drawText(int(x0 + 175), int(y + 13), st['status'] + extra)
         # 구간 경계(진입·통과선)
         sw = self.scn.get('sidewalk', {})
         vl, vr = sw.get('y_left', 3.0), sw.get('y_right', -3.0)
@@ -596,7 +601,8 @@ class MapView(QtWidgets.QWidget):
                 qp.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 110), 1, dash))
                 qp.drawLine(self.to_px(*self.course_to_world(uu, vr - 1.0)),
                             self.to_px(*self.course_to_world(uu, vl + 1.0)))
-            cu = (h['rect'][0] + h['rect'][1]) / 2
+            rs = [it['rect'] for it in (h.get('items') or [h])]
+            cu = (min(r[0] for r in rs) + max(r[1] for r in rs)) / 2
             p = self.to_px(*self.course_to_world(cu, vl + 0.6))
             self.label(qp, p + QtCore.QPointF(-8, 0), h['id'], '#0d1117', bold=True, halo=True)
 
