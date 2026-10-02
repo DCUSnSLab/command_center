@@ -48,3 +48,6 @@ colcon test --packages-select scv_bt_planner && colcon test-result --verbose
 SUCCESS/FAILURE 색으로 그린다(전이 기록 TOGGLE_RECORDING/GET_TRANSITIONS 사용 — 결정 트리는 틱마다 resetStatus 되므로
 STATUS 폴링으로는 이번 틱 경로를 구분할 수 없다). 하단 패널은 최신 bt.log 꼬리(제어 모드·목표 노드·행동·차단 상태)를
 읽어 ROS 참여자를 만들지 않는다. 의존성: PyQt5, pyzmq.
+`--design <챔버 설계 JSON>` 을 주면 두 번째 창(경로 지도)을 띄운다: 월드의 보도 띠·장애물, 경로 그래프 노드·링크,
+지나온 노드·현재 목표 노드, 차량 위치·자세·궤적, 속도·경로 이탈·잔여 거리. 차량 위치는 Gazebo 자체 전송
+(`gz topic -e /gazebo/<world>/pose/info -u`)에서 읽어 ROS/DDS 를 거치지 않는다.

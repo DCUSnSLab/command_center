@@ -12,8 +12,13 @@ GET_TRANSITIONS('t') 로 전이를 받아 루트 RUNNING→완료 구간 하나�
 정보 패널은 DDS 참여자를 새로 만들지 않도록 ROS 구독 대신 가장 최근 bt.log 꼬리를 읽는다
 (Pod 에서 런 중 새 참여자가 간헐적으로 디스커버리되지 않는 문제를 피한다).
 
+지도 패널(--design 지정 시 두 번째 창): 챔버 설계 JSON 의 월드(보도 띠·장애물)와 경로 그래프 위에 차량 위치·자세·궤적,
+현재 목표 노드, 지나온 노드를 그린다. 차량 위치는 Gazebo 자체 전송(`gz topic -e /gazebo/<world>/pose/info -u`)에서
+읽는다 — ROS/DDS 를 거치지 않는다. 목표 노드는 bt.log 꼬리에서 읽는다(simple 런이면 behavior.log 로 대체).
+
 사용:
   bt_viewer.py [--host 127.0.0.1] [--port 1667] [--log-glob '~/scv_sim/bt_ab/**/bt.log'] [--geometry 540x1000+1380+29]
+               [--design chamber.design.json --map-geometry 1380x500+0+529]
 BT 쪽: bt_planner_node --ros-args -p groot2_port:=1667   (서버 1667, 퍼블리셔 1668)
 """
 import argparse
@@ -178,7 +183,7 @@ class BtView(QtWidgets.QWidget):
         self.info = None
         self.last_try = 0.0
         self.setWindowTitle('SCV BT Monitor')
-        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.FramelessWindowHint)
         self.font_main = QtGui.QFont('DejaVu Sans', 10)
         self.font_small = QtGui.QFont('DejaVu Sans', 8)
         self.font_mono = QtGui.QFont('DejaVu Sans Mono', 8)
@@ -388,20 +393,325 @@ class BtView(QtWidgets.QWidget):
             y += 13
 
 
+# ---------------------------------------------------------------- 지도 패널
+MAP_C = {
+    'road': '#3b4148', 'sidewalk': '#c9ccd1', 'obstacle': '#8a5a35', 'route': '#2f81f7', 'node': '#ffffff',
+    'passed': '#2f9e57', 'target': '#e5a23a', 'trail': '#d4473f', 'vehicle_auto': '#2f81f7',
+    'vehicle_rc': '#e5a23a', 'vehicle_idle': '#8b949e', 'ink': '#e6e8ea', 'muted': '#8b949e', 'panel': '#1c2024',
+}
+POSE_RE = re.compile(r'pose \{ name: "scv" id: \d+ position \{ x: (\S+) y: (\S+) z: \S+ \} '
+                     r'orientation \{ x: (\S+) y: (\S+) z: (\S+) w: (\S+) \}')
+TIME_RE = re.compile(r'^time \{ sec: (\d+) nsec: (\d+) \}')
+
+
+def load_world(path):
+    """월드 SDF → (보도 rect 목록, 장애물 rect 목록, 월드 이름). rect = (x, y, sx, sy, yaw)."""
+    root = ET.parse(path).getroot()
+    world = root.find('world')
+    sidewalks, obstacles = [], []
+    for m in world.findall('model'):
+        name = m.get('name', '')
+        pose = [float(v) for v in (m.findtext('pose') or '0 0 0 0 0 0').split()]
+        size = m.find('.//collision/geometry/box/size')
+        if size is None:
+            continue
+        sx, sy, _ = (float(v) for v in size.text.split())
+        rect = (pose[0], pose[1], sx, sy, pose[5] if len(pose) > 5 else 0.0)
+        if name.startswith('sw'):
+            sidewalks.append(rect)
+        elif name.startswith('obs'):
+            obstacles.append(rect)
+    return sidewalks, obstacles, world.get('name', 'default')
+
+
+def load_route(path):
+    g = __import__('json').load(open(path))
+    pos = {n['ID']: (n['UtmInfo']['Easting'], n['UtmInfo']['Northing']) for n in g['Node']}
+    nxt = {l['FromNodeID']: l['ToNodeID'] for l in g['Link']}
+    starts = set(nxt) - set(nxt.values())
+    order = [next(iter(starts))] if starts else [g['Node'][0]['ID']]
+    while order[-1] in nxt and nxt[order[-1]] not in order:
+        order.append(nxt[order[-1]])
+    return [(nid, *pos[nid]) for nid in order]
+
+
+class MapView(QtWidgets.QWidget):
+    def __init__(self, design_path, bt_view):
+        super().__init__()
+        d = __import__('json').load(open(os.path.expanduser(design_path)))
+        self.sidewalks, self.obstacles, self.world = load_world(d['world'])
+        self.route = load_route(d['graph'])
+        sp = d.get('spawn') or {}
+        self.spawn = (sp['x'], sp['y']) if 'x' in sp else None
+        self.bt = bt_view
+        self.pose = None             # (x, y, yaw)
+        self.sim_t = None
+        self.trail = []              # (t, x, y)
+        self.speed = 0.0
+        self.buf = b''
+        self.setWindowTitle('SCV Route Map')
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.FramelessWindowHint)
+        pts = [(x, y) for _, x, y in self.route] + ([self.spawn] if self.spawn else [])
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        pad = 3.5
+        self.bounds = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+        self.proc = None
+        self.start_stream()
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(100)
+
+    # ---- 위치 스트림 (Gazebo transport)
+    def start_stream(self):
+        self.proc = QtCore.QProcess(self)
+        self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        self.proc.readyRead.connect(self.on_data)
+        self.proc.start('gz', ['topic', '-e', f'/gazebo/{self.world}/pose/info', '-u'])
+        self.stream_started = time.monotonic()
+
+    def on_data(self):
+        self.buf += bytes(self.proc.readAll())
+        if b'\n' not in self.buf:
+            return
+        lines = self.buf.split(b'\n')
+        self.buf = lines[-1]
+        for raw in reversed(lines[:-1]):
+            line = raw.decode('utf-8', 'replace')
+            m = POSE_RE.search(line)
+            if not m:
+                continue
+            x, y, qx, qy, qz, qw = map(float, m.groups())
+            yaw = __import__('math').atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            tm = TIME_RE.search(line)
+            t = int(tm.group(1)) + int(tm.group(2)) * 1e-9 if tm else None
+            self.pose, self.sim_t = (x, y, yaw), t
+            if t is not None:
+                if not self.trail or t - self.trail[-1][0] >= 0.25:
+                    if self.trail and t > self.trail[-1][0]:
+                        lt, lx, ly = self.trail[-1]
+                        self.speed = __import__('math').hypot(x - lx, y - ly) / (t - lt)
+                    if self.trail and t < self.trail[-1][0]:      # 시뮬 재시작
+                        self.trail = []
+                    self.trail.append((t, x, y))
+                    self.trail = self.trail[-2400:]
+            break
+
+    def tick(self):
+        if self.proc.state() == QtCore.QProcess.NotRunning and time.monotonic() - self.stream_started > 2.0:
+            self.start_stream()
+        self.update()
+
+    # ---- 좌표
+    def setup_xf(self):
+        x0, x1, y0, y1 = self.bounds
+        w, h = self.width(), self.height()
+        self.s = min(w / (x1 - x0), h / (y1 - y0))
+        self.cx, self.cy = (x0 + x1) / 2, (y0 + y1) / 2
+
+    def to_px(self, x, y):
+        return QtCore.QPointF(self.width() / 2 + (x - self.cx) * self.s, self.height() / 2 - (y - self.cy) * self.s)
+
+    def draw_rect(self, qp, r, color):
+        x, y, sx, sy, yaw = r
+        qp.save()
+        qp.translate(self.to_px(x, y))
+        qp.rotate(-__import__('math').degrees(yaw))
+        qp.fillRect(QtCore.QRectF(-sx * self.s / 2, -sy * self.s / 2, sx * self.s, sy * self.s), color)
+        qp.restore()
+
+    def target_index(self):
+        inf = self.bt.info or {}
+        ids = [nid for nid, _, _ in self.route]
+        if inf.get('target') and inf['target'][0] in ids:
+            return ids.index(inf['target'][0])
+        if inf.get('join') and inf['join'][1] in ids:
+            return ids.index(inf['join'][1])
+        return None
+
+    # ---- 그리기
+    def paintEvent(self, _):
+        math = __import__('math')
+        qp = QtGui.QPainter(self)
+        qp.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.setup_xf()
+        qp.fillRect(self.rect(), QtGui.QColor(MAP_C['road']))
+        qp.setRenderHint(QtGui.QPainter.Antialiasing, False)   # 0.5 m 띠 사이 이음선 방지
+        for r in self.sidewalks:
+            self.draw_rect(qp, r, QtGui.QColor(MAP_C['sidewalk']))
+        for r in self.obstacles:
+            self.draw_rect(qp, r, QtGui.QColor(MAP_C['obstacle']))
+        qp.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        # 1 m 격자
+        qp.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 28), 1))
+        x0, x1, y0, y1 = self.bounds
+        span_x = self.width() / self.s / 2
+        for gx in range(int(self.cx - span_x) - 1, int(self.cx + span_x) + 2):
+            qp.drawLine(self.to_px(gx, y0 - 50), self.to_px(gx, y1 + 50))
+        for gy in range(int(y0) - 1, int(y1) + 2):
+            qp.drawLine(self.to_px(self.cx - span_x - 1, gy), self.to_px(self.cx + span_x + 1, gy))
+
+        tgt = self.target_index()
+        done = bool((self.bt.info or {}).get('done'))
+        # 경로
+        pts = [self.to_px(x, y) for _, x, y in self.route]
+        qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['route']), 3, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+        for a, b in zip(pts, pts[1:]):
+            qp.drawLine(a, b)
+        # 궤적
+        if len(self.trail) > 1:
+            path = QtGui.QPainterPath(self.to_px(self.trail[0][1], self.trail[0][2]))
+            for _, x, y in self.trail[1:]:
+                path.lineTo(self.to_px(x, y))
+            qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['trail']), 2))
+            qp.setBrush(QtCore.Qt.NoBrush)
+            qp.drawPath(path)
+        # 출발점
+        if self.spawn:
+            p = self.to_px(*self.spawn)
+            qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['muted']), 2))
+            qp.drawLine(p + QtCore.QPointF(-6, -6), p + QtCore.QPointF(6, 6))
+            qp.drawLine(p + QtCore.QPointF(-6, 6), p + QtCore.QPointF(6, -6))
+            self.label(qp, p + QtCore.QPointF(9, 14), 'spawn', MAP_C['muted'])
+        # 노드
+        for i, (nid, x, y) in enumerate(self.route):
+            p = pts[i]
+            if tgt is not None and (i < tgt or done):
+                fill = MAP_C['passed']
+            else:
+                fill = MAP_C['node']
+            qp.setPen(QtGui.QPen(QtGui.QColor('#0d1117'), 1.5))
+            qp.setBrush(QtGui.QColor(fill))
+            qp.drawEllipse(p, 7, 7)
+            if tgt is not None and i == tgt and not done:
+                qp.setPen(QtGui.QPen(QtGui.QColor(MAP_C['target']), 3))
+                qp.setBrush(QtCore.Qt.NoBrush)
+                qp.drawEllipse(p, 13, 13)
+            self.label(qp, p + QtCore.QPointF(11, -9), nid, '#0d1117', bold=True, halo=True)
+        # 목표 연결선 + 차량
+        if self.pose:
+            x, y, yaw = self.pose
+            vp = self.to_px(x, y)
+            if tgt is not None and not done:
+                pen = QtGui.QPen(QtGui.QColor(MAP_C['target']), 2, QtCore.Qt.DashLine)
+                qp.setPen(pen)
+                qp.drawLine(vp, pts[tgt])
+            mode = ((self.bt.info or {}).get('mode') or ('0',))[0]
+            col = MAP_C['vehicle_auto'] if mode == '1' else MAP_C['vehicle_rc'] if mode == '3' else MAP_C['vehicle_idle']
+            L, W = 0.98, 0.74          # Hunter 2.0 외곽(대략)
+            qp.save()
+            qp.translate(vp)
+            qp.rotate(-math.degrees(yaw))
+            body = QtCore.QRectF(-L / 2 * self.s, -W / 2 * self.s, L * self.s, W * self.s)
+            qp.setPen(QtGui.QPen(QtGui.QColor('#0d1117'), 1.5))
+            qp.setBrush(QtGui.QColor(col))
+            qp.drawRoundedRect(body, 3, 3)
+            tri = QtGui.QPolygonF([QtCore.QPointF(L / 2 * self.s + 9, 0), QtCore.QPointF(L / 2 * self.s - 2, -6),
+                                   QtCore.QPointF(L / 2 * self.s - 2, 6)])
+            qp.setBrush(QtGui.QColor('#ffffff'))
+            qp.drawPolygon(tri)
+            qp.restore()
+        self.draw_overlay(qp, tgt, done)
+        qp.end()
+
+    def label(self, qp, p, text, color, bold=False, halo=False):
+        f = QtGui.QFont('DejaVu Sans', 9, QtGui.QFont.Bold if bold else QtGui.QFont.Normal)
+        qp.setFont(f)
+        if halo:
+            path = QtGui.QPainterPath()
+            path.addText(p, f, text)
+            qp.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220), 3))
+            qp.setBrush(QtCore.Qt.NoBrush)
+            qp.drawPath(path)
+        qp.setPen(QtGui.QColor(color))
+        qp.drawText(p, text)
+
+    def draw_overlay(self, qp, tgt, done):
+        math = __import__('math')
+        inf = self.bt.info or {}
+        mode = inf.get('mode')
+        lines = [('시뮬 시각', f'{self.sim_t:.1f} s' if self.sim_t is not None else '—'),
+                 ('제어 모드', ' '.join(mode) if mode else '—')]
+        if self.pose:
+            x, y, yaw = self.pose
+            lines.append(('위치', f'({x:+.2f}, {y:+.2f})  {math.degrees(yaw):+.0f}°'))
+            lines.append(('속도', f'{self.speed:.2f} m/s'))
+            # 경로 횡오차(최근접 링크까지 거리)
+            best = None
+            for (_, ax, ay), (_, bx, by) in zip(self.route, self.route[1:]):
+                dx, dy = bx - ax, by - ay
+                u = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy or 1)))
+                d = math.hypot(x - (ax + u * dx), y - (ay + u * dy))
+                best = d if best is None else min(best, d)
+            lines.append(('경로 이탈', f'{best:.2f} m' if best is not None else '—'))
+            if tgt is not None and not done:
+                nid, tx, ty = self.route[tgt]
+                rem = math.hypot(tx - x, ty - y) + sum(
+                    math.hypot(b[1] - a[1], b[2] - a[2]) for a, b in zip(self.route[tgt:], self.route[tgt + 1:]))
+                lines.append(('목표', f'{nid}  {math.hypot(tx - x, ty - y):.1f} m  ·  잔여 {rem:.1f} m'))
+            elif done:
+                lines.append(('목표', '완주'))
+        else:
+            lines.append(('위치', 'Gazebo pose 대기'))
+        w = 268
+        h = 14 + 17 * len(lines)
+        qp.setPen(QtCore.Qt.NoPen)
+        qp.setBrush(QtGui.QColor(28, 32, 36, 225))
+        qp.drawRoundedRect(QtCore.QRectF(10, 10, w, h), 5, 5)
+        y = 28
+        for k, v in lines:
+            qp.setFont(QtGui.QFont('DejaVu Sans', 8))
+            qp.setPen(QtGui.QColor(MAP_C['muted']))
+            qp.drawText(20, y, k)
+            qp.setFont(QtGui.QFont('DejaVu Sans', 9))
+            qp.setPen(QtGui.QColor(MAP_C['ink']))
+            qp.drawText(90, y, v)
+            y += 17
+        # 범례 + 축척
+        leg = [(MAP_C['route'], '경로'), (MAP_C['trail'], '궤적'), (MAP_C['target'], '목표 노드'),
+               (MAP_C['passed'], '지나온 노드'), (MAP_C['sidewalk'], '보도'), (MAP_C['obstacle'], '장애물')]
+        qp.setFont(QtGui.QFont('DejaVu Sans', 8))
+        lx = self.width() - 10
+        ly = self.height() - 12
+        for col, name in reversed(leg):
+            tw = qp.fontMetrics().horizontalAdvance(name)
+            lx -= tw
+            qp.setPen(QtGui.QColor('#0d1117'))
+            qp.drawText(lx, ly, name)
+            lx -= 14
+            qp.fillRect(QtCore.QRectF(lx, ly - 9, 10, 10), QtGui.QColor(col))
+            lx -= 12
+        p0 = QtCore.QPointF(14, self.height() - 16)
+        qp.setPen(QtGui.QPen(QtGui.QColor('#0d1117'), 2))
+        qp.drawLine(p0, p0 + QtCore.QPointF(5 * self.s, 0))
+        qp.drawText(p0 + QtCore.QPointF(5 * self.s + 6, 4), '5 m')
+        n = QtCore.QPointF(self.width() - 24, 26)
+        qp.drawLine(n + QtCore.QPointF(0, 10), n + QtCore.QPointF(0, -10))
+        qp.drawText(n + QtCore.QPointF(-4, -14), 'N')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=1667)
     ap.add_argument('--log-glob', default='~/scv_sim/bt_ab/**/bt.log')
     ap.add_argument('--geometry', default='540x1000+1380+29')
+    ap.add_argument('--design', default='', help='챔버 설계 JSON — 주면 지도 창을 띄운다')
+    ap.add_argument('--map-geometry', default='1380x500+0+529')
     args = ap.parse_args()
     app = QtWidgets.QApplication([])
+
+    def place(win, geo):
+        m = re.match(r'(\d+)x(\d+)\+(\d+)\+(\d+)', geo)
+        if m:
+            gw, gh, gx, gy = map(int, m.groups())
+            win.setGeometry(gx, gy, gw, gh)
+        win.show()
+
     v = BtView(args)
-    m = re.match(r'(\d+)x(\d+)\+(\d+)\+(\d+)', args.geometry)
-    if m:
-        gw, gh, gx, gy = map(int, m.groups())
-        v.setGeometry(gx, gy, gw, gh)
-    v.show()
+    place(v, args.geometry)
+    if args.design:
+        mv = MapView(args.design, v)
+        place(mv, args.map_geometry)
     app.exec_()
 
 
