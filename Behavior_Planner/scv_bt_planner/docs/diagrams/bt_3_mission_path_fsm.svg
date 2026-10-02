@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="330" viewBox="0 0 860 330" role="img" aria-label="경로 없음, 정렬 대기, 추종 중, 완주 네 상태와 경로 수신·정렬 완료·목표 도달·최종 도달·재정렬 트리거 전이.">
+  <style>
+  svg { color:#172019; font-family:"IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; }
+  .box { fill:#FFFFFF; stroke:currentColor; stroke-width:1.2; }
+  .st { fill:#FFFFFF; stroke:currentColor; stroke-width:1.4; }
+  .st.on { fill:#E3F0EE; stroke:#0E6F6A; }
+  .st.bad { fill:#F7E3DF; stroke:#A2382B; }
+  .st.warn { fill:#F7EBDC; stroke:#A5621B; }
+  .ctl .box { fill:#E3F0EE; stroke:#0E6F6A; }
+  .cond .box { stroke-dasharray:4 3; }
+  .act .box { stroke-width:1.8; }
+  .in .box { fill:#EDF1EF; }
+  text { fill:currentColor; font-size:11.5px; }
+  .sub { font-size:10px; fill:#5D6A63; }
+  .lbl { font-size:10.5px; fill:#5D6A63; }
+  .head { font-size:11px; font-weight:600; letter-spacing:0.06em; fill:#5D6A63; }
+  .edge { stroke:currentColor; stroke-width:1.1; fill:none; }
+  .edge.acc { stroke:#0E6F6A; }
+  .edge.crit { stroke:#A2382B; }
+  .edge.warn { stroke:#A5621B; }
+  </style>
+  <rect width="860" height="330" fill="#F4F7F5"/>
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <rect class="st" x="20" y="120" width="130" height="50" rx="8"/><text x="85" y="141" text-anchor="middle">경로 없음</text><text x="85" y="158" text-anchor="middle" class="sub">MissionReady 실패</text>
+      <rect class="st warn" x="230" y="120" width="150" height="50" rx="8"/><text x="305" y="141" text-anchor="middle">정렬 대기</text><text x="305" y="158" text-anchor="middle" class="sub">pending_align</text>
+      <rect class="st on" x="460" y="120" width="150" height="50" rx="8"/><text x="535" y="141" text-anchor="middle">추종 중</text><text x="535" y="158" text-anchor="middle" class="sub">목표 = nodes[idx]</text>
+      <rect class="st" x="690" y="120" width="150" height="50" rx="8"/><text x="765" y="141" text-anchor="middle">완주</text><text x="765" y="158" text-anchor="middle" class="sub">is_following=false</text>
+      <line class="edge" x1="150" y1="145" x2="228" y2="145" marker-end="url(#a3)"/>
+      <text x="189" y="112" text-anchor="middle" class="lbl">PlannedPath 수신</text>
+      <text x="189" y="126" text-anchor="middle" class="lbl">(start 미지정)</text>
+      <line class="edge" x1="380" y1="145" x2="458" y2="145" marker-end="url(#a3)"/>
+      <text x="419" y="112" text-anchor="middle" class="lbl">위치+datum 있음 →</text>
+      <text x="419" y="126" text-anchor="middle" class="lbl">alignToPosition</text>
+      <line class="edge" x1="610" y1="145" x2="688" y2="145" marker-end="url(#a3)"/>
+      <text x="649" y="112" text-anchor="middle" class="lbl">최종 노드 도달</text>
+      <text x="649" y="126" text-anchor="middle" class="lbl">(goal_reached, 마지막 idx)</text>
+      <!-- self loop advance -->
+      <path class="edge" d="M 560 120 C 560 70, 610 70, 610 120" marker-end="url(#a3)"/>
+      <text x="585" y="62" text-anchor="middle" class="lbl">goal_reached ∧ goal_id==목표 → idx+1</text>
+      <text x="585" y="76" text-anchor="middle" class="lbl">(pause 노드 7/8 은 넘기기 전 PauseCommand)</text>
+      <!-- realign triggers: from following back to aligning -->
+      <path class="edge warn" d="M 470 170 C 440 230, 370 230, 340 170" marker-end="url(#a3)"/>
+      <text x="405" y="232" text-anchor="middle" class="lbl" style="fill:#A5621B">재정렬 트리거 (start 미지정 경로일 때)</text>
+      <text x="405" y="247" text-anchor="middle" class="lbl">· 위치 점프 > max(2 m, 5 m/s·dt) (앵커 스냅·재초기화)</text>
+      <text x="405" y="261" text-anchor="middle" class="lbl">· RC(mode 3) 중 2 m 이상 이동</text>
+      <text x="405" y="275" text-anchor="middle" class="lbl">· control_mode ≠1 → 1 자율 전환 순간</text>
+      <!-- new path from anywhere -->
+      <path class="edge" d="M 765 170 C 765 300, 85 300, 85 170" marker-end="url(#a3)"/>
+      <text x="425" y="316" text-anchor="middle" class="lbl">새 PlannedPath 수신 → 경로 교체, idx=0, 이력 초기화 (어느 상태에서든)</text>
+      <!-- pass history -->
+      <text x="20" y="40" class="head">통과 이력 (매 위치 갱신)</text>
+      <text x="20" y="58" class="lbl">차량이 노드 2 m 안에 들어오면 그 노드까지 '지나옴'. 합류는 지나온 다음 노드까지만 앞서갈 수 있다.</text>
+      <text x="20" y="72" class="lbl">합류 규칙 = 접근거리×1.5 + 잔여 경로거리 최소, 접근 상한 40 m, 접근 직선이 코스트맵 lethal 이면 후보 제외.</text>
+    </svg>
