@@ -54,9 +54,16 @@
     # 물체가 아니므로 팽창시키면 좁은 길이 통째로 막힌다.
     # 비용은 올리기만 한다: 지도상 주행가능이어도 지금 그 자리에 장애물이 있을 수 있다.
     use_semantic_layer: true
+    # separate: 의미 영역을 /costmap/keepout 으로 따로 발행하고 /costmap 은 물리(LiDAR+팽창)만 담는다.
+    #           주행불가 안쪽의 실제 장애물이 지워지지 않는다. smppi 가 keepout 을 별도 비용으로 본다.
+    #           keepout 값: 100 주행불가 / 0 그 외 / -1 의미 정보 없음(격자 미수신 또는 map->odom 없음)
+    # overlay : 예전 방식 — 팽창 뒤 /costmap 에 주행불가 100 을 덮어쓴다.
+    semantic_output: 'separate'
     semantic_grid_topic: '/map_provider_node/semantic/grid'
     map_frame: 'map'
-    semantic_crosswalk_cost: 50   # 횡단보도 = 통행 가능하되 회피 선호 (0~100)
+    # 횡단보도 비용 (0~100). 0 = 주행가능과 같은 레벨(아무것도 얹지 않음).
+    # 50 이었을 때는 smppi 반발 비용이 목표 비용을 압도해 횡단보도 앞에서 정지했다.
+    semantic_crosswalk_cost: 0
 
     # === Inflation Layer ===
     inflation_radius: 3.0        # Inflation radius in meters (safety margin around obstacles)

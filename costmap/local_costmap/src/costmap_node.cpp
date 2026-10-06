@@ -38,6 +38,9 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   costmap_ = std::make_unique<Costmap2D>(
     costmap_width_, costmap_height_, costmap_resolution_,
     origin_x, origin_y);
+  keepout_map_ = std::make_unique<Costmap2D>(
+    costmap_width_, costmap_height_, costmap_resolution_,
+    origin_x, origin_y);
 
   // Initialize point cloud processor
   pc_processor_ = std::make_unique<PointCloudProcessor>();
@@ -80,6 +83,9 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
 
   // Create publisher
   costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", qos);
+  if (use_semantic_layer_ && semantic_separate_) {
+    keepout_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap/keepout", qos);
+  }
 
   // Pre-allocate costmap message
   costmap_msg_.header.frame_id = odom_frame_;
@@ -88,6 +94,7 @@ CostmapNode::CostmapNode(const rclcpp::NodeOptions& options)
   costmap_msg_.info.height = costmap_->getHeightCells();
   costmap_msg_.info.origin.orientation.w = 1.0;
   costmap_msg_.data.resize(costmap_->getDataSize());
+  keepout_msg_ = costmap_msg_;
 
   // Create main loop timer
   double timer_period = 1.0 / update_frequency_;
@@ -145,6 +152,9 @@ void CostmapNode::declareParameters()
                           std::string("/map_provider_node/semantic/grid"));
   this->declare_parameter("map_frame", std::string("map"));
   this->declare_parameter("semantic_crosswalk_cost", 50);
+  // "separate": semantic -> /costmap/keepout, /costmap stays physical (default)
+  // "overlay" : legacy, semantic painted into /costmap after inflation
+  this->declare_parameter("semantic_output", std::string("separate"));
 
   // Robot footprint
   this->declare_parameter("robot_footprint",
@@ -187,6 +197,12 @@ void CostmapNode::loadParameters()
   map_frame_ = this->get_parameter("map_frame").as_string();
   semantic_crosswalk_cost_ = static_cast<int>(
     this->get_parameter("semantic_crosswalk_cost").as_int());
+  const std::string semantic_output = this->get_parameter("semantic_output").as_string();
+  if (semantic_output != "separate" && semantic_output != "overlay") {
+    RCLCPP_WARN(this->get_logger(), "semantic_output '%s' invalid, using 'separate'",
+                semantic_output.c_str());
+  }
+  semantic_separate_ = (semantic_output != "overlay");
 
   robot_footprint_ = this->get_parameter("robot_footprint").as_double_array();
 
@@ -297,6 +313,9 @@ void CostmapNode::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& ms
 void CostmapNode::mainLoopCallback()
 {
   updateCostmap();
+  if (keepout_pub_) {
+    updateKeepout();
+  }
   publishCostmap();
 }
 
@@ -412,19 +431,19 @@ void CostmapNode::updateCostmap()
   // Semantic map goes on AFTER inflation, on purpose. The non-drivable region
   // is a line a human drew, not something the robot can hit; inflating it by
   // inflation_radius would eat that margin out of both sides of every corridor.
-  applySemanticLayer();
+  // In "separate" mode it is not painted here at all (see updateKeepout).
+  if (use_semantic_layer_ && !semantic_separate_) {
+    applySemanticLayer(*costmap_);
+  }
 }
 
-void CostmapNode::applySemanticLayer()
+bool CostmapNode::applySemanticLayer(Costmap2D& target)
 {
-  if (!use_semantic_layer_) {
-    return;
-  }
   if (!semantic_layer_.isReady()) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
       "Semantic grid not received yet on %s - static layer skipped",
       semantic_grid_topic_.c_str());
-    return;
+    return false;
   }
   // costmap is in odom; the semantic grid is in map. Need map <- odom.
   geometry_msgs::msg::TransformStamped tf;
@@ -432,13 +451,28 @@ void CostmapNode::applySemanticLayer()
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
       "No %s <- %s transform - semantic layer skipped this cycle",
       map_frame_.c_str(), odom_frame_.c_str());
-    return;
+    return false;
   }
   const auto& q = tf.transform.rotation;
   const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
                                 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-  semantic_layer_.apply(*costmap_, tf.transform.translation.x,
+  semantic_layer_.apply(target, tf.transform.translation.x,
                         tf.transform.translation.y, yaw);
+  return true;
+}
+
+void CostmapNode::updateKeepout()
+{
+  // Same window as the published costmap so the controller can index both
+  // grids with one cell lookup. Rebuilt every cycle: the window moves with the
+  // robot and map->odom moves with localization, independently of new clouds.
+  keepout_map_->updateOrigin(costmap_->getOriginX(), costmap_->getOriginY());
+  keepout_map_->reset(Costmap2D::FREE_SPACE);
+  if (!applySemanticLayer(*keepout_map_)) {
+    // No semantic grid or no map->odom: say "unknown", not "free", so a
+    // consumer can tell missing information from a clear area.
+    keepout_map_->reset(Costmap2D::UNKNOWN);
+  }
 }
 
 void CostmapNode::publishCostmap()
@@ -457,6 +491,15 @@ void CostmapNode::publishCostmap()
   std::memcpy(costmap_msg_.data.data(), data.data(), data.size());
 
   costmap_pub_->publish(costmap_msg_);
+
+  if (keepout_pub_) {
+    keepout_msg_.header = costmap_msg_.header;
+    keepout_msg_.info.origin.position.x = keepout_map_->getOriginX();
+    keepout_msg_.info.origin.position.y = keepout_map_->getOriginY();
+    const auto& kdata = keepout_map_->getDataVector();
+    std::memcpy(keepout_msg_.data.data(), kdata.data(), kdata.size());
+    keepout_pub_->publish(keepout_msg_);
+  }
 }
 
 }  // namespace local_costmap

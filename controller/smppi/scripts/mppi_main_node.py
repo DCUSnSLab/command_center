@@ -109,6 +109,7 @@ class MPPIMainNode(Node):
         # Topic parameters
         self.declare_parameter('topics.input.odometry', '/odom')
         self.declare_parameter('topics.input.costmap', '/costmap')
+        self.declare_parameter('topics.input.keepout', '/costmap/keepout')
         self.declare_parameter('topics.input.goal_pose', '/goal_pose')
         self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
         self.declare_parameter('topics.output.cmd_vel', '/ackermann_like_controller/cmd_vel')
@@ -149,6 +150,7 @@ class MPPIMainNode(Node):
         # Critic weights
         self.declare_parameter('costs.obstacle_weight', 100.0)
         self.declare_parameter('costs.goal_weight', 6.0)
+        self.declare_parameter('costs.keepout_cost', 20000.0)
         
         # Lookahead parameters
         self.declare_parameter('costs.lookahead.base_distance', 2.5)
@@ -180,6 +182,7 @@ class MPPIMainNode(Node):
         # Topic names
         self.odom_topic = self.get_parameter('topics.input.odometry').get_parameter_value().string_value
         self.costmap_topic = self.get_parameter('topics.input.costmap').get_parameter_value().string_value
+        self.keepout_topic = self.get_parameter('topics.input.keepout').get_parameter_value().string_value
         self.goal_topic = self.get_parameter('topics.input.goal_pose').get_parameter_value().string_value
         self.multiple_waypoints_topic = self.get_parameter('topics.input.multiple_waypoints').get_parameter_value().string_value
         self.cmd_topic = self.get_parameter('topics.output.cmd_vel').get_parameter_value().string_value
@@ -218,6 +221,7 @@ class MPPIMainNode(Node):
         self.critic_weights = {
             'obstacle_weight': self.get_parameter('costs.obstacle_weight').get_parameter_value().double_value,
             'goal_weight': self.get_parameter('costs.goal_weight').get_parameter_value().double_value,
+            'keepout_cost': self.get_parameter('costs.keepout_cost').get_parameter_value().double_value,
         }
         
         # Lookahead parameters
@@ -261,6 +265,7 @@ class MPPIMainNode(Node):
             'repulsion_factor': 2.0,
             'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
             'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
+            'keepout_cost': self.critic_weights['keepout_cost'],  # semantic keep-out, < collision_cost
             'footprint': list(self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value),
             'footprint_padding': self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value
         }
@@ -300,6 +305,10 @@ class MPPIMainNode(Node):
             Odometry, self.odom_topic, self.odom_callback, sensor_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
+        # Semantic keep-out from local_costmap (semantic_output: separate). If it
+        # never arrives (overlay mode / semantic off) the keep-out term stays off.
+        self.keepout_sub = self.create_subscription(
+            OccupancyGrid, self.keepout_topic, self.keepout_callback, reliable_qos)
         
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
@@ -375,7 +384,23 @@ class MPPIMainNode(Node):
             for critic in self.optimizer.critics:
                 if hasattr(critic, 'set_costmap_info'):
                     critic.set_costmap_info(costmap_info)
-    
+
+    def keepout_callback(self, msg: OccupancyGrid):
+        """Receive the semantic keep-out grid (100 = non_drivable, -1 = no semantic info)"""
+        if not hasattr(self, 'optimizer') or self.optimizer is None:
+            return
+        keepout_info = {
+            'resolution': msg.info.resolution,
+            'origin_x': msg.info.origin.position.x,
+            'origin_y': msg.info.origin.position.y,
+            'width': msg.info.width,
+            'height': msg.info.height,
+            'data': np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width)),
+        }
+        for critic in self.optimizer.critics:
+            if hasattr(critic, 'set_keepout_info'):
+                critic.set_keepout_info(keepout_info)
+
     def goal_callback(self, msg: PoseStamped):
         """Process goal pose"""
         self.latest_goal = msg
@@ -575,7 +600,7 @@ class MPPIMainNode(Node):
             cmd_vel = self.optimizer.get_control_command()
             _tc = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] optimize=%.1fms cmd=%.1fms (prep+rest below)" % (
                         (_tb - _ta) * 1000.0, (_tc - _tb) * 1000.0))
                 self._t_opt = _tb - _ta
@@ -612,7 +637,7 @@ class MPPIMainNode(Node):
                 self.publish_lookahead_point()
             _te = _t()
             if _prof:
-                self.get_logger().debug(
+                self.get_logger().info(
                     "[SMPPI TIMING] publish_path+lookahead=%.1fms | prepare+goal+shift=%.1fms" % (
                         (_te - _td) * 1000.0,
                         ((_ta - start_time) + (_td - _tc)) * 1000.0))

@@ -51,7 +51,8 @@ private:
 
   // Costmap operations
   void updateCostmap();
-  void applySemanticLayer();
+  bool applySemanticLayer(Costmap2D& target);
+  void updateKeepout();
   void publishCostmap();
 
   // TF lookup
@@ -86,6 +87,9 @@ private:
   std::string semantic_grid_topic_;
   std::string map_frame_;
   int semantic_crosswalk_cost_ = 50;
+  // true: semantic goes to its own grid (/costmap/keepout), /costmap stays physical.
+  // false: legacy overlay - semantic painted into /costmap after inflation.
+  bool semantic_separate_ = true;
   std::vector<double> robot_footprint_;
 
   // ROS interfaces
@@ -93,6 +97,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr semantic_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr keepout_pub_;
   rclcpp::TimerBase::SharedPtr main_timer_;
 
   // TF
@@ -102,6 +107,7 @@ private:
   // Core components
   std::unique_ptr<Costmap2D> obstacle_map_;  // persistent marking/clearing grid
   std::unique_ptr<Costmap2D> costmap_;       // published grid (obstacles + inflation)
+  std::unique_ptr<Costmap2D> keepout_map_;   // semantic keep-out, same window as costmap_
   std::unique_ptr<PointCloudProcessor> pc_processor_;
   std::unique_ptr<InflationLayer> inflation_layer_;
   DenoiseLayer denoise_layer_;
@@ -121,6 +127,7 @@ private:
 
   // Pre-allocated message for publishing
   nav_msgs::msg::OccupancyGrid costmap_msg_;
+  nav_msgs::msg::OccupancyGrid keepout_msg_;
 };
 
 }  // namespace local_costmap

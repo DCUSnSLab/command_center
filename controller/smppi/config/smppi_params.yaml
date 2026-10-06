@@ -47,6 +47,10 @@
     costs:
       obstacle_weight: 100.0              # 장애물 회피 비용 가중치 [무단위]
       goal_weight: 30.0                   # 목표 추적 비용 가중치 [무단위]
+      # 주행불가(/costmap/keepout) 침범 비용 [무단위, obstacle_weight 가 곱해짐].
+      # 물리 충돌(collision_cost 1e5)보다 반드시 작게: 밖에서는 벽처럼 막고,
+      # 이미 안에 있으면 빠져나오되 실제 장애물에 부딪히면서까지 나오지는 않는다.
+      keepout_cost: 20000.0
 
       lookahead:
         base_distance: 10.0                # 기본 lookahead 거리 [m] (보수적 증가)
@@ -72,6 +76,7 @@
         odometry: '/odom'                 # 오도메트리 입력 토픽
         goal_pose: '/sub_goal'             # 단일 목표 위치 입력 토픽
         multiple_waypoints: '/multiple_waypoints'  # 다중 웨이포인트 입력 토픽
+        keepout: '/costmap/keepout'       # 주행불가 격자 (local_costmap semantic_output: separate)
         processed_obstacles: '/smppi/processed_obstacles'  # 처리된 장애물 토픽
         robot_state: '/smppi/robot_state' # 로봇 상태 토픽
       output:
