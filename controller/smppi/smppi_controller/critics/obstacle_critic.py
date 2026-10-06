@@ -17,6 +17,12 @@ Per pose: collision if ANY sample collides; repulsion uses the max sample value.
 A trajectory containing any colliding pose gets `collision_cost` added once,
 sized to dominate any accumulated repulsion so MPPI can never prefer a
 colliding trajectory over one that merely grazes the inflation zone.
+
+Semantic keep-out (non_drivable, /costmap/keepout) is a separate channel with
+the same graded shape but `keepout_cost` < `collision_cost`: outside keep-out it
+still acts as a wall, and once the robot is inside it escaping is preferred but
+never by touching a physical obstacle, which stays visible because /costmap is
+no longer overwritten by the semantic layer.
 """
 
 import torch
@@ -49,6 +55,10 @@ class ObstacleCritic(BaseCritic):
         # (e.g. sensor timeout) stops the robot instead of freeing all space
         self.unknown_is_lethal = params.get('unknown_is_lethal', True)
 
+        # Per-trajectory penalty for entering semantic keep-out. Kept below
+        # collision_cost so a physical obstacle always outranks keep-out.
+        self.keepout_cost = params.get('keepout_cost', 20000.0)
+
         # 전부 충돌인 사이클 진단용. collides.all() 은 GPU->CPU 동기화라
         # 매 사이클 부르면 optimize 가 26.6 -> 33.2 ms 로 늘어난다 (실측).
         # 20 사이클마다만 확인해 비용을 1/20 로 누른다.
@@ -73,6 +83,8 @@ class ObstacleCritic(BaseCritic):
         # Costmap snapshot; the whole dict is swapped atomically by the
         # subscriber thread, readers grab one local reference per call
         self.costmap_info = None
+        # Keep-out snapshot (same swap rule); None until /costmap/keepout arrives
+        self.keepout_info = None
 
         vprint(f"[ObstacleCritic] Footprint-sampled costmap collision checking")
         vprint(f"[ObstacleCritic] collision_cost={self.collision_cost}, "
@@ -183,27 +195,24 @@ class ObstacleCritic(BaseCritic):
         future_collision = pose_collision[:, 1:] if pose_collision.shape[1] > 1 \
             else pose_collision
 
-        # Grade by WHEN the collision happens instead of a binary any(). A binary
-        # flag makes "hits the wall next step" and "hits it 59 steps out" cost the
-        # same, so there is no gradient to escape along. Later is cheaper, and the
-        # spread is large enough to survive float32 at this magnitude.
+        severity, first_hit, collides = self._graded_severity(future_collision, repulsion.dtype)
         T_f = future_collision.shape[1]
-        idx = torch.arange(T_f, device=future_collision.device).to(repulsion.dtype)
-        big = torch.full_like(idx, float(T_f))
-        first_hit = torch.where(future_collision, idx.expand_as(future_collision),
-                                big.expand_as(future_collision)).min(dim=1).values
-        collides = future_collision.any(dim=1)
-        # 언제 부딪히는지(first_hit)만 보면 "깊게 관통하면서 충돌을 뒤로 미루는"
-        # 궤적이 싸진다. 실측: 궤적점의 46.1% 가 치명 셀, base 는 29.9% 였다.
-        # 그래서 관통 깊이(충돌 자세 개수)를 같은 무게로 함께 벌한다.
-        #   늦게 스치기        : first_hit 큼, depth 작음  -> 싸다 (탈출 기울기 유지)
-        #   깊게 관통          : depth 큼                  -> 비싸다 (침범 억제)
-        depth = future_collision.to(repulsion.dtype).sum(dim=1) / float(T_f)
-        severity = torch.where(collides,
-                               0.5 * (1.0 - first_hit / float(T_f)) + 0.5 * depth,
-                               torch.zeros_like(first_hit))
 
         total_costs = repulsion.sum(dim=1) + severity * self.collision_cost
+
+        # Semantic keep-out, own grid and own (lower) cost. Indexed with the
+        # keep-out grid's own origin: it is published with /costmap but the two
+        # callbacks are independent, so the windows can be one cycle apart.
+        kinfo = self.keepout_info
+        if kinfo is not None and self.keepout_cost > 0.0:
+            kx = torch.floor((wx - kinfo['origin_x']) / kinfo['resolution']).long()
+            ky = torch.floor((wy - kinfo['origin_y']) / kinfo['resolution']).long()
+            k_inside = (kx >= 0) & (kx < kinfo['width']) & (ky >= 0) & (ky < kinfo['height'])
+            k_cell = kinfo['mask'][ky.clamp(0, kinfo['height'] - 1), kx.clamp(0, kinfo['width'] - 1)]
+            k_pose = (k_inside & k_cell).any(dim=2)                      # [K, T+1]
+            k_future = k_pose[:, 1:] if k_pose.shape[1] > 1 else k_pose  # t=0: same for all rollouts
+            k_severity, _, _ = self._graded_severity(k_future, repulsion.dtype)
+            total_costs = total_costs + k_severity * self.keepout_cost
 
         # 충돌 없는 궤적이 하나도 없는 상황을 드러낸다. 조용한 포화가
         # 현장 실패를 bag 재생으로만 찾을 수 있게 만든 원인이었다.
@@ -215,6 +224,47 @@ class ObstacleCritic(BaseCritic):
                   f"- no collision-free plan exists this cycle", flush=True)
 
         return self.apply_weight(total_costs)
+
+    @staticmethod
+    def _graded_severity(future_hits: torch.Tensor, dtype):
+        """Severity in [0, 1] per rollout from a [K, T] hit mask (0 if never hit).
+
+        Grade by WHEN the collision happens instead of a binary any(). A binary
+        flag makes "hits the wall next step" and "hits it 59 steps out" cost the
+        same, so there is no gradient to escape along. Later is cheaper, and the
+        spread is large enough to survive float32 at this magnitude.
+
+        언제 부딪히는지(first_hit)만 보면 "깊게 관통하면서 충돌을 뒤로 미루는"
+        궤적이 싸진다. 실측: 궤적점의 46.1% 가 치명 셀, base 는 29.9% 였다.
+        그래서 관통 깊이(충돌 자세 개수)를 같은 무게로 함께 벌한다.
+          늦게 스치기        : first_hit 큼, depth 작음  -> 싸다 (탈출 기울기 유지)
+          깊게 관통          : depth 큼                  -> 비싸다 (침범 억제)
+        """
+        T_f = future_hits.shape[1]
+        idx = torch.arange(T_f, device=future_hits.device).to(dtype)
+        big = torch.full_like(idx, float(T_f))
+        first_hit = torch.where(future_hits, idx.expand_as(future_hits),
+                                big.expand_as(future_hits)).min(dim=1).values
+        collides = future_hits.any(dim=1)
+        depth = future_hits.to(dtype).sum(dim=1) / float(T_f)
+        severity = torch.where(collides,
+                               0.5 * (1.0 - first_hit / float(T_f)) + 0.5 * depth,
+                               torch.zeros_like(first_hit))
+        return severity, first_hit, collides
+
+    def set_keepout_info(self, keepout_info: dict):
+        """
+        Set the semantic keep-out grid (/costmap/keepout from local_costmap).
+
+        Args:
+            keepout_info: resolution, origin_x, origin_y, width, height and
+                data (2D int8 array, 100 = non_drivable, 0 = clear,
+                -1 = no semantic information -> no penalty)
+        """
+        tensor = torch.as_tensor(np.ascontiguousarray(keepout_info['data']), device=self.device)
+        info = {k: keepout_info[k] for k in ('resolution', 'origin_x', 'origin_y', 'width', 'height')}
+        info['mask'] = tensor >= 100
+        self.keepout_info = info
 
     @property
     def all_blocked(self) -> bool:
@@ -284,6 +334,8 @@ class ObstacleCritic(BaseCritic):
                 self.costmap_info = info
         if 'unknown_is_lethal' in params:
             self.unknown_is_lethal = params['unknown_is_lethal']
+        if 'keepout_cost' in params:
+            self.keepout_cost = params['keepout_cost']
 
         if 'footprint' in params or 'footprint_padding' in params:
             if 'footprint' in params:
