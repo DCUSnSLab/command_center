@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="300" viewBox="0 0 860 300" role="img" aria-label="NORMAL, BLOCKED_WAIT, CREEP, ASSIST 네 상태. 움직여야 하는데 4초간 0.15 m 미만 진행이면 BLOCKED_WAIT, 12초 더 지나면 CREEP(최고속 0.3 m/s), 10초 더 지나면 ASSIST(운용자 호출 15초 반복). 진행이 재개되면 어느 상태에서든 NORMAL.">
+  <style>
+  svg { color:#172019; font-family:"IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; }
+  .box { fill:#FFFFFF; stroke:currentColor; stroke-width:1.2; }
+  .st { fill:#FFFFFF; stroke:currentColor; stroke-width:1.4; }
+  .st.on { fill:#E3F0EE; stroke:#0E6F6A; }
+  .st.bad { fill:#F7E3DF; stroke:#A2382B; }
+  .st.warn { fill:#F7EBDC; stroke:#A5621B; }
+  .ctl .box { fill:#E3F0EE; stroke:#0E6F6A; }
+  .cond .box { stroke-dasharray:4 3; }
+  .act .box { stroke-width:1.8; }
+  .in .box { fill:#EDF1EF; }
+  text { fill:currentColor; font-size:11.5px; }
+  .sub { font-size:10px; fill:#5D6A63; }
+  .lbl { font-size:10.5px; fill:#5D6A63; }
+  .head { font-size:11px; font-weight:600; letter-spacing:0.06em; fill:#5D6A63; }
+  .edge { stroke:currentColor; stroke-width:1.1; fill:none; }
+  .edge.acc { stroke:#0E6F6A; }
+  .edge.crit { stroke:#A2382B; }
+  .edge.warn { stroke:#A5621B; }
+  </style>
+  <rect width="860" height="300" fill="#F4F7F5"/>
+      <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <rect class="st on" x="20" y="110" width="140" height="50" rx="8"/><text x="90" y="131" text-anchor="middle">NORMAL</text><text x="90" y="148" text-anchor="middle" class="sub">정상 프로필</text>
+      <rect class="st warn" x="240" y="110" width="150" height="50" rx="8"/><text x="315" y="131" text-anchor="middle">BLOCKED_WAIT</text><text x="315" y="148" text-anchor="middle" class="sub">정지 유지 (보행자 대기)</text>
+      <rect class="st warn" x="470" y="110" width="140" height="50" rx="8"/><text x="540" y="131" text-anchor="middle">CREEP</text><text x="540" y="148" text-anchor="middle" class="sub">max_v 0.3 m/s 재시도</text>
+      <rect class="st bad" x="690" y="110" width="150" height="50" rx="8"/><text x="765" y="131" text-anchor="middle">ASSIST</text><text x="765" y="148" text-anchor="middle" class="sub">운용자 호출 15 s 반복</text>
+      <line class="edge warn" x1="160" y1="135" x2="238" y2="135" marker-end="url(#a4)"/>
+      <text x="199" y="100" text-anchor="middle" class="lbl">정지 4 s</text>
+      <text x="199" y="114" text-anchor="middle" class="lbl">(진행 &lt; 0.15 m)</text>
+      <line class="edge warn" x1="390" y1="135" x2="468" y2="135" marker-end="url(#a4)"/>
+      <text x="429" y="100" text-anchor="middle" class="lbl">+12 s</text>
+      <text x="429" y="114" text-anchor="middle" class="lbl">creep_on</text>
+      <line class="edge crit" x1="610" y1="135" x2="688" y2="135" marker-end="url(#a4)"/>
+      <text x="649" y="100" text-anchor="middle" class="lbl">+10 s</text>
+      <text x="649" y="114" text-anchor="middle" class="lbl">creep_off · assist</text>
+      <path class="edge acc" d="M 315 160 C 315 230, 120 230, 100 160" marker-end="url(#a4)"/>
+      <path class="edge acc" d="M 540 160 C 540 250, 120 250, 95 160" marker-end="url(#a4)"/>
+      <path class="edge acc" d="M 765 160 C 765 270, 120 270, 90 160" marker-end="url(#a4)"/>
+      <text x="430" y="266" text-anchor="middle" class="lbl" style="fill:#0E6F6A">진행 재개 (앵커 대비 0.15 m 이동) → NORMAL, creep 이었으면 프로필 복원</text>
+      <text x="20" y="32" class="head">전제: should_be_moving</text>
+      <text x="20" y="50" class="lbl">추종 중 ∧ 비상정지 아님 ∧ pause 시간 지남 ∧ 안전 pause 아님 ∧ 베이스가 자율(control_mode 1 또는 미상) ∧ 목표까지 0.8 m 초과</text>
+      <text x="20" y="66" class="lbl">이 전제가 깨지면(계획된 정지·RC 수동) 상태기계는 NORMAL 로 돌아가고 앵커만 갱신한다 — 수동 주행 중 헛 ASSIST 방지(8/3 대책).</text>
+      <text x="20" y="290" class="lbl">probe(탐침 전진) 분기는 파라미터만 남겨 두고 far_wall 분류를 이식하지 않아 발동하지 않는다.</text>
+    </svg>

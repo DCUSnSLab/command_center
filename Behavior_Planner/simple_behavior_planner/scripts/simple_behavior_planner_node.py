@@ -315,11 +315,17 @@ class SimpleBehaviorPlannerNode(Node):
         # 원본 /costmap 을 쓴다 — /costmap_keepout 은 경로에서 만든 코리도를
         # 얹은 것이라, 그걸로 합류를 고르면 순환 논리가 된다.
         self.declare_parameter('join_check_approach', True)
+        # 2026-09-29 진단(bag 137 재생): 경로 노드 좌표는 절대 UTM(main GEN-1195 규약)인데
+        # 합류(align)·통과 이력(note_position)·접근 직선(approach_clear)은 map 프레임 포즈를
+        # 그대로 넘겨 프레임이 어긋난다(datum≠0 인 실지도에서 합류가 임의 노드로 떨어짐).
+        # 기본 false = 종전 거동 보존(A/B 기준군). true = 포즈에 datum 을 더해 UTM 으로 비교.
+        self.declare_parameter('join_frame_fix', False)
         self.declare_parameter('join_costmap_topic', '/costmap')
         self.declare_parameter('join_clear_half_width_m', 0.45)
         self.declare_parameter('join_clear_lethal', 90)
         self.declare_parameter('join_pass_radius_m', 2.0)
         self._join_check_approach = self.get_parameter('join_check_approach').value
+        self._join_frame_fix = bool(self.get_parameter('join_frame_fix').value)
         self._join_clear_half_w = self.get_parameter('join_clear_half_width_m').value
         self._join_clear_lethal = self.get_parameter('join_clear_lethal').value
         self._join_pass_radius = self.get_parameter('join_pass_radius_m').value
@@ -391,9 +397,12 @@ class SimpleBehaviorPlannerNode(Node):
         # 근거이며, 매 포즈마다 쌓아야 RC 주행 구간이 제대로 기록된다
         # (합류 계산 시점에만 표본하면 그 사이를 놓친다).
         if self.path_manager.path_nodes:
-            self.path_manager.note_position(
-                pose_stamped.pose.position.x, pose_stamped.pose.position.y,
-                self._join_pass_radius)
+            off = self._utm_offset()
+            if off is not None:
+                self.path_manager.note_position(
+                    pose_stamped.pose.position.x + off[0],
+                    pose_stamped.pose.position.y + off[1],
+                    self._join_pass_radius)
         if prev is not None and getattr(self, '_unpinned_route', False):
             dt = ((msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
                   - (prev.header.stamp.sec + prev.header.stamp.nanosec * 1e-9))
@@ -426,6 +435,16 @@ class SimpleBehaviorPlannerNode(Node):
             # 않으면 부트스트랩 때 낸 옛 목표(B000)가 제어기에 남아 있는다.
             self.subgoal_published = False
 
+    def _utm_offset(self):
+        """포즈(map) → 경로 노드 좌표계(절대 UTM) 변환 오프셋.
+        join_frame_fix=false 면 (0,0) — 종전 거동. true 면 datum(미수신 시 None)."""
+        if not self._join_frame_fix:
+            return (0.0, 0.0)
+        wp = self.waypoint_publisher
+        if wp.origin_easting is None or wp.origin_northing is None:
+            return None
+        return (float(wp.origin_easting), float(wp.origin_northing))
+
     def _align_start_to_pose(self) -> bool:
         """경로 합류 노드를 골라 시작 목표로 정렬.
 
@@ -434,8 +453,11 @@ class SimpleBehaviorPlannerNode(Node):
         """
         if self.current_pose is None or not self.path_manager.path_nodes:
             return False
-        px = self.current_pose.pose.position.x
-        py = self.current_pose.pose.position.y
+        off = self._utm_offset()
+        if off is None:
+            return False          # datum 미수신 — 정렬 보류(pending)
+        px = self.current_pose.pose.position.x + off[0]
+        py = self.current_pose.pose.position.y + off[1]
         # cap=0 이면 어떤 후보도 상한을 통과하지 못해 최근접 폴백으로 떨어진다
         # — 그게 곧 예전 규칙이라 별도 분기를 두지 않는다.
         cap = 0.0 if self._join_nearest else self._join_max_approach
@@ -467,6 +489,9 @@ class SimpleBehaviorPlannerNode(Node):
         grid = self._costmap
         if grid is None:
             return True
+        off = self._utm_offset()
+        if off is not None and off != (0.0, 0.0):
+            x0 -= off[0]; x1 -= off[0]; y0 -= off[1]; y1 -= off[1]
         try:
             tr = self.waypoint_publisher.tf_buffer.lookup_transform(
                 grid.header.frame_id, 'map', rclpy.time.Time())

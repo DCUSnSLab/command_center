@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="400" viewBox="0 0 860 400" role="img" aria-label="NeedsReverse, IsTurn left, IsTurn right, Zone crosswalk, shared_road, gps_denied, road 순으로 조건을 검사하고 첫 성공에서 Drive 프로필을 고른다. 모두 실패하면 sidewalk.">
+  <style>
+  svg { color:#172019; font-family:"IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; }
+  .box { fill:#FFFFFF; stroke:currentColor; stroke-width:1.2; }
+  .st { fill:#FFFFFF; stroke:currentColor; stroke-width:1.4; }
+  .st.on { fill:#E3F0EE; stroke:#0E6F6A; }
+  .st.bad { fill:#F7E3DF; stroke:#A2382B; }
+  .st.warn { fill:#F7EBDC; stroke:#A5621B; }
+  .ctl .box { fill:#E3F0EE; stroke:#0E6F6A; }
+  .cond .box { stroke-dasharray:4 3; }
+  .act .box { stroke-width:1.8; }
+  .in .box { fill:#EDF1EF; }
+  text { fill:currentColor; font-size:11.5px; }
+  .sub { font-size:10px; fill:#5D6A63; }
+  .lbl { font-size:10.5px; fill:#5D6A63; }
+  .head { font-size:11px; font-weight:600; letter-spacing:0.06em; fill:#5D6A63; }
+  .edge { stroke:currentColor; stroke-width:1.1; fill:none; }
+  .edge.acc { stroke:#0E6F6A; }
+  .edge.crit { stroke:#A2382B; }
+  .edge.warn { stroke:#A5621B; }
+  </style>
+  <rect width="860" height="400" fill="#F4F7F5"/>
+      <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <g class="cond">
+        <rect class="box" x="20" y="20" width="230" height="36" rx="4"/><text x="135" y="43" text-anchor="middle">목표 node_type ∈ {2, 4}?</text>
+        <rect class="box" x="20" y="72" width="230" height="36" rx="4"/><text x="135" y="95" text-anchor="middle">회전각 ≥ 35° ∧ 거리 ≤ 6 m ∧ 좌?</text>
+        <rect class="box" x="20" y="124" width="230" height="36" rx="4"/><text x="135" y="147" text-anchor="middle">회전각 ≥ 35° ∧ 거리 ≤ 6 m ∧ 우?</text>
+        <rect class="box" x="20" y="176" width="230" height="36" rx="4"/><text x="135" y="199" text-anchor="middle">Zone == crosswalk?</text>
+        <rect class="box" x="20" y="228" width="230" height="36" rx="4"/><text x="135" y="251" text-anchor="middle">Zone == shared_road?</text>
+        <rect class="box" x="20" y="280" width="230" height="36" rx="4"/><text x="135" y="303" text-anchor="middle">Zone == gps_denied?</text>
+        <rect class="box" x="20" y="332" width="230" height="36" rx="4"/><text x="135" y="355" text-anchor="middle">Zone == road?</text>
+      </g>
+      <g class="act">
+        <rect class="box" x="330" y="20" width="200" height="36" rx="4"/><text x="430" y="43" text-anchor="middle">Drive reverse (유형 2/4 프로필)</text>
+        <rect class="box" x="330" y="72" width="200" height="36" rx="4"/><text x="430" y="95" text-anchor="middle">Drive turn_left</text>
+        <rect class="box" x="330" y="124" width="200" height="36" rx="4"/><text x="430" y="147" text-anchor="middle">Drive turn_right</text>
+        <rect class="box" x="330" y="176" width="200" height="36" rx="4"/><text x="430" y="199" text-anchor="middle">Drive crosswalk</text>
+        <rect class="box" x="330" y="228" width="200" height="36" rx="4"/><text x="430" y="251" text-anchor="middle">Drive shared_road</text>
+        <rect class="box" x="330" y="280" width="200" height="36" rx="4"/><text x="430" y="303" text-anchor="middle">Drive gps_denied (+힌트 pcd_hold)</text>
+        <rect class="box" x="330" y="332" width="200" height="36" rx="4"/><text x="430" y="355" text-anchor="middle">Drive road</text>
+      </g>
+      <g>
+        <line class="edge acc" x1="250" y1="38" x2="328" y2="38" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="90" x2="328" y2="90" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="142" x2="328" y2="142" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="194" x2="328" y2="194" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="246" x2="328" y2="246" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="298" x2="328" y2="298" marker-end="url(#a5)"/><line class="edge acc" x1="250" y1="350" x2="328" y2="350" marker-end="url(#a5)"/>
+        <text x="289" y="30" text-anchor="middle" class="lbl" style="fill:#0E6F6A">예</text>
+        <line class="edge" x1="135" y1="56" x2="135" y2="70" marker-end="url(#a5)"/><line class="edge" x1="135" y1="108" x2="135" y2="122" marker-end="url(#a5)"/><line class="edge" x1="135" y1="160" x2="135" y2="174" marker-end="url(#a5)"/><line class="edge" x1="135" y1="212" x2="135" y2="226" marker-end="url(#a5)"/><line class="edge" x1="135" y1="264" x2="135" y2="278" marker-end="url(#a5)"/><line class="edge" x1="135" y1="316" x2="135" y2="330" marker-end="url(#a5)"/>
+        <line class="edge" x1="135" y1="368" x2="135" y2="382"/><line class="edge" x1="135" y1="382" x2="328" y2="382" marker-end="url(#a5)"/>
+      </g>
+      <g class="act"><rect class="box" x="330" y="364" width="200" height="36" rx="4" style="stroke:#0E6F6A"/><text x="430" y="387" text-anchor="middle">Drive sidewalk (기본 = 오버레이 없음)</text></g>
+      <text x="560" y="34" class="head">프로필 → MPPIParams</text>
+      <text x="560" y="54" class="lbl">baseline(smppi_params.yaml)</text>
+      <text x="560" y="68" class="lbl">× node_type 수정자 (현행 behavior_modifiers 와 동일)</text>
+      <text x="560" y="82" class="lbl">× 오버레이 배율 (구역/회전, sidewalk 는 1.0)</text>
+      <text x="560" y="96" class="lbl">+ goal_reached_threshold: 경유 1.6 m / 최종 0.4 m</text>
+      <text x="560" y="124" class="head">회전각 계산</text>
+      <text x="560" y="144" class="lbl">목표 노드에서 (이전→목표) 와 (목표→다음) 방향의</text>
+      <text x="560" y="158" class="lbl">부호 있는 각도. +좌 −우. 첫 노드는 heading 사용.</text>
+      <text x="560" y="172" class="lbl">거리는 goal_status.distance_to_goal 로 잰다.</text>
+      <text x="560" y="200" class="head">구역(Zone)</text>
+      <text x="560" y="220" class="lbl">graph.json Node.Zone 을 노드 ID 로 조회.</text>
+      <text x="560" y="234" class="lbl">없으면 sidewalk → 현행과 같은 결정 (동등성 모드).</text>
+      <text x="560" y="262" class="head">발행 시점</text>
+      <text x="560" y="282" class="lbl">프로필 키(유형|오버레이|최종) 가 바뀔 때만 MPPIParams.</text>
+      <text x="560" y="296" class="lbl">creep 중에는 보류, creep 해제 시 복원 발행.</text>
+      <text x="560" y="310" class="lbl">행동명은 /bt/behavior 로 매 변경마다 방송.</text>
+    </svg>

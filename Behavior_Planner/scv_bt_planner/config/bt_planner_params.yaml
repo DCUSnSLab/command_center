@@ -1,0 +1,62 @@
+# scv_bt_planner 노드 파라미터. 이름은 simple_behavior_planner 와 맞춘다 (A/B 런치 호환).
+bt_planner:
+  ros__parameters:
+    mode: "shadow"                       # active | shadow
+    tick_hz: 20.0
+    tree_file: ""                        # 런치가 채움
+    profiles_file: ""                    # 런치가 채움
+    map_file_path: ""                    # graph.json (Zone). 비우면 전 노드 sidewalk
+
+    # --- 토픽 (simple_behavior_planner 와 동일 기본값) ---
+    current_position_topic: "/odometry/global"
+    planned_path_topic: "/planned_path_detailed"
+    goal_status_topic: "/goal_status"
+    subgoal_topic: "/sub_goal"
+    multiple_waypoints_topic: "/multiple_waypoints"
+    target_waypoints_topic: "/target_waypoints"
+    mppi_params_topic: "/mppi_update_params"   # smppi 가 구독하는 토픽 (simple BP 와 동일)
+    emergency_stop_topic: "/emergency_stop"
+    stop_flag_topic: "/stop_flag"
+    pause_command_topic: "/pause_command"
+    behavior_status_topic: "/behavior_status"
+    assist_request_topic: "/blocked_assist_request"
+    datum_topic: "/map_provider_node/utm"
+    hunter_status_topic: "/hunter_status"
+    join_costmap_topic: "/costmap"
+    localization_hint_topic: "/behavior/localization_hint"
+
+    waypoint_mode: "multiple"            # single | multiple | external
+    pause_trigger_distance: 0.8
+    goal_distance_via: 1.6
+    goal_distance_final: 0.4
+
+    # --- 합류/재정렬 (simple_behavior_planner 와 동일) ---
+    join_nearest: false
+    join_max_approach_m: 40.0
+    join_check_approach: true
+    join_clear_half_width_m: 0.45
+    join_clear_lethal: 90
+    join_pass_radius_m: 2.0
+    realign_on_engage: true
+    realign_manual_move_m: 2.0
+
+    # --- 정체 에스컬레이션 (동일) ---
+    blocked:
+      detect_sec: 4.0
+      progress_eps: 0.15
+      wait_timeout: 12.0
+      creep_timeout: 10.0
+      creep_speed: 0.3
+      assist_repeat_sec: 15.0
+      near_goal_hold_off: 0.8
+    probe:
+      enabled: false                     # far_wall 분류는 아직 미이식 — 켜면 경고만
+      max_dist_m: 2.0
+
+    # --- BT 전용 ---
+    turn:
+      min_deg: 35.0
+      window_m: 6.0
+    reverse:
+      allow_behind_goal: false           # true 면 후방 목표+양방향 링크에서도 후진 허용 (초기 OFF)
+    groot2_port: 0
