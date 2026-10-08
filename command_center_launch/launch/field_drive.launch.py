@@ -20,7 +20,10 @@ mission needs, including the curb-safety layers:
                         costmap processor, MPPI with hard-lethal +
                         lateral-bias critics)
   t=15s  behavior       simple_behavior_planner (waypoints, BLOCKED_WAIT
-                        stop-and-wait escalation)
+                        stop-and-wait escalation); behavior_planner:=bt runs
+                        scv_bt_planner instead, :=shadow runs both (BT decisions
+                        on /bt/* only). bt/shadow need scv_bt_planner built
+                        (BehaviorTree.CPP v4).
 
 Node-death policy: the perception chain is inline (curb node feeds the
 costmap feeds the controller), so safety-critical nodes are started with
@@ -50,6 +53,7 @@ Usage:
       map_file_path:=/path/to/map.json with_gnss:=false enable_visualization:=true
   ros2 launch command_center_launch field_drive.launch.py \
       route_source:=graph corridor_half_width:=7.0 max_slew_mps:=0
+  ros2 launch command_center_launch field_drive.launch.py behavior_planner:=shadow
 """
 
 import os

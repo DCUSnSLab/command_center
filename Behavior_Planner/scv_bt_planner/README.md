@@ -30,8 +30,12 @@ graph.json Node 에 `"Zone": "sidewalk"|"road"|"crosswalk"|"shared_road"|"gps_de
 
 ## 빌드·시험
 
+의존: `behaviortree_cpp`(v4) — `sudo apt install ros-humble-behaviortree-cpp`(4.10) 또는 SCV 슈퍼프로젝트의
+`src/third_party/BehaviorTree.CPP` 서브모듈(4.10.0) 소스 빌드. `hunter_msgs` 는 SCV 슈퍼프로젝트(`src/vehicle/hunter_ros2`).
+둘 중 하나라도 없으면 CMake 가 경고만 내고 이 패키지를 건너뛴다(`behavior_planner:=simple` 은 영향 없음).
+
 ```
-colcon build --packages-up-to scv_bt_planner --cmake-args -DBTCPP_EXAMPLES=OFF -DBTCPP_UNIT_TESTS=OFF -DBTCPP_BUILD_TOOLS=OFF
+colcon build --packages-up-to scv_bt_planner --cmake-args -DBTCPP_EXAMPLES=OFF -DBTCPP_BUILD_TOOLS=OFF
 colcon test --packages-select scv_bt_planner && colcon test-result --verbose
 ```
 

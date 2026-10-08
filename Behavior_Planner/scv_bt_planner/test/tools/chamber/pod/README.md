@@ -31,7 +31,7 @@ Pod: `ppub-claude/sim-dev-a-0` (d1-k8s, Tesla V100 32GB, CPU 12 / RAM 24Gi 한�
 - 하니스 자체는 `ROS_DOMAIN_ID=96 ROS_LOCALHOST_ONLY=1` 로 고정한다(데스크톱 스택은 도메인 20).
 
 ## 주의
-- 이 Pod 는 ppub_claude 의 Mando 용인 코스 작업(`~/mando_ws`, 도메인 20)과 공유한다. 하니스 `kill_stack` 은
+- 이 Pod 는 다른 워크로드(데스크톱 스택, 도메인 20)와 공유한다. 하니스 `kill_stack` 은
   자기 노드명 패턴(gzserver 포함)으로 전체 kill 하므로, **데스크톱에 Gazebo 를 띄운 채 A/B 를 돌리지 말 것.**
 - 챔버 kill_stack 은 `/dev/shm/fastrtps_*` 를 지운다 — 같은 Pod 의 다른 DDS 참가자(도메인 20)에 영향.
 - CPU 한도 12 코어: 런 하나가 gzserver+torch MPPI+코스트맵으로 8~10 코어를 쓴다. 동시 2 런 금지.
