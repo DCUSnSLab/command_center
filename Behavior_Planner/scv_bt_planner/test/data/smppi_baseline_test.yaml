@@ -1,0 +1,28 @@
+# 단위시험용 smppi baseline — 원본 behavior_parameter_manager 가 읽는 키 위치와 동일
+/**:
+  ros__parameters:
+    control_frequency: 10.0
+    goal_reached_threshold: 3.0
+    optimizer:
+      batch_size: 4096
+      time_steps: 60
+      model_dt: 0.1
+      temperature: 1.8
+      lambda_action: 0.08
+    vehicle:
+      wheelbase: 0.65
+      max_linear_velocity: 1.0
+      min_linear_velocity: -0.5
+      max_angular_velocity: 0.8
+      min_angular_velocity: -0.8
+      max_steering_angle: 0.3665
+      footprint_padding: 0.15
+      radius: 0.6
+    costs:
+      obstacle_weight: 100.0
+      goal_weight: 30.0
+      lookahead:
+        base_distance: 10.0
+        velocity_factor: 1.3
+        min_distance: 0.1
+        max_distance: 10.0

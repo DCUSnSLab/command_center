@@ -1,0 +1,51 @@
+{
+ "name": "chamber_20260803",
+ "source_npy": "(ppub) /home/ppub/scv_sim/worlds_0803/final/SCV_20260803.npy",
+ "source_meta": {
+  "bag": "record_20260803_205159",
+  "n": 45971,
+  "mount": 0.922,
+  "fit_ok": true,
+  "frac": 0.5725,
+  "off": 8298,
+  "t": 1785758752.3853374,
+  "lat": 35.9136039,
+  "lon": 128.8030721
+ },
+ "world": "/home/ubuntu/scv_sim/chamber/chamber_20260803.world",
+ "graph": "/home/ubuntu/scv_sim/chamber/chamber_20260803_graph.json",
+ "road_drop": 0.17,
+ "slope": -0.0029,
+ "road_cells": 274,
+ "road_area_m2": 68.5,
+ "obstacle_boxes": 445,
+ "route": {
+  "nodes": 8,
+  "length_m": 13.82,
+  "spacing_m": 2.0,
+  "reversed": false,
+  "curb_offset_m": 2.5,
+  "clearance_min_m": 1.8,
+  "clearance_median_m": 2.24,
+  "curb_dist_min_m": 2.0,
+  "curb_dist_median_m": 2.39,
+  "start": [
+   2.75,
+   4.75
+  ],
+  "goal": [
+   -7.75,
+   12.75
+  ],
+  "goal_node": "C07"
+ },
+ "spawn": {
+  "x": 5.47,
+  "y": -5.08,
+  "yaw_to_route": 1.841,
+  "rc_distance_m": 10.0,
+  "lateral_m": 2.0,
+  "heading_offset_deg": -30
+ },
+ "zones": "/home/ubuntu/scv_ws/tools/gazebo/zones/gps_canyon_20260803.yaml"
+}

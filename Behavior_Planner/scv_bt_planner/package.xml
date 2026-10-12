@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>scv_bt_planner</name>
+  <version>0.1.0</version>
+  <description>
+    SCV 행동 플래너 (BehaviorTree.CPP v4). simple_behavior_planner 와 같은 입출력 계약 위에서
+    "다음 행동"을 BT 로 판단한다. A/B 병행·shadow 모드 지원.
+  </description>
+  <maintainer email="junhp12345@gmail.com">Park</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>command_center_interfaces</depend>
+  <depend>map_interfaces</depend>
+  <depend>hunter_msgs</depend>
+  <depend>behaviortree_cpp</depend>
+  <depend>yaml-cpp</depend>
+  <depend>nlohmann-json-dev</depend>
+  <depend>ament_index_cpp</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

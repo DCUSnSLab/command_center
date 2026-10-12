@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="520" viewBox="0 0 860 520" role="img" aria-label="루트 Sequence 아래 SafetyGuards, MissionReady, SafetyPause, ZoneEntryRules, BlockedEscalation(SelectBehavior Fallback), RefreshWaypoints 가 차례로 평가되고, 각 노드의 SUCCESS·FAILURE 조건이 옆에 적혀 있다.">
+  <style>
+  svg { color:#172019; font-family:"IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; }
+  .box { fill:#FFFFFF; stroke:currentColor; stroke-width:1.2; }
+  .st { fill:#FFFFFF; stroke:currentColor; stroke-width:1.4; }
+  .st.on { fill:#E3F0EE; stroke:#0E6F6A; }
+  .st.bad { fill:#F7E3DF; stroke:#A2382B; }
+  .st.warn { fill:#F7EBDC; stroke:#A5621B; }
+  .ctl .box { fill:#E3F0EE; stroke:#0E6F6A; }
+  .cond .box { stroke-dasharray:4 3; }
+  .act .box { stroke-width:1.8; }
+  .in .box { fill:#EDF1EF; }
+  text { fill:currentColor; font-size:11.5px; }
+  .sub { font-size:10px; fill:#5D6A63; }
+  .lbl { font-size:10.5px; fill:#5D6A63; }
+  .head { font-size:11px; font-weight:600; letter-spacing:0.06em; fill:#5D6A63; }
+  .edge { stroke:currentColor; stroke-width:1.1; fill:none; }
+  .edge.acc { stroke:#0E6F6A; }
+  .edge.crit { stroke:#A2382B; }
+  .edge.warn { stroke:#A5621B; }
+  </style>
+  <rect width="860" height="520" fill="#F4F7F5"/>
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <g class="ctl"><rect class="box" x="20" y="16" width="130" height="34" rx="4"/><text x="85" y="38" text-anchor="middle">Sequence (루트)</text></g>
+      <line class="edge" x1="50" y1="50" x2="50" y2="490"/>
+      <!-- 1 -->
+      <line class="edge" x1="50" y1="84" x2="78" y2="84" marker-end="url(#a2)"/>
+      <g class="ctl"><rect class="box" x="80" y="66" width="150" height="36" rx="4"/><text x="155" y="89" text-anchor="middle">Fallback SafetyGuards</text></g>
+      <text x="245" y="80" class="lbl">Inverter(IsEmergencyStop) 가 SUCCESS 면 통과.</text>
+      <text x="245" y="95" class="lbl">비상정지면 Stop(reason) 이 request_stop 을 세우고 FAILURE → 틱 종료.</text>
+      <!-- 2 -->
+      <line class="edge" x1="50" y1="140" x2="78" y2="140" marker-end="url(#a2)"/>
+      <g class="cond"><rect class="box" x="80" y="122" width="150" height="36" rx="4"/><text x="155" y="145" text-anchor="middle">MissionReady</text></g>
+      <text x="245" y="136" class="lbl">경로 있음 ∧ 추종 중 ∧ 위치 있음 ∧ 정렬 대기 아님 → SUCCESS.</text>
+      <text x="245" y="151" class="lbl">아니면 FAILURE (아무것도 내지 않고 대기).</text>
+      <!-- 3 -->
+      <line class="edge" x1="50" y1="196" x2="78" y2="196" marker-end="url(#a2)"/>
+      <g class="act"><rect class="box" x="80" y="178" width="150" height="36" rx="4"/><text x="155" y="201" text-anchor="middle">SafetyPause</text></g>
+      <text x="245" y="192" class="lbl">목표 node_type=9 ∧ stop_flag → safety_pause_due (PauseCommand 2 s, 0.1 s 간격).</text>
+      <text x="245" y="207" class="lbl">항상 SUCCESS. 현행 safety_monitor 와 동일.</text>
+      <!-- 4 -->
+      <line class="edge" x1="50" y1="252" x2="78" y2="252" marker-end="url(#a2)"/>
+      <g class="ctl"><rect class="box" x="80" y="234" width="150" height="36" rx="4"/><text x="155" y="257" text-anchor="middle">ForceSuccess ZoneEntry</text></g>
+      <text x="245" y="248" class="lbl">ZoneIs(crosswalk) ∧ 목표 거리 ≤ 0.8 m ∧ 이 노드에 아직 미발동 → PauseBeforeEntry 2 s.</text>
+      <text x="245" y="263" class="lbl">행동 선택과 무관하게 항상 평가 (회전 중이어도 발동). 결과는 항상 SUCCESS.</text>
+      <!-- 5 -->
+      <line class="edge" x1="50" y1="322" x2="78" y2="322" marker-end="url(#a2)"/>
+      <g class="ctl"><rect class="box" x="80" y="292" width="150" height="60" rx="4"/><text x="155" y="316" text-anchor="middle">BlockedEscalation</text><text x="155" y="334" text-anchor="middle" class="sub">데코레이터</text></g>
+      <line class="edge" x1="230" y1="322" x2="258" y2="322" marker-end="url(#a2)"/>
+      <g class="ctl"><rect class="box" x="260" y="292" width="170" height="60" rx="4"/><text x="345" y="316" text-anchor="middle">Fallback SelectBehavior</text><text x="345" y="334" text-anchor="middle" class="sub">§5 결정 흐름</text></g>
+      <text x="445" y="304" class="lbl">자식(행동 선택)을 먼저 평가한 뒤 정체 상태기계를 한 스텝 돌린다.</text>
+      <text x="445" y="319" class="lbl">announce / creep_on / creep_off / assist 액션을 Context 에 적재.</text>
+      <text x="445" y="334" class="lbl">자식은 마지막 Drive(sidewalk) 가 항상 SUCCESS 라 실패하지 않는다.</text>
+      <!-- 6 -->
+      <line class="edge" x1="50" y1="392" x2="78" y2="392" marker-end="url(#a2)"/>
+      <g class="act"><rect class="box" x="80" y="374" width="150" height="36" rx="4"/><text x="155" y="397" text-anchor="middle">RefreshWaypoints</text></g>
+      <text x="245" y="388" class="lbl">마지막 발행 이후 map→odom 이 0.5 m 또는 5° 넘게 움직였으면 need_publish.</text>
+      <text x="245" y="403" class="lbl">현행 BP 의 앵커 이동 재발행과 동일 (8/3 필드 결함 대책).</text>
+      <text x="20" y="450" class="head">출력 소비 (틱 ④)</text>
+      <text x="20" y="470" class="lbl">프로필 키(node_type | overlay | 최종여부) 가 바뀌면 MPPIParams 발행 · creep 중이면 보류 → 웨이포인트 미발행 또는 need_publish 면 발행 · 그 외 1 Hz TargetWaypoints 재발행</text>
+      <text x="20" y="488" class="lbl">에스컬레이션 액션 처리 · pause 요청 발행 · 측위 힌트 변경 시 발행 · /bt/behavior 변경 시 발행</text>
+    </svg>

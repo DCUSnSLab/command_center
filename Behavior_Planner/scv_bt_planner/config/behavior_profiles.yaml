@@ -1,0 +1,74 @@
+# scv_bt_planner 행동 프로필.
+#
+# 구조는 simple_behavior_planner/config/behavior_modifiers.yaml 과 같다:
+# baseline(smppi_params.yaml) 값에 multipliers 를 곱하고 overrides 를 덮어쓴다.
+#
+# 두 층으로 나뉜다.
+#  1) node_profiles : 그래프 노드 유형(node_type 정수) → 프로필. 현행 BP 와 **동일 값**
+#     (동작 동등성의 기준). BT 가 sidewalk 를 고르면 이 층만 적용된다.
+#  2) overlays      : BT 가 고른 구역/회전 행동. node_profile 결과 위에 한 번 더 곱한다.
+#     (예: node_type 3 정밀 전진 + 회전 → 0.66 × 0.6 = 0.40)
+#
+# 값은 2026-09-28 설계 초안이다. 챔버·재생 검증에서 조정한다.
+
+smppi_config_path: "package://smppi/config/smppi_params.yaml"
+
+node_profiles:
+  1:  { name: forward,          description: "Normal forward movement",
+        multipliers: {}, overrides: {} }
+  2:  { name: reverse,          description: "Reverse movement",
+        multipliers: { goal_weight: 1.7, xy_goal_tolerance: 0.5, lookahead_base_distance: 0.6 },
+        overrides:   { max_linear_velocity: 0.0, min_linear_velocity: -1.0, respect_reverse_heading: true } }
+  3:  { name: precise_forward,  description: "Precise forward tracking",
+        multipliers: { max_linear_velocity: 0.66, goal_weight: 2.5, lookahead_base_distance: 0.6,
+                       xy_goal_tolerance: 0.4, goal_reached_threshold: 0.5 },
+        overrides:   { min_linear_velocity: 0.0 } }
+  4:  { name: precise_reverse,  description: "Precise reverse tracking",
+        multipliers: { goal_weight: 3.0, xy_goal_tolerance: 0.3, lookahead_base_distance: 0.5,
+                       goal_reached_threshold: 0.5 },
+        overrides:   { max_linear_velocity: 0.0, min_linear_velocity: -0.5, respect_reverse_heading: true } }
+  5:  { name: fast,             description: "Fast forward movement",
+        multipliers: { max_linear_velocity: 1.25, goal_weight: 0.7, lookahead_base_distance: 1.0,
+                       xy_goal_tolerance: 1.2, goal_reached_threshold: 1.3 },
+        overrides:   { min_linear_velocity: 0.0 } }
+  6:  { name: slow,             description: "Slow forward movement",
+        multipliers: { max_linear_velocity: 0.3, goal_weight: 1.3, lookahead_base_distance: 0.6,
+                       xy_goal_tolerance: 0.8 },
+        overrides:   { min_linear_velocity: 0.0 } }
+  7:  { name: pause2,           description: "Normal forward movement (2s pause handled by SMPPI)",
+        multipliers: { goal_reached_threshold: 0.3 }, overrides: {} }
+  8:  { name: pause4,           description: "Normal forward movement (4s pause handled by SMPPI)",
+        multipliers: { goal_reached_threshold: 0.3 }, overrides: {} }
+  9:  { name: fast_stop_ready,  description: "Fast forward movement",
+        multipliers: { max_linear_velocity: 1.25, goal_weight: 0.7, lookahead_base_distance: 1.0,
+                       xy_goal_tolerance: 1.2, goal_reached_threshold: 1.3 },
+        overrides:   { min_linear_velocity: 0.0 } }
+  10: { name: traffic_light,    description: "Traffic light detection mode",
+        multipliers: {}, overrides: {} }
+  11: { name: lane_ignore,      description: "Lane ignore mode",
+        multipliers: { max_linear_velocity: 0.8, goal_weight: 1.8, obstacle_weight: 0.8 },
+        overrides:   { min_linear_velocity: 0.0 } }
+
+overlays:
+  # sidewalk 는 기본 = 오버레이 없음 (node_profile 그대로). 동등성 기준.
+  sidewalk:    { code: 20, description: "Drive: sidewalk (default)", multipliers: {}, overrides: {} }
+  road:        { code: 21, description: "Drive: road zone",
+                 multipliers: { max_linear_velocity: 1.25, goal_weight: 0.8, xy_goal_tolerance: 1.2 },
+                 overrides: {} }
+  crosswalk:   { code: 22, description: "Drive: crosswalk (pause before entry)",
+                 multipliers: { max_linear_velocity: 0.8, goal_weight: 1.3 },
+                 overrides: {} }
+  shared_road: { code: 23, description: "Drive: shared road (pedestrians)",
+                 multipliers: { max_linear_velocity: 0.5, obstacle_weight: 1.5, lookahead_base_distance: 0.8 },
+                 overrides: {} }
+  gps_denied:  { code: 24, description: "Drive: GPS-denied zone",
+                 multipliers: { max_linear_velocity: 0.6, lookahead_base_distance: 0.7 },
+                 overrides: {} }
+  turn_left:   { code: 25, description: "Turn left",
+                 multipliers: { max_linear_velocity: 0.6, lookahead_base_distance: 0.6, goal_weight: 1.3 },
+                 overrides: {} }
+  turn_right:  { code: 26, description: "Turn right",
+                 multipliers: { max_linear_velocity: 0.6, lookahead_base_distance: 0.6, goal_weight: 1.3 },
+                 overrides: {} }
+  # reverse 오버레이는 node_type 2/4 프로필을 그대로 쓴다 (NeedsReverse 가 유형으로 판정)
+  reverse:     { code: 27, description: "Reverse (node type 2/4)", multipliers: {}, overrides: {} }

@@ -1,0 +1,14 @@
+{
+  "map_origin": {"easting": 482278.238, "northing": 3974410.535, "zone": "52N"},
+  "Node": [
+    {"ID": "N0001", "NodeType": 1, "Heading": 0.0, "Position": {"X": 0.0, "Y": 0.0}},
+    {"ID": "N0002", "NodeType": 1, "Heading": 0.0, "Position": {"X": 5.0, "Y": 0.0}, "Zone": "road"},
+    {"ID": "N0003", "NodeType": 3, "Heading": 0.0, "Position": {"X": 10.0, "Y": 0.0}, "Zone": "crosswalk"},
+    {"ID": "N0004", "NodeType": 1, "Heading": 90.0, "Position": {"X": 10.0, "Y": 5.0}, "Zone": "gps_denied"}
+  ],
+  "Link": [
+    {"ID": "L1", "FromNodeID": "N0001", "ToNodeID": "N0002", "Length": 5.0, "Bidirectional": true},
+    {"ID": "L2", "FromNodeID": "N0002", "ToNodeID": "N0003", "Length": 5.0, "Bidirectional": true},
+    {"ID": "L3", "FromNodeID": "N0003", "ToNodeID": "N0004", "Length": 5.0, "Bidirectional": true}
+  ]
+}
