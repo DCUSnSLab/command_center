@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """BT.CPP FileLogger2(.btlog) → CSV / 요약.
 
+용량: 결정 트리는 틱마다 전 노드가 IDLE↔상태 를 오가므로 20 Hz 에서 ~4 MB/10 min (Pod 실측 322 s 1.3 MB).
+
 형식(bt_file_logger_v2.cpp): 'BTCPP4-FileLogger2' | uint8 version | int32 xml_len | xml(_uid 포함) | int64 first_ts_usec
 | 전이 9바이트 × N = (uint48 t_usec 상대, uint16 node_uid, uint8 status)
 status: 0 IDLE, 1 RUNNING, 2 SUCCESS, 3 FAILURE, 4 SKIPPED
@@ -71,7 +73,9 @@ def main():
                 cnt.setdefault(uid, [0, 0])[0 if st == 2 else 1] += 1
         print(f'{"node":34s} {"type":20s} {"SUCCESS":>8s} {"FAILURE":>8s}')
         for uid, (s_, f_) in sorted(cnt.items(), key=lambda kv: -(kv[1][0] + kv[1][1])):
-            label, tag, _ = tab.get(uid, ('?', '?', {}))
+            label, tag, attrs = tab.get(uid, ('?', '?', {}))
+            if attrs:   # 같은 이름의 노드(ZoneIs·IsTurn·Drive·Sequence)를 포트 값으로 구분
+                label = f"{label}[{' '.join(f'{k}={v}' for k, v in attrs.items())}]"
             print(f'{label:34s} {tag:20s} {s_:8d} {f_:8d}')
     if a.ticks:
         # 루트(가장 작은 uid) 가 IDLE→(SUCCESS|FAILURE) 로 끝나는 지점을 틱 경계로 본다

@@ -52,7 +52,7 @@ colcon test --packages-select scv_bt_planner && colcon test-result --verbose
   `/pause_command`, `/mppi_update_params`, `/multiple_waypoints` 와 함께 bag 으로 남기면 결정과 제어기 입력이 전부 남는다.
 - 노드 로그: 합류 선택, `advanced to`, `[BEHAVIOR]`, `[BLOCKED]`, `[HAZARD]`, `[MODE]`, pause 사유.
 - **틱 단위 전이 기록** `bt_log_file`(BT.CPP FileLogger2, `.btlog`): `''` 끔(기본) | `auto` → `~/.ros/btlog/bt_<시각>.btlog` | 경로.
-  field_drive 에서는 `behavior_planner:=bt bt_log_file:=auto`. 상태가 바뀐 노드만 9바이트씩 써서 20 Hz 에서도 작다.
+  field_drive 에서는 `behavior_planner:=bt bt_log_file:=auto`. 전이당 9바이트, 결정 트리는 틱마다 전 노드가 리셋되므로 20 Hz 에서 약 4 MB/10 min(Pod 실측 322 s 1.3 MB).
   변환·요약: `test/tools/btlog_to_csv.py run.btlog --summary --ticks` (CSV: t_rel_s, 노드, 유형, 상태, 포트 속성;
   `--ticks` 는 틱마다 SUCCESS 였던 노드 경로). Groot2 앱에서도 그대로 재생된다.
 
