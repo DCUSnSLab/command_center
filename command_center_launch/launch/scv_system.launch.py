@@ -17,14 +17,22 @@
 #     false : 레거시 — BP 가 직접 /multiple_waypoints 발행 (노드당 1회 스냅샷)
 #     ※ 이중 발행 방지를 위해 waypoint_mode 는 이 플래그와 연동됨. 개별 오버라이드 금지.
 #
+#   behavior_planner (기본 simple):
+#     simple : simple_behavior_planner (현행)
+#     bt     : scv_bt_planner 가 명령 (simple 미기동)
+#     shadow : simple 이 명령하고 scv_bt_planner 는 /bt/* 로 결정만 방송 (무위험 비교)
+#     bt/shadow 는 scv_bt_planner 빌드 필요(BehaviorTree.CPP v4). bt_log_file:=auto 로 틱 단위 전이 기록.
+#
 #   예)  ros2 launch command_center_launch scv_system.launch.py use_sim_time:=false controller:=sa_mppi
+#        ros2 launch command_center_launch scv_system.launch.py behavior_planner:=shadow
 import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PythonExpression,
-                                  EnvironmentVariable)
+                                  EnvironmentVariable, PathJoinSubstitution)
+from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -40,6 +48,7 @@ def generate_launch_description():
     enable_visualization = LaunchConfiguration('enable_visualization')
     use_waypoint_manage = LaunchConfiguration('use_waypoint_manage')
     route_tool = LaunchConfiguration('route_tool')
+    behavior_planner = LaunchConfiguration('behavior_planner')
     # waypoint_manage 사용 시 BP 는 의미 목표(/target_waypoints)만 발행 (이중 발행 방지)
     waypoint_mode = PythonExpression(
         ["'external' if '", use_waypoint_manage, "' == 'true' else 'multiple'"])
@@ -49,6 +58,11 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_visualization', default_value='true'),
         DeclareLaunchArgument('use_waypoint_manage', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('behavior_planner', default_value='simple',
+                              choices=['simple', 'bt', 'shadow'],
+                              description="simple(현행) | bt(scv_bt_planner 명령) | shadow(simple 명령 + BT 결정 방송)"),
+        DeclareLaunchArgument('bt_log_file', default_value='',
+                              description="BT 틱 단위 전이 기록(.btlog): '' 끔 | 'auto' | 경로 (bt/shadow 에서만)"),
         # 경로 지정 GUI. path_planner.launch.py 가 DISPLAY 유무로 기본값을 정하므로
         # 여기서는 빈 값을 넘겨 그 판단을 그대로 쓴다 ('true'/'false' 로 덮어쓸 수 있다).
         DeclareLaunchArgument('route_tool', default_value=EnvironmentVariable(
@@ -64,14 +78,33 @@ def generate_launch_description():
             _inc('local_costmap', 'costmap.launch.py',
                  {'use_sim_time': use_sim_time})]),
 
-        # behavior planner (planner 이후)
+        # behavior planner (planner 이후). simple 은 simple|shadow 에서, BT 는 bt|shadow 에서 기동.
         TimerAction(period=2.0, actions=[
             _inc('simple_behavior_planner', 'simple_behavior_planner.launch.py',
                  {'use_sim_time': use_sim_time,
                   'current_position_topic': '/odom',
                   'planned_path_topic': '/planned_path_detailed',
                   'goal_tolerance': '1.0',
-                  'waypoint_mode': waypoint_mode})]),
+                  'waypoint_mode': waypoint_mode},
+                 condition=IfCondition(PythonExpression(
+                     ["'", behavior_planner, "' in ('simple', 'shadow')"]))),
+            # scv_bt_planner 는 지연 치환 include — 패키지가 없는 워크스페이스에서도
+            # behavior_planner:=simple(기본) 이면 런치가 깨지지 않는다.
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(PathJoinSubstitution([
+                    FindPackageShare('scv_bt_planner'), 'launch', 'bt_planner.launch.py'])),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'mode': PythonExpression(
+                        ["'active' if '", behavior_planner, "' == 'bt' else 'shadow'"]),
+                    'current_position_topic': '/odom',
+                    'planned_path_topic': '/planned_path_detailed',
+                    'waypoint_mode': waypoint_mode,
+                    'bt_log_file': LaunchConfiguration('bt_log_file'),
+                }.items(),
+                condition=IfCondition(PythonExpression(
+                    ["'", behavior_planner, "' in ('bt', 'shadow')"]))),
+        ]),
 
         # waypoint 계층: 의미 목표 -> (graph/datum/TF/가드) -> odom waypoint
         TimerAction(period=2.0, actions=[
