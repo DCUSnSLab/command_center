@@ -35,6 +35,8 @@ def generate_launch_description():
         DeclareLaunchArgument('probe_enabled', default_value='false'),
         DeclareLaunchArgument('groot2_port', default_value='0',
                               description='>0 이면 Groot2 실시간 감시 포트 (기본 1667)'),
+        DeclareLaunchArgument('bt_log_file', default_value='',
+                              description="틱 단위 전이 기록(.btlog). '' 끔 | 'auto' ~/.ros/btlog/bt_<시각>.btlog | 경로"),
         Node(
             package='scv_bt_planner',
             executable='bt_planner_node',
@@ -52,6 +54,7 @@ def generate_launch_description():
                     'profiles_file': LaunchConfiguration('profiles_file'),
                     'probe.enabled': LaunchConfiguration('probe_enabled'),
                     'groot2_port': LaunchConfiguration('groot2_port'),
+                    'bt_log_file': LaunchConfiguration('bt_log_file'),
                 },
             ],
         ),

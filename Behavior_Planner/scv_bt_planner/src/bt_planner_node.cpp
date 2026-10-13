@@ -5,6 +5,9 @@
 // goal_status 처리)을 이식했고, 틱 루프는 Context → 트리 → 출력 소비 순서다.
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -12,6 +15,7 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <behaviortree_cpp/bt_factory.h>
+#include <behaviortree_cpp/loggers/bt_file_logger_v2.h>
 #include <behaviortree_cpp/loggers/groot2_publisher.h>
 #include <command_center_interfaces/msg/controller_goal_status.hpp>
 #include <command_center_interfaces/msg/mppi_params.hpp>
@@ -116,6 +120,9 @@ private:
     declare_parameter("turn.window_m", 6.0);
     declare_parameter("reverse.allow_behind_goal", false);
     declare_parameter("groot2_port", 0);
+    // 틱 단위 노드 상태 전이 기록(BT.CPP FileLogger2, .btlog — Groot2 재생·btlog_to_csv.py 변환).
+    // "" = 끔, "auto" = ~/.ros/btlog/bt_<시각>.btlog, 그 외 = 파일 경로(.btlog 접미 자동)
+    declare_parameter("bt_log_file", std::string(""));
 
     mode_ = get_parameter("mode").as_string();
     prefix_ = (mode_ == "active") ? "" : "/bt";
@@ -265,6 +272,31 @@ private:
     if (port > 0) {
       groot_ = std::make_unique<BT::Groot2Publisher>(tree_, static_cast<unsigned>(port));
       RCLCPP_INFO(get_logger(), "Groot2 publisher on port %d", port);
+    }
+    openFileLogger(get_parameter("bt_log_file").as_string());
+  }
+
+  // 전이 기록 파일: 상태가 바뀐 노드만 9바이트씩 쓰므로 20 Hz 에서도 작다. 쓰기는 별도 스레드.
+  void openFileLogger(std::string path)
+  {
+    if (path.empty()) return;
+    try {
+      if (path == "auto") {
+        const char* home = std::getenv("HOME");
+        std::filesystem::path dir = std::filesystem::path(home ? home : "/tmp") / ".ros" / "btlog";
+        std::filesystem::create_directories(dir);
+        const auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "bt_%Y%m%d_%H%M%S.btlog", std::localtime(&t));
+        path = (dir / buf).string();
+      } else if (path.size() < 6 || path.substr(path.size() - 6) != ".btlog") {
+        path += ".btlog";   // FileLogger2 는 .btlog 접미가 아니면 예외
+      }
+      std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+      file_logger_ = std::make_unique<BT::FileLogger2>(tree_, path);
+      RCLCPP_INFO(get_logger(), "BT 전이 기록: %s", path.c_str());
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "bt_log_file '%s' 열기 실패: %s — 기록 없이 계속", path.c_str(), e.what());
     }
   }
 
@@ -819,6 +851,7 @@ private:
   BT::BehaviorTreeFactory factory_;
   BT::Tree tree_;
   std::unique_ptr<BT::Groot2Publisher> groot_;
+  std::unique_ptr<BT::FileLogger2> file_logger_;   // tree_ 뒤에 선언 → 먼저 파괴(flush)
   std::string mode_, prefix_, waypoint_mode_, tree_file_;
   double goal_via_ = 1.6, goal_final_ = 0.4;
   bool join_nearest_ = false, join_check_approach_ = true, realign_on_engage_ = true;

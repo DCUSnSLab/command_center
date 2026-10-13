@@ -46,6 +46,16 @@ colcon test --packages-select scv_bt_planner && colcon test-result --verbose
 - 후방 목표 자동 후진(`reverse.allow_behind_goal`) — 판정 미구현(초기 OFF 권장).
 - traffic_light(node_type 10) 안전 정지 — 인지 미사용 방침에 따라 미이식.
 
+## 판단 로깅
+
+- `/bt/behavior`(모드 무관): 행동·에스컬레이션·목표 노드·구역·node_type 이 바뀔 때마다 한 줄. `/behavior_status`, `/blocked_assist_request`,
+  `/pause_command`, `/mppi_update_params`, `/multiple_waypoints` 와 함께 bag 으로 남기면 결정과 제어기 입력이 전부 남는다.
+- 노드 로그: 합류 선택, `advanced to`, `[BEHAVIOR]`, `[BLOCKED]`, `[HAZARD]`, `[MODE]`, pause 사유.
+- **틱 단위 전이 기록** `bt_log_file`(BT.CPP FileLogger2, `.btlog`): `''` 끔(기본) | `auto` → `~/.ros/btlog/bt_<시각>.btlog` | 경로.
+  field_drive 에서는 `behavior_planner:=bt bt_log_file:=auto`. 전이당 9바이트, 결정 트리는 틱마다 전 노드가 리셋되므로 20 Hz 에서 약 4 MB/10 min(Pod 실측 322 s 1.3 MB).
+  변환·요약: `test/tools/btlog_to_csv.py run.btlog --summary --ticks` (CSV: t_rel_s, 노드, 유형, 상태, 포트 속성;
+  `--ticks` 는 틱마다 SUCCESS 였던 노드 경로). Groot2 앱에서도 그대로 재생된다.
+
 ## 실시간 BT 뷰어 (`test/tools/bt_viewer.py`)
 `groot2_port` 파라미터를 켜면(`-p groot2_port:=1667`) BT.CPP Groot2Publisher(ZMQ 1667/1668)가 열린다.
 `bt_viewer.py --port 1667` 은 Groot2 앱 없이 같은 프로토콜로 트리를 받아 **마지막 완료 틱에서 실제로 거친 노드**를

@@ -325,6 +325,9 @@ def generate_launch_description():
         # has corrected. Matching against /odom picks the wrong nearest node.
         # A/B 스위치 (2026-09-28): simple = 현행, bt = scv_bt_planner 가 명령(simple 미기동),
         # shadow = simple 이 명령하고 scv_bt_planner 는 /bt/* 로 결정만 방송(무위험 비교).
+        # bt_log_file: BT 틱 단위 전이 기록(.btlog). 'auto' 면 ~/.ros/btlog/bt_<시각>.btlog (bt/shadow 에서만 의미)
+        DeclareLaunchArgument('bt_log_file', default_value='',
+                              description="BT 전이 기록 파일: '' 끔 | 'auto' | 경로(.btlog)"),
         DeclareLaunchArgument(
             'behavior_planner', default_value='simple',
             description="'simple'(현행) | 'bt'(scv_bt_planner active) | "
@@ -354,6 +357,7 @@ def generate_launch_description():
                     'current_position_topic': '/odometry/global',
                     'map_file_path': map_file_path,
                     'probe_enabled': LaunchConfiguration('probe', default='false'),
+                    'bt_log_file': LaunchConfiguration('bt_log_file'),
                 }.items(),
                 condition=IfCondition(PythonExpression([
                     "'", LaunchConfiguration('behavior_planner'),
