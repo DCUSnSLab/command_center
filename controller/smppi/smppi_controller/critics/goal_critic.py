@@ -163,6 +163,20 @@ class GoalCritic(BaseCritic):
 
         return self.apply_weight(total_cost)
 
+    def plan_cost(self, trajectory: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Carrot term of one plan [T+1, 3] against the carrot of the last
+        compute_cost, for diagnostics. Does not move the rate-limited carrot.
+        """
+        if not self.enabled or self.last_lookahead_point is None:
+            return None
+        carrot = self.last_lookahead_point.to(self.device, self.dtype)
+        weights = torch.linspace(0.3, 1.0, steps=trajectory.shape[0], device=self.device, dtype=self.dtype)
+        weights = weights / weights.sum()
+        distances = torch.norm(trajectory[:, :2].to(self.dtype) - carrot.view(1, 2), dim=1)
+        hinge_d = torch.clamp(distances - self.xy_goal_tolerance, min=0.0)
+        return self.apply_weight(self.distance_scale * (hinge_d * weights).sum())
+
     # ------------------------------------------------------------------
     # Carrot computation (pure python floats)
     # ------------------------------------------------------------------

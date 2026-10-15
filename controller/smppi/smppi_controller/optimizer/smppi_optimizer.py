@@ -124,6 +124,10 @@ class SMPPIOptimizer:
             weights = torch.exp(-(total_costs - beta) / max(1e-9, self.temperature))
             weights = weights / (torch.sum(weights) + 1e-12)
 
+            # Rollout population of this iteration, kept by reference for the
+            # debug/visualization publisher (no copy, no sync)
+            self.last_rollouts, self.last_costs, self.last_weights = traj, total_costs, weights
+
             # update U
             dU = torch.sum(weights[:, None, None] * eps, dim=0)  # [T,2]
             self.control_sequence = self.control_sequence + dU
@@ -371,7 +375,8 @@ class SMPPIOptimizer:
                                             device=self.device, dtype=self.dtype)
         return cmd
 
-    def getOptimizedTrajectory(self) -> Optional[torch.Tensor]:
+    def get_optimized_plan(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Nominal plan: trajectory [T+1, 3] and actions [T, 2] (v, delta), on device."""
         if self.robot_state is None:
             return None
         a0 = self.last_cmd_applied
@@ -381,7 +386,11 @@ class SMPPIOptimizer:
         A[..., 0] = torch.clamp(A[..., 0], self.v_min, self.v_max)
         A[..., 1] = torch.clamp(A[..., 1], self.w_min, self.w_max)
         traj = self._simulate_from_A(A)
-        return traj[0]
+        return traj[0], A[0]
+
+    def getOptimizedTrajectory(self) -> Optional[torch.Tensor]:
+        plan = self.get_optimized_plan()
+        return None if plan is None else plan[0]
 
     def reset(self):
         self.control_sequence.zero_()
