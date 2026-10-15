@@ -148,9 +148,16 @@ class MPPIMainNode(Node):
         self.declare_parameter('vehicle.min_angular_velocity', -0.5)
         
         # Critic weights
-        self.declare_parameter('costs.obstacle_weight', 100.0)
+        self.declare_parameter('costs.obstacle_weight', 3000.0)
         self.declare_parameter('costs.goal_weight', 6.0)
-        self.declare_parameter('costs.keepout_cost', 20000.0)
+        self.declare_parameter('costs.collision_cost', 1.0e6)
+        self.declare_parameter('costs.keepout_cost', 2.0e5)
+
+        # Obstacle clearance (ObstacleCritic)
+        self.declare_parameter('costs.clearance.collision_margin', 0.08)
+        self.declare_parameter('costs.clearance.min_distance', 0.05)
+        self.declare_parameter('costs.clearance.time_gap', 0.4)
+        self.declare_parameter('costs.clearance.footprint_circles', 3)
         
         # Lookahead parameters
         self.declare_parameter('costs.lookahead.base_distance', 2.5)
@@ -221,7 +228,16 @@ class MPPIMainNode(Node):
         self.critic_weights = {
             'obstacle_weight': self.get_parameter('costs.obstacle_weight').get_parameter_value().double_value,
             'goal_weight': self.get_parameter('costs.goal_weight').get_parameter_value().double_value,
+            'collision_cost': self.get_parameter('costs.collision_cost').get_parameter_value().double_value,
             'keepout_cost': self.get_parameter('costs.keepout_cost').get_parameter_value().double_value,
+        }
+
+        # Obstacle clearance parameters
+        self.clearance_params = {
+            'collision_margin': self.get_parameter('costs.clearance.collision_margin').get_parameter_value().double_value,
+            'min_distance': self.get_parameter('costs.clearance.min_distance').get_parameter_value().double_value,
+            'time_gap': self.get_parameter('costs.clearance.time_gap').get_parameter_value().double_value,
+            'footprint_circles': self.get_parameter('costs.clearance.footprint_circles').get_parameter_value().integer_value,
         }
         
         # Lookahead parameters
@@ -258,16 +274,18 @@ class MPPIMainNode(Node):
     
     def _init_critics(self):
         """Initialize critic functions"""
-        # Obstacle critic (costmap-based, footprint-sampled)
+        # Obstacle critic (costmap clearance field, footprint covered by discs)
         obstacle_params = {
-            'weight': self.critic_weights['obstacle_weight'],
-            'collision_cost': 100000.0,        # Per-trajectory penalty, dominates repulsion sums
-            'repulsion_factor': 2.0,
+            'weight': self.critic_weights['obstacle_weight'],          # soft clearance shortfall
+            'collision_cost': self.critic_weights['collision_cost'],   # absolute, dominates soft + goal
+            'keepout_cost': self.critic_weights['keepout_cost'],       # absolute, < collision_cost
             'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
-            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as collisions
-            'keepout_cost': self.critic_weights['keepout_cost'],  # semantic keep-out, < collision_cost
+            'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as obstacles
+            'collision_margin': self.clearance_params['collision_margin'],
+            'clearance_min': self.clearance_params['min_distance'],
+            'clearance_time_gap': self.clearance_params['time_gap'],
+            'footprint_circles': self.clearance_params['footprint_circles'],
             'footprint': list(self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value),
-            'footprint_padding': self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value
         }
         obstacle_critic = ObstacleCritic(obstacle_params)
         self.optimizer.add_critic(obstacle_critic)
@@ -955,8 +973,6 @@ class MPPIMainNode(Node):
             obstacle_params['safety_radius'] = msg.safety_radius
         if msg.collision_cost >= 0:
             obstacle_params['collision_cost'] = msg.collision_cost
-        if msg.repulsion_factor >= 0:
-            obstacle_params['repulsion_factor'] = msg.repulsion_factor
         if msg.vehicle_radius > 0:
             obstacle_params['vehicle_radius'] = msg.vehicle_radius
         if msg.max_range > 0:
