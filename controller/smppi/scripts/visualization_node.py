@@ -295,12 +295,6 @@ class VisualizationNode(Node):
                 if footprint_marker:
                     marker_array.markers.append(footprint_marker)
                 marker_array.markers.extend(self.create_footprint_circles_markers())
-
-            # Cost breakdown / sampler state text next to the robot
-            if self.debug is not None and self.robot_state is not None:
-                text_marker = self.create_debug_text_marker()
-                if text_marker:
-                    marker_array.markers.append(text_marker)
             
             # Publish markers
             if len(marker_array.markers) > 0:
@@ -642,28 +636,6 @@ class VisualizationNode(Node):
             # entry direction: crossing the line along this tick counts as passed
             pts += [Point(x=gx, y=gy, z=0.03), Point(x=gx + 1.0 * math.cos(gyaw), y=gy + 1.0 * math.sin(gyaw), z=0.03)]
         marker.points = pts
-        return marker
-
-    def create_debug_text_marker(self) -> Optional[Marker]:
-        """Cost breakdown and sampler state above the robot"""
-        d = self.debug
-        x, y, _ = self.robot_state.state_vector
-        marker = Marker()
-        marker.header.frame_id = "odom"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "mppi_debug"
-        marker.id = 80
-        marker.type = Marker.TEXT_VIEW_FACING
-        marker.action = Marker.ADD
-        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = float(x), float(y), 2.2
-        marker.pose.orientation.w = 1.0
-        marker.scale.z = 0.32
-        marker.color = _rgba(_RED if d.collision_severity > 0 else (_AMBER if d.worst_shortfall > 0 else _WHITE), 0.95)
-        hit = f"{d.first_hit_median:.1f}s" if d.first_hit_median >= 0 else "-"
-        marker.text = (f"goal {d.goal_cost:.0f}  clear {d.obstacle_soft_cost:.0f}  col {d.collision_severity:.2f}  keep {d.keepout_severity:.2f}\n"
-                       f"min clear {d.min_clearance:.2f} m @{d.min_clearance_time:.1f}s (need {d.required_at_min:.2f})\n"
-                       f"rollouts collide {100 * d.collide_fraction:.0f}% (first hit {hit})  ESS {d.ess:.0f}/{d.num_rollouts}\n"
-                       f"v {d.v_cmd:.2f}  {d.compute_ms:.1f} ms  costmap {d.costmap_age:.2f} s")
         return marker
 
 
