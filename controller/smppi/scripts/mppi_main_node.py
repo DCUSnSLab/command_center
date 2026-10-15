@@ -8,18 +8,20 @@ Subscribes to processed sensor data, publishes control commands
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 
 import torch
 import numpy as np
 import time
 import math
+from array import array
 from typing import Optional
 
 # ROS2 messages
 from geometry_msgs.msg import Twist, PoseStamped, PointStamped
 from nav_msgs.msg import Path, OccupancyGrid, Odometry
 from std_msgs.msg import Header
-from smppi.msg import OptimalPath
+from smppi.msg import OptimalPath, MPPIDebug, RolloutSamples
 from command_center_interfaces.msg import ControllerGoalStatus, MultipleWaypoints, MPPIParams, PauseCommand
 
 # SMPPI modules
@@ -115,11 +117,17 @@ class MPPIMainNode(Node):
         self.declare_parameter('topics.output.cmd_vel', '/ackermann_like_controller/cmd_vel')
         self.declare_parameter('topics.output.optimal_path', '/smppi/optimal_path')
         self.declare_parameter('topics.output.goal_status', '/goal_status')
+        self.declare_parameter('topics.output.debug', '/smppi/debug')
+        self.declare_parameter('topics.output.rollouts', '/smppi/rollouts')
+        self.declare_parameter('topics.output.distance_field', '/smppi/distance_field')
         
         # Control parameters
         self.declare_parameter('control_frequency', 20.0)
         self.declare_parameter('enable_visualization', True)
         self.declare_parameter('visualization_frequency', 5.0)
+        # Debug visualization (published at the visualization rate, only with subscribers)
+        self.declare_parameter('debug_viz.rollout_samples', 60)      # half best weight, half random; 0 = off
+        self.declare_parameter('debug_viz.distance_field', False)    # obstacle distance field, 1 Hz (heavy)
         
         # SMPPI optimizer parameters
         self.declare_parameter('optimizer.batch_size', 3000)
@@ -185,6 +193,8 @@ class MPPIMainNode(Node):
         viz_freq = self.get_parameter('visualization_frequency').get_parameter_value().double_value
         # 시각화 발행은 소비율(viz 렌더 주기)에 맞춰 데시메이션
         self.viz_decimation = max(1, round(self.control_frequency / max(viz_freq, 0.1)))
+        self.rollout_samples = max(0, self.get_parameter('debug_viz.rollout_samples').get_parameter_value().integer_value)
+        self.publish_distance_field = self.get_parameter('debug_viz.distance_field').get_parameter_value().bool_value
 
         # Topic names
         self.odom_topic = self.get_parameter('topics.input.odometry').get_parameter_value().string_value
@@ -195,6 +205,9 @@ class MPPIMainNode(Node):
         self.cmd_topic = self.get_parameter('topics.output.cmd_vel').get_parameter_value().string_value
         self.path_topic = self.get_parameter('topics.output.optimal_path').get_parameter_value().string_value
         self.goal_status_topic = self.get_parameter('topics.output.goal_status').get_parameter_value().string_value
+        self.debug_topic = self.get_parameter('topics.output.debug').get_parameter_value().string_value
+        self.rollouts_topic = self.get_parameter('topics.output.rollouts').get_parameter_value().string_value
+        self.distance_field_topic = self.get_parameter('topics.output.distance_field').get_parameter_value().string_value
         
         # Get max_steering_angle for proper w_min/w_max calculation
         max_steering_angle = self.get_parameter('vehicle.max_steering_angle').get_parameter_value().double_value
@@ -352,6 +365,14 @@ class MPPIMainNode(Node):
             ControllerGoalStatus, self.goal_status_topic, reliable_qos)
         self.path_pub = self.create_publisher(
             OptimalPath, self.path_topic, reliable_qos)
+        self.debug_pub = self.create_publisher(MPPIDebug, self.debug_topic, reliable_qos)
+        self.rollouts_pub = self.create_publisher(RolloutSamples, self.rollouts_topic, reliable_qos)
+        self.distance_field_pub = self.create_publisher(OccupancyGrid, self.distance_field_topic, reliable_qos)
+        # Own generator for rollout subsampling so the optimizer's noise stream is untouched
+        self._viz_gen = torch.Generator(device=self.optimizer.device)
+        self._last_field_pub = None
+        self._last_compute_ms = 0.0
+        self._last_cmd = (0.0, 0.0)
         
         # Parameter update subscriber
         self.params_update_sub = self.create_subscription(
@@ -628,6 +649,8 @@ class MPPIMainNode(Node):
 
             # Publish control command
             self.cmd_pub.publish(cmd_vel)
+            self._last_cmd = (cmd_vel.linear.x, cmd_vel.angular.z)
+            self._last_compute_ms = (time.perf_counter() - start_time) * 1000.0
             
             # Calculate goal distance and publish status
             if self.goal_state is not None:
@@ -645,14 +668,11 @@ class MPPIMainNode(Node):
             self.optimizer.shift_control_sequence()
 
             _td = _t()
-            # 시각화 발행 게이트 (소비자: visualization_node 뿐):
-            #   enable_visualization(정적) AND 렌더주기 데시메이션 AND 실구독자 존재(동적).
-            #   publish_optimal_path 는 rollout 을 한 번 더 돌리므로 headless 낭비가 컸음.
-            if self.enable_visualization and \
-                    (self.control_count % self.viz_decimation == 0) and \
-                    self.path_pub.get_subscription_count() > 0:
-                self.publish_optimal_path()
-                self.publish_lookahead_point()
+            # 시각화 발행 게이트 (소비자: visualization_node, rosbag):
+            #   enable_visualization(정적) AND 렌더주기 데시메이션 AND 토픽별 실구독자 존재(동적).
+            #   계획 재시뮬레이션은 headless 낭비가 컸으므로 구독자가 없으면 아무것도 안 함.
+            if self.enable_visualization and (self.control_count % self.viz_decimation == 0):
+                self.publish_viz_data()
             _te = _t()
             if _prof:
                 self.get_logger().info(
@@ -684,22 +704,139 @@ class MPPIMainNode(Node):
             return False   # 크리틱의 실제 입력은 costmap (구 processed_obstacles 게이트 대체)
         return True
     
-    def publish_optimal_path(self):
-        """Publish optimal trajectory for visualization"""
+    def _find_critic(self, cls):
+        for critic in self.optimizer.critics:
+            if isinstance(critic, cls):
+                return critic
+        return None
+
+    def publish_viz_data(self):
+        """Optimal path, diagnostics, rollout samples (one device->host transfer), lookahead, distance field."""
+        want_path = self.path_pub.get_subscription_count() > 0
+        want_debug = self.debug_pub.get_subscription_count() > 0
+        want_rollouts = self.rollout_samples > 0 and self.rollouts_pub.get_subscription_count() > 0
+        if want_path or want_debug or want_rollouts:
+            self._publish_plan_and_debug(want_path, want_debug, want_rollouts)
+        if want_path:
+            self.publish_lookahead_point()
+        if self.publish_distance_field and self.distance_field_pub.get_subscription_count() > 0:
+            now = time.monotonic()
+            if self._last_field_pub is None or now - self._last_field_pub >= 1.0:
+                self._last_field_pub = now
+                self._publish_distance_field()
+
+    def _publish_plan_and_debug(self, want_path: bool, want_debug: bool, want_rollouts: bool):
         try:
-            # Get optimal trajectory from optimizer
-            optimal_trajectory = self.optimizer.getOptimizedTrajectory()
-            
-            if optimal_trajectory is not None and optimal_trajectory.shape[0] > 0:
+            opt = self.optimizer
+            plan = opt.get_optimized_plan()
+            if plan is None:
+                return
+            traj, actions = plan                                   # [T+1, 3], [T, 2] on device
+            T1, dt, f32 = traj.shape[0], opt.dt, torch.float32
+            parts = [traj]
+            weights, costs = getattr(opt, 'last_weights', None), getattr(opt, 'last_costs', None)
+            want_debug = want_debug and weights is not None
+            want_rollouts = want_rollouts and weights is not None
+            if want_debug:
+                obs, goal = self._find_critic(ObstacleCritic), self._find_critic(GoalCritic)
+                zero = traj.new_zeros(())
+                ev = obs.evaluate_plan(traj, actions) if obs is not None else None
+                g = goal.plan_cost(traj) if goal is not None else None
+                if ev is not None:
+                    clear, req = ev['clearance'], ev['required']
+                    i_min = torch.argmin(clear[1:])
+                    plan_terms = [ev['soft'], ev['severity'], ev['keepout_severity'], clear[1:][i_min],
+                                  (i_min + 1).to(traj.dtype) * dt, req[i_min], (req - clear[1:]).clamp(min=0.0).max()]
+                else:
+                    clear, req = traj.new_zeros(T1), traj.new_zeros(T1 - 1)
+                    plan_terms = [zero] * 7
+                if obs is not None and obs.last_stats is not None:
+                    collides, first_hit = obs.last_stats
+                    n_col = collides.sum()
+                    fh = torch.where(collides, first_hit, torch.full_like(first_hit, float('inf'))).sort().values
+                    fh_med = torch.where(n_col > 0, (fh[((n_col - 1) // 2).clamp(min=0)] + 1.0) * dt, -torch.ones_like(zero))
+                    pop_terms = [collides.to(traj.dtype).mean(), fh_med]
+                else:
+                    pop_terms = [zero, -torch.ones_like(zero)]
+                ess = 1.0 / (weights.square().sum() + 1e-12)
+                entropy = -(weights * torch.log(weights + 1e-30)).sum()
+                scalars = torch.stack([(g if g is not None else zero).to(traj.dtype)] + plan_terms + pop_terms
+                                      + [costs.min(), costs.median(), ess, entropy])
+                parts += [scalars, actions[:, 0], clear, req]
+            n_samples = 0
+            if want_rollouts:
+                K = weights.shape[0]
+                n_samples = min(self.rollout_samples, K)
+                if n_samples >= K:
+                    idx = torch.arange(K, device=weights.device)
+                else:
+                    n_top = n_samples // 2
+                    idx = torch.cat([torch.topk(weights, n_top).indices,
+                                     torch.randint(0, K, (n_samples - n_top,), device=weights.device,
+                                                   generator=self._viz_gen)])
+                parts += [opt.last_rollouts[idx, :, :2], costs[idx], weights[idx]]
+            # Single device->host transfer for everything above
+            flat = torch.cat([p.reshape(-1).to(f32) for p in parts]).cpu().numpy()
+
+            stamp = self.get_clock().now().to_msg()
+            off = T1 * 3
+            if want_path:
+                self.publish_optimal_path(flat[:off].reshape(T1, 3), stamp)
+            if want_debug:
+                sc = flat[off:off + 14]; off += 14
+                m = MPPIDebug()
+                m.header.stamp, m.header.frame_id = stamp, "odom"
+                (m.goal_cost, m.obstacle_soft_cost, m.collision_severity, m.keepout_severity, m.min_clearance,
+                 m.min_clearance_time, m.required_at_min, m.worst_shortfall, m.collide_fraction,
+                 m.first_hit_median, m.cost_min, m.cost_median, m.ess, m.weight_entropy) = (float(x) for x in sc)
+                m.plan_speed = array('f', flat[off:off + T1 - 1].tobytes()); off += T1 - 1
+                m.plan_clearance = array('f', flat[off:off + T1].tobytes()); off += T1
+                m.plan_required = array('f', flat[off:off + T1 - 1].tobytes()); off += T1 - 1
+                m.num_rollouts = int(weights.shape[0])
+                m.v_cmd, m.w_cmd = float(self._last_cmd[0]), float(self._last_cmd[1])
+                m.compute_ms = float(self._last_compute_ms)
+                if self.latest_costmap is not None:
+                    age = self.get_clock().now() - Time.from_msg(self.latest_costmap.header.stamp)
+                    m.costmap_age = age.nanoseconds * 1e-9
+                self.debug_pub.publish(m)
+            if n_samples > 0:
+                n_xy = n_samples * T1 * 2
+                r = RolloutSamples()
+                r.header.stamp, r.header.frame_id = stamp, "odom"
+                r.num_samples, r.num_poses = n_samples, T1
+                r.xy = array('f', flat[off:off + n_xy].tobytes()); off += n_xy
+                r.cost = array('f', flat[off:off + n_samples].tobytes()); off += n_samples
+                r.weight = array('f', flat[off:off + n_samples].tobytes())
+                self.rollouts_pub.publish(r)
+        except Exception as e:
+            self.get_logger().warn(f"Debug visualization error: {str(e)}")
+
+    def _publish_distance_field(self):
+        """Obstacle critic distance field as an OccupancyGrid: 100 = blocked ... 0 = >= 2 m clear."""
+        obs = self._find_critic(ObstacleCritic)
+        info = obs.costmap_info if obs is not None else None
+        if info is None:
+            return
+        field = info['distance_field']
+        grid = (100.0 * (1.0 - field.clamp(0.0, 2.0) / 2.0)).round().to(torch.int8).cpu().numpy()
+        m = OccupancyGrid()
+        m.header.stamp, m.header.frame_id = self.get_clock().now().to_msg(), "odom"
+        m.info.resolution = float(info['resolution'])
+        m.info.width, m.info.height = int(info['width']), int(info['height'])
+        m.info.origin.position.x, m.info.origin.position.y = float(info['origin_x']), float(info['origin_y'])
+        m.info.origin.orientation.w = 1.0
+        m.data = array('b', grid.tobytes())
+        self.distance_field_pub.publish(m)
+
+    def publish_optimal_path(self, arr: np.ndarray, stamp):
+        """Publish the optimal trajectory [T+1, 3] (already on the host) for visualization"""
+        try:
+            if arr is not None and arr.shape[0] > 0:
                 # Create OptimalPath message
                 path_msg = OptimalPath()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
+                path_msg.header.stamp = stamp
                 path_msg.header.frame_id = "odom"
 
-                # Move the whole trajectory to CPU ONCE (single transfer) and build
-                # the message from numpy scalars.  The previous per-point float()
-                # calls each forced a GPU->CPU sync (~T+1 syncs) -> ~20 ms/cycle.
-                arr = optimal_trajectory.detach().cpu().numpy()   # [T+1, >=2]
                 has_yaw = arr.shape[1] >= 3
                 if has_yaw:
                     qw = np.cos(arr[:, 2] / 2.0)

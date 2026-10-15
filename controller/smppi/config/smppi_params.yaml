@@ -4,6 +4,12 @@
     control_frequency: 10.0               # 제어 주기 [Hz]
     visualization_frequency: 5.0          # 시각화 주기 [Hz]
     enable_visualization: true            # 시각화 활성화
+    # 디버그 시각화 (visualization_frequency 주기, 토픽별 구독자가 있을 때만 발행)
+    #   /smppi/debug (MPPIDebug): 계획 비용 분해, 여유, rollout 충돌 비율, ESS, 계산 시간
+    #   /smppi/rollouts (RolloutSamples): rviz rollout 부채꼴
+    debug_viz:
+      rollout_samples: 60                 # rollout 표본 수 (절반 최고 가중치, 절반 무작위). 0 = 끔
+      distance_field: false               # 장애물 거리장 /smppi/distance_field (OccupancyGrid, 1 Hz). 무거움
     goal_reached_threshold: 3.0           # 목표 도달 거리 임계값 [m]
     passed_goal_max_distance: 8.0         # 통과 판정 상한 [m]: goal 을 이 거리 이내에서
                                           # 지나쳤으면(진입 방향 평면 기준) 도달로 인정.

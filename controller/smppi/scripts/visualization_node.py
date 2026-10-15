@@ -15,11 +15,11 @@ import numpy as np
 from typing import Optional
 
 # ROS2 messages
-from geometry_msgs.msg import PoseStamped, Point, Twist, PointStamped
+from geometry_msgs.msg import PoseStamped, Point
+from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
-from smppi.msg import OptimalPath
-from nav_msgs.msg import Odometry
+from smppi.msg import OptimalPath, MPPIDebug, RolloutSamples
 from command_center_interfaces.msg import MultipleWaypoints
 
 # TF2 imports
@@ -32,6 +32,16 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from smppi_controller.utils.geometry import GeometryUtils
+from smppi_controller.critics.obstacle_critic import cover_footprint
+
+# BEV palette: normal marks stay grey/white, colour only for state
+_WHITE = (0.92, 0.92, 0.92)
+_AMBER = (1.0, 0.70, 0.10)      # clearance shortfall (allowed, costs)
+_RED = (0.92, 0.25, 0.20)       # collision (clearance < collision_margin)
+
+
+def _rgba(rgb, a):
+    return ColorRGBA(r=rgb[0], g=rgb[1], b=rgb[2], a=a)
 
 
 class _VizRobotState:
@@ -67,7 +77,8 @@ class VisualizationNode(Node):
         self.multiple_waypoints: Optional[MultipleWaypoints] = None
         self.robot_state = None  # (x, y, yaw) — /odom 직접 변환
         self.lookahead_point: Optional[PoseStamped] = None
-        self.target_direction: Optional[PointStamped] = None
+        self.debug: Optional[MPPIDebug] = None
+        self.rollouts: Optional[RolloutSamples] = None
         
         # Visualization timer (runs at lower frequency)
         self.visualization_timer = self.create_timer(
@@ -84,6 +95,8 @@ class VisualizationNode(Node):
         self.declare_parameter('topics.input.goal_pose', '/subgoal')
         self.declare_parameter('topics.input.multiple_waypoints', '/multiple_waypoints')
         self.declare_parameter('topics.output.markers', '/smppi_visualization')
+        self.declare_parameter('topics.output.debug', '/smppi/debug')          # main node outputs
+        self.declare_parameter('topics.output.rollouts', '/smppi/rollouts')
         
         # Waypoint mode
         self.declare_parameter('waypoint_mode', 'multiple')
@@ -98,6 +111,14 @@ class VisualizationNode(Node):
         # Vehicle footprint parameters
         self.declare_parameter('vehicle.footprint', [0.0, 0.0])
         self.declare_parameter('vehicle.footprint_padding', 0.0)
+
+        # Obstacle critic geometry/costs and goal tests (same yaml as the main node)
+        self.declare_parameter('costs.clearance.collision_margin', 0.08)
+        self.declare_parameter('costs.clearance.footprint_circles', 3)
+        self.declare_parameter('costs.collision_cost', 1.0e6)
+        self.declare_parameter('optimizer.time_steps', 60)
+        self.declare_parameter('goal_reached_threshold', 3.0)
+        self.declare_parameter('passed_goal_max_distance', 8.0)
         
         # QoS
         self.declare_parameter('qos.reliable_depth', 5)
@@ -127,6 +148,18 @@ class VisualizationNode(Node):
         # Vehicle footprint parameters
         self.footprint = self.get_parameter('vehicle.footprint').get_parameter_value().double_array_value
         self.footprint_padding = self.get_parameter('vehicle.footprint_padding').get_parameter_value().double_value
+
+        self.debug_topic = self.get_parameter('topics.output.debug').get_parameter_value().string_value
+        self.rollouts_topic = self.get_parameter('topics.output.rollouts').get_parameter_value().string_value
+        self.collision_margin = self.get_parameter('costs.clearance.collision_margin').get_parameter_value().double_value
+        n_circles = self.get_parameter('costs.clearance.footprint_circles').get_parameter_value().integer_value
+        self.circles, self.circle_radius = cover_footprint(list(self.footprint), n_circles) \
+            if len(self.footprint) >= 6 else ([], 0.0)
+        # a rollout costs at least collision_cost / T once it collides (graded severity floor)
+        self.collision_floor = self.get_parameter('costs.collision_cost').get_parameter_value().double_value / \
+            max(1, self.get_parameter('optimizer.time_steps').get_parameter_value().integer_value)
+        self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
+        self.passed_goal_max_distance = self.get_parameter('passed_goal_max_distance').get_parameter_value().double_value
         
         # QoS parameters
         self.reliable_qos_depth = self.get_parameter('qos.reliable_depth').get_parameter_value().integer_value
@@ -155,8 +188,10 @@ class VisualizationNode(Node):
             Odometry, '/odom', self.robot_state_callback, sensor_qos)
         self.lookahead_sub = self.create_subscription(
             PoseStamped, '/smppi_visualization/lookahead_point', self.lookahead_callback, reliable_qos)
-        self.target_direction_sub = self.create_subscription(
-            PointStamped, '/smppi_visualization/target_direction', self.target_direction_callback, reliable_qos)
+        self.debug_sub = self.create_subscription(
+            MPPIDebug, self.debug_topic, self.debug_callback, reliable_qos)
+        self.rollouts_sub = self.create_subscription(
+            RolloutSamples, self.rollouts_topic, self.rollouts_callback, reliable_qos)
         
         # Goal subscribers based on waypoint mode
         if self.waypoint_mode == 'single':
@@ -208,9 +243,13 @@ class VisualizationNode(Node):
         """Receive lookahead point"""
         self.lookahead_point = msg
     
-    def target_direction_callback(self, msg: PointStamped):
-        """Receive target direction"""
-        self.target_direction = msg
+    def debug_callback(self, msg: MPPIDebug):
+        """Receive MPPI diagnostics"""
+        self.debug = msg
+
+    def rollouts_callback(self, msg: RolloutSamples):
+        """Receive rollout samples"""
+        self.rollouts = msg
     
     def visualization_callback(self):
         """Main visualization callback (runs at lower frequency)"""
@@ -223,16 +262,15 @@ class VisualizationNode(Node):
             #     if goal_marker:
             #         marker_array.markers.append(goal_marker)
             
-            # Optimal trajectory marker
+            # Optimal trajectory marker (coloured by clearance state when diagnostics arrive)
             if self.enable_trajectory and self.optimal_path is not None:
                 traj_marker = self.create_trajectory_marker()
                 if traj_marker:
                     marker_array.markers.append(traj_marker)
-            
-            # Obstacle markers — BEV 정리로 비활성화
-            # if self.enable_obstacles and self.processed_obstacles is not None:
-            #     obstacle_markers = self.create_obstacle_markers()
-            #     marker_array.markers.extend(obstacle_markers)
+
+            # Sampled rollouts
+            if self.rollouts is not None:
+                marker_array.markers.extend(self.create_rollout_markers())
             
             # Lookahead point marker
             if self.lookahead_point is not None:
@@ -244,24 +282,25 @@ class VisualizationNode(Node):
             # if self.waypoint_mode == 'multiple' and self.multiple_waypoints is not None:
             #     next_waypoint_markers = self.create_next_waypoints_markers()
             #     marker_array.markers.extend(next_waypoint_markers)
+
+            # Goal reached radius + passed-plane (when smppi switches to the next waypoint)
+            if self.latest_goal is not None:
+                goal_region_marker = self.create_goal_region_marker()
+                if goal_region_marker:
+                    marker_array.markers.append(goal_region_marker)
             
-            # Robot footprint marker
+            # Robot footprint (true outline) + the discs the obstacle critic actually checks
             if self.enable_robot_footprint and self.robot_state is not None and len(self.footprint) > 0:
                 footprint_marker = self.create_footprint_marker()
                 if footprint_marker:
                     marker_array.markers.append(footprint_marker)
-            
-            # Robot heading marker (X축 진행방향 화살표) — BEV 정리로 비활성화
-            # if self.robot_state is not None:
-            #     heading_marker = self.create_heading_marker()
-            #     if heading_marker:
-            #         marker_array.markers.append(heading_marker)
-            
-            # Target direction marker — BEV 정리로 비활성화
-            # if self.target_direction is not None and self.robot_state is not None:
-            #     direction_marker = self.create_target_direction_marker()
-            #     if direction_marker:
-            #         marker_array.markers.append(direction_marker)
+                marker_array.markers.extend(self.create_footprint_circles_markers())
+
+            # Cost breakdown / sampler state text next to the robot
+            if self.debug is not None and self.robot_state is not None:
+                text_marker = self.create_debug_text_marker()
+                if text_marker:
+                    marker_array.markers.append(text_marker)
             
             # Publish markers
             if len(marker_array.markers) > 0:
@@ -325,44 +364,85 @@ class VisualizationNode(Node):
         traj_marker.color.g = 1.0
         traj_marker.color.b = 1.0
         traj_marker.color.a = 1.0
+
+        # Per-pose state from the diagnostics of the same plan: white = clear,
+        # amber = closer than d_req(v), red = collision
+        states = self._plan_states(len(traj_marker.points))
+        if states is not None:
+            traj_marker.colors = [_rgba((_WHITE, _AMBER, _RED)[k], 1.0) for k in states]
         
         return traj_marker
-    
-    def create_obstacle_markers(self) -> list:
-        """Create obstacle visualization markers"""
-        markers = []
-        
-        if not hasattr(self.processed_obstacles, 'obstacle_points') or not self.processed_obstacles.obstacle_points:
-            return markers
-        
-        # Create points marker for all obstacles
-        obstacle_marker = Marker()
-        obstacle_marker.header.frame_id = "odom"
-        obstacle_marker.header.stamp = self.get_clock().now().to_msg()
-        obstacle_marker.ns = "smppi_obstacles"
-        obstacle_marker.id = 10
-        obstacle_marker.type = Marker.POINTS
-        obstacle_marker.action = Marker.ADD
-        
-        # Add obstacle points (already in odom frame from sensor processor)
-        for point in self.processed_obstacles.obstacle_points:
-            p = Point()
-            p.x = float(point.x)  # odom frame x
-            p.y = float(point.y)  # odom frame y
-            p.z = 0.1
-            obstacle_marker.points.append(p)
-        
-        # Obstacle appearance
-        obstacle_marker.scale.x = 0.1  # Point width
-        obstacle_marker.scale.y = 0.1  # Point height
-        obstacle_marker.color.r = 0.75
-        obstacle_marker.color.g = 0.75
-        obstacle_marker.color.b = 0.75
-        obstacle_marker.color.a = 0.8
-        
-        markers.append(obstacle_marker)
-        return markers
-    
+
+    def _plan_states(self, n_points: int) -> Optional[list]:
+        """0 clear / 1 shortfall / 2 collision per plan pose, None without matching diagnostics."""
+        d = self.debug
+        if d is None or len(d.plan_clearance) != n_points or len(d.plan_required) != n_points - 1:
+            return None
+        clear, req = d.plan_clearance, d.plan_required
+        states = [0]
+        for i in range(1, n_points):
+            states.append(2 if clear[i] < self.collision_margin else (1 if clear[i] < req[i - 1] else 0))
+        return states
+
+    def create_rollout_markers(self) -> list:
+        """
+        Sampled rollouts: grey by softmax weight, red when the rollout collides.
+        One LINE_STRIP per rollout with a single colour keeps the message small
+        (per-vertex colours on a LINE_LIST were ~300 KB per frame for 60 rollouts).
+        Large sample counts fall back to one LINE_LIST in a few colour bins.
+        """
+        r = self.rollouts
+        n, p = r.num_samples, r.num_poses
+        if n <= 0 or p < 2 or len(r.xy) != n * p * 2:
+            return []
+        xy = np.asarray(r.xy, dtype=np.float32).reshape(n, p, 2)
+        w = np.asarray(r.weight, dtype=np.float32)
+        alpha = 0.12 + 0.78 * (w / max(float(w.max()), 1e-12))
+        colliding = np.asarray(r.cost, dtype=np.float32) >= self.collision_floor
+        stamp = self.get_clock().now().to_msg()
+
+        def base(mid, mtype):
+            m = Marker()
+            m.header.frame_id = "odom"
+            m.header.stamp = stamp
+            m.ns = "rollouts"
+            m.id = mid
+            m.type = mtype
+            m.action = Marker.ADD
+            m.scale.x = 0.012
+            m.pose.orientation.w = 1.0
+            m.lifetime.nanosec = 500000000     # refreshed at the visualization rate
+            return m
+
+        if n <= 200:
+            xy = xy[:, ::2, :]                  # 0.2 s between vertices
+            out = []
+            for k in range(n):
+                m = base(100 + k, Marker.LINE_STRIP)
+                m.points = [Point(x=float(x), y=float(y), z=0.03) for x, y in xy[k]]
+                m.color = _rgba(_RED, 0.6 * float(alpha[k])) if colliding[k] else _rgba(_WHITE, float(alpha[k]))
+                out.append(m)
+            return out
+        # many samples: LINE_LIST per colour bin, vertex count bounded
+        stride = max(1, int(math.ceil(n * p / 20000.0)))
+        xy = xy[:, ::stride, :]
+        bins = np.where(colliding, 0, 1 + np.minimum(3, (alpha * 4).astype(int)))
+        out = []
+        for b in range(5):
+            sel = np.nonzero(bins == b)[0]
+            if len(sel) == 0:
+                continue
+            m = base(100 + b, Marker.LINE_LIST)
+            pts = []
+            for k in sel:
+                line = [Point(x=float(x), y=float(y), z=0.03) for x, y in xy[k]]
+                for a, c in zip(line[:-1], line[1:]):
+                    pts += (a, c)
+            m.points = pts
+            m.color = _rgba(_RED, 0.35) if b == 0 else _rgba(_WHITE, 0.15 + 0.2 * b)
+            out.append(m)
+        return out
+
     def create_footprint_marker(self) -> Optional[Marker]:
         """Create robot footprint visualization marker"""
         if not self.robot_state or len(self.footprint) == 0:
@@ -374,8 +454,9 @@ class VisualizationNode(Node):
             robot_pose = (robot_x, robot_y, robot_yaw)
             
             # Create robot footprint at current pose
+            # True outline (the obstacle critic does not use footprint_padding)
             robot_footprint = GeometryUtils.create_robot_footprint_at_pose(
-                self.footprint, robot_pose, self.footprint_padding)
+                self.footprint, robot_pose, 0.0)
             
             # Create line strip marker for footprint boundary
             footprint_marker = Marker()
@@ -499,107 +580,91 @@ class VisualizationNode(Node):
             self.get_logger().warn(f"Next waypoints marker creation error: {str(e)}")
             return []
 
-    def create_heading_marker(self) -> Optional[Marker]:
-        """Create robot heading visualization marker"""
-        if not self.robot_state:
-            return None
-        
-        try:
-            # Extract robot pose from robot state
-            robot_x, robot_y, robot_yaw = self.robot_state.state_vector
-            
-            heading_marker = Marker()
-            heading_marker.header.frame_id = "odom"
-            heading_marker.header.stamp = self.get_clock().now().to_msg()
-            heading_marker.ns = "robot_heading"
-            heading_marker.id = 50
-            heading_marker.type = Marker.ARROW
-            heading_marker.action = Marker.ADD
-            
-            # Position from robot state
-            heading_marker.pose.position.x = float(robot_x)
-            heading_marker.pose.position.y = float(robot_y)
-            heading_marker.pose.position.z = 0.3  # Above robot footprint
-            
-            # Orientation from robot yaw
-            heading_marker.pose.orientation.w = math.cos(robot_yaw / 2.0)
-            heading_marker.pose.orientation.z = math.sin(robot_yaw / 2.0)
-            
-            # Arrow scale - larger than goal arrow to show robot heading clearly
-            heading_marker.scale.x = 1.2  # Arrow length
-            heading_marker.scale.y = 0.15  # Arrow width
-            heading_marker.scale.z = 0.15  # Arrow height
-            
-            # Distinctive color - purple/magenta for robot heading
-            heading_marker.color.r = 0.9
-            heading_marker.color.g = 0.9
-            heading_marker.color.b = 0.9
-            heading_marker.color.a = 0.9
-            
-            # Short lifetime for real-time updates
-            heading_marker.lifetime.sec = 0
-            heading_marker.lifetime.nanosec = 200000000  # 0.2 seconds
-            
-            return heading_marker
-            
-        except Exception as e:
-            self.get_logger().warn(f"Heading marker creation error: {str(e)}")
-            return None
+    def _circle_points(self, cx: float, cy: float, radius: float, segments: int = 16) -> list:
+        """Closed circle as LINE_STRIP vertices"""
+        return [Point(x=cx + radius * math.cos(2 * math.pi * k / segments),
+                      y=cy + radius * math.sin(2 * math.pi * k / segments), z=0.03) for k in range(segments + 1)]
 
-    def create_target_direction_marker(self) -> Optional[Marker]:
-        """Create target direction visualization marker as line from robot to direction point"""
-        if not self.target_direction or not self.robot_state:
-            return None
-        
-        try:
-            # Extract robot position from robot state
-            robot_x, robot_y, robot_yaw = self.robot_state.state_vector
-            
-            direction_marker = Marker()
-            direction_marker.header.frame_id = "odom"
-            direction_marker.header.stamp = self.get_clock().now().to_msg()
-            direction_marker.ns = "target_direction"
-            direction_marker.id = 60
-            direction_marker.type = Marker.ARROW
-            direction_marker.action = Marker.ADD
-            
-            # Create arrow from robot position to direction point
-            from geometry_msgs.msg import Point
-            
-            # Start point (robot position)
-            start_point = Point()
-            start_point.x = float(robot_x)
-            start_point.y = float(robot_y)
-            start_point.z = 0.4  # Higher than other markers
-            
-            # End point (direction target)
-            end_point = Point()
-            end_point.x = self.target_direction.point.x
-            end_point.y = self.target_direction.point.y
-            end_point.z = 0.4
-            
-            direction_marker.points = [start_point, end_point]
-            
-            # Arrow appearance - distinctive color (cyan/orange)
-            direction_marker.scale.x = 0.08  # Arrow shaft diameter
-            direction_marker.scale.y = 0.15  # Arrow head diameter
-            direction_marker.scale.z = 0.0   # Arrow head length (auto)
-            
-            # Orange color for target direction
-            direction_marker.color.r = 0.6
-            direction_marker.color.g = 0.6
-            direction_marker.color.b = 0.6
-            direction_marker.color.a = 0.8
-            
-            # Short lifetime for real-time updates
-            direction_marker.lifetime.sec = 0
-            direction_marker.lifetime.nanosec = 200000000  # 0.2 seconds
-            
-            return direction_marker
-            
-        except Exception as e:
-            self.get_logger().warn(f"Target direction marker creation error: {str(e)}")
-            return None
+    def create_footprint_circles_markers(self) -> list:
+        """Discs the obstacle critic checks: at the robot and along the plan every 1 s"""
+        if not self.circles:
+            return []
+        poses = [(self.robot_state.state_vector, 0)]
+        if self.optimal_path is not None and self.optimal_path.path_points:
+            pts = self.optimal_path.path_points
+            states = self._plan_states(len(pts))
+            for i in range(10, len(pts), 10):
+                q = pts[i].pose
+                yaw = 2.0 * math.atan2(q.orientation.z, q.orientation.w)
+                poses.append(((q.position.x, q.position.y, yaw), states[i] if states else 0))
+        stamp = self.get_clock().now().to_msg()
+        out = []
+        for j, ((x, y, yaw), state) in enumerate(poses):
+            cs, sn = math.cos(yaw), math.sin(yaw)
+            for i, (bx, by) in enumerate(self.circles):
+                m = Marker()
+                m.header.frame_id = "odom"
+                m.header.stamp = stamp
+                m.ns = "footprint_circles"
+                m.id = 200 + j * len(self.circles) + i
+                m.type = Marker.LINE_STRIP
+                m.action = Marker.ADD
+                m.scale.x = 0.02
+                m.pose.orientation.w = 1.0
+                m.lifetime.nanosec = 500000000
+                m.color = _rgba((_WHITE, _AMBER, _RED)[state], 0.9 if j == 0 else 0.45)
+                m.points = self._circle_points(x + bx * cs - by * sn, y + bx * sn + by * cs, self.circle_radius)
+                out.append(m)
+        return out
+
+    def create_goal_region_marker(self) -> Optional[Marker]:
+        """Goal reached radius, and the passed-plane through the goal normal to its heading"""
+        g = self.latest_goal.pose
+        gx, gy = g.position.x, g.position.y
+        gyaw = 2.0 * math.atan2(g.orientation.z, g.orientation.w)
+        marker = Marker()
+        marker.header.frame_id = "odom"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "goal_region"
+        marker.id = 70
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.scale.x = 0.03
+        marker.pose.orientation.w = 1.0
+        marker.color = _rgba(_WHITE, 0.55)
+        ring = self._circle_points(gx, gy, self.goal_reached_threshold, 48)
+        pts = [q for a, b in zip(ring[:-1], ring[1:]) for q in (a, b)]
+        final = self.multiple_waypoints is not None and self.multiple_waypoints.is_final_waypoint
+        if self.passed_goal_max_distance > 0.0 and not final:
+            half = max(self.passed_goal_max_distance, self.goal_reached_threshold)
+            nx, ny = -math.sin(gyaw), math.cos(gyaw)
+            pts += [Point(x=gx - half * nx, y=gy - half * ny, z=0.03), Point(x=gx + half * nx, y=gy + half * ny, z=0.03)]
+            # entry direction: crossing the line along this tick counts as passed
+            pts += [Point(x=gx, y=gy, z=0.03), Point(x=gx + 1.0 * math.cos(gyaw), y=gy + 1.0 * math.sin(gyaw), z=0.03)]
+        marker.points = pts
+        return marker
+
+    def create_debug_text_marker(self) -> Optional[Marker]:
+        """Cost breakdown and sampler state above the robot"""
+        d = self.debug
+        x, y, _ = self.robot_state.state_vector
+        marker = Marker()
+        marker.header.frame_id = "odom"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "mppi_debug"
+        marker.id = 80
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = float(x), float(y), 2.2
+        marker.pose.orientation.w = 1.0
+        marker.scale.z = 0.32
+        marker.color = _rgba(_RED if d.collision_severity > 0 else (_AMBER if d.worst_shortfall > 0 else _WHITE), 0.95)
+        hit = f"{d.first_hit_median:.1f}s" if d.first_hit_median >= 0 else "-"
+        marker.text = (f"goal {d.goal_cost:.0f}  clear {d.obstacle_soft_cost:.0f}  col {d.collision_severity:.2f}  keep {d.keepout_severity:.2f}\n"
+                       f"min clear {d.min_clearance:.2f} m @{d.min_clearance_time:.1f}s (need {d.required_at_min:.2f})\n"
+                       f"rollouts collide {100 * d.collide_fraction:.0f}% (first hit {hit})  ESS {d.ess:.0f}/{d.num_rollouts}\n"
+                       f"v {d.v_cmd:.2f}  {d.compute_ms:.1f} ms  costmap {d.costmap_age:.2f} s")
+        return marker
 
 
 def main(args=None):

@@ -51,6 +51,30 @@ from .base_critic import BaseCritic
 from .._verbose import vprint
 
 
+def cover_footprint(footprint, n):
+    """
+    Cover a footprint's bounding box with n equal discs along its long axis.
+
+    Args:
+        footprint: [x1, y1, x2, y2, ...] polygon in the body frame
+        n: number of discs
+
+    Returns:
+        centers: list of (x, y) in the body frame
+        radius: common disc radius [m]
+    """
+    xs, ys = footprint[0::2], footprint[1::2]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    n = max(1, int(n))
+    if x1 - x0 >= y1 - y0:
+        half_seg, half_width = (x1 - x0) / (2 * n), (y1 - y0) / 2
+        centers = [(x0 + (2 * i + 1) * half_seg, (y0 + y1) / 2) for i in range(n)]
+    else:
+        half_seg, half_width = (y1 - y0) / (2 * n), (x1 - x0) / 2
+        centers = [((x0 + x1) / 2, y0 + (2 * i + 1) * half_seg) for i in range(n)]
+    return centers, float(np.hypot(half_seg, half_width))
+
+
 class ObstacleCritic(BaseCritic):
     """Obstacle avoidance critic using a metric clearance field"""
 
@@ -87,6 +111,7 @@ class ObstacleCritic(BaseCritic):
         # 20 사이클마다만 확인해 비용을 1/20 로 누른다.
         self._all_blocked_count = 0
         self._cycle = 0
+        self.last_stats = None   # (collides [K], first_hit [K]) of the last compute_cost
 
         # Vehicle footprint polygon [x1,y1,x2,y2,...] in base frame
         default_footprint = [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
@@ -113,23 +138,8 @@ class ObstacleCritic(BaseCritic):
               f"unknown_is_lethal={self.unknown_is_lethal}")
 
     def _build_circles(self):
-        """
-        Cover the footprint's bounding box with equal discs along its long axis.
-
-        Returns:
-            centers: [C, 2] tensor on device (body frame)
-            radius: disc radius [m]
-        """
-        xs, ys = self.footprint[0::2], self.footprint[1::2]
-        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-        n = max(1, self.footprint_circles)
-        if x1 - x0 >= y1 - y0:
-            half_seg, half_width = (x1 - x0) / (2 * n), (y1 - y0) / 2
-            centers = [(x0 + (2 * i + 1) * half_seg, (y0 + y1) / 2) for i in range(n)]
-        else:
-            half_seg, half_width = (y1 - y0) / (2 * n), (x1 - x0) / 2
-            centers = [((x0 + x1) / 2, y0 + (2 * i + 1) * half_seg) for i in range(n)]
-        radius = float(np.hypot(half_seg, half_width))
+        """Disc centres [C, 2] on device (body frame) and common radius [m]."""
+        centers, radius = cover_footprint(self.footprint, self.footprint_circles)
         return torch.tensor(centers, device=self.device, dtype=self.dtype), radius
 
     def compute_cost(self, trajectories: torch.Tensor, controls: torch.Tensor,
@@ -149,10 +159,46 @@ class ObstacleCritic(BaseCritic):
         Returns:
             costs: [K] total obstacle costs per trajectory
         """
-        info = self.costmap_info
-
-        if not self.enabled or info is None:
+        if not self.enabled or self.costmap_info is None:
             return torch.zeros(trajectories.shape[0], device=self.device, dtype=self.dtype)
+
+        c = self._components(trajectories, controls)
+        # Per-rollout collision stats, kept by reference for the debug publisher
+        self.last_stats = (c['collides'], c['first_hit'])
+
+        # 충돌 없는 궤적이 하나도 없는 상황을 드러낸다. 조용한 포화가
+        # 현장 실패를 bag 재생으로만 찾을 수 있게 만든 원인이었다.
+        self._cycle += 1
+        if self._cycle % 20 == 0 and bool(c['collides'].all()):
+            self._all_blocked_count += 1
+            print(f"[ObstacleCritic] ALL {c['collides'].numel()} rollouts collide "
+                  f"(earliest step median={c['first_hit'].median().item():.0f}/{c['shortfall'].shape[1]}) "
+                  f"- no collision-free plan exists this cycle", flush=True)
+
+        return c['total']
+
+    def evaluate_plan(self, trajectory: torch.Tensor, actions: torch.Tensor) -> Optional[dict]:
+        """
+        Cost terms of one plan, for diagnostics (no state change, no sync).
+
+        Args:
+            trajectory: [T+1, 3] plan poses
+            actions: [T, 2] plan actions (v, delta)
+
+        Returns:
+            dict of on-device tensors: clearance [T+1], required [T],
+            soft (weighted), severity, keepout_severity; None without a costmap
+        """
+        if self.costmap_info is None:
+            return None
+        c = self._components(trajectory.unsqueeze(0), actions.unsqueeze(0))
+        return {'clearance': c['clearance'][0], 'required': c['required'][0],
+                'soft': self.weight * c['soft'][0], 'severity': c['severity'][0],
+                'keepout_severity': c['keepout_severity'][0]}
+
+    def _components(self, trajectories: torch.Tensor, controls: torch.Tensor) -> dict:
+        """All obstacle terms for a batch [K, T+1, 3] (shared by cost and diagnostics)."""
+        info = self.costmap_info
 
         # Disc centres in world frame: [K, T+1, C]
         theta = trajectories[:, :, 2].unsqueeze(-1)      # [K, T+1, 1]
@@ -194,6 +240,7 @@ class ObstacleCritic(BaseCritic):
         # keep-out grid's own origin: it is published with /costmap but the two
         # callbacks are independent, so the windows can be one cycle apart.
         # Outside the keep-out window there is no semantic information: no penalty.
+        k_severity = torch.zeros_like(severity)
         kinfo = self.keepout_info
         if kinfo is not None and self.keepout_cost > 0.0:
             kdist, k_inside = self._sample_field(kinfo, wx, wy)
@@ -203,16 +250,9 @@ class ObstacleCritic(BaseCritic):
             k_severity, _, _ = self._graded_severity(k_future < self.collision_margin, clearance.dtype)
             total_costs = total_costs + self.keepout_cost * k_severity
 
-        # 충돌 없는 궤적이 하나도 없는 상황을 드러낸다. 조용한 포화가
-        # 현장 실패를 bag 재생으로만 찾을 수 있게 만든 원인이었다.
-        self._cycle += 1
-        if self._cycle % 20 == 0 and bool(collides.all()):
-            self._all_blocked_count += 1
-            print(f"[ObstacleCritic] ALL {collides.numel()} rollouts collide "
-                  f"(earliest step median={first_hit.median().item():.0f}/{T_f}) "
-                  f"- no collision-free plan exists this cycle", flush=True)
-
-        return total_costs
+        return {'total': total_costs, 'soft': soft, 'severity': severity, 'keepout_severity': k_severity,
+                'first_hit': first_hit, 'collides': collides, 'clearance': clearance,
+                'required': required, 'shortfall': shortfall}
 
     @staticmethod
     def _sample_field(info: dict, wx: torch.Tensor, wy: torch.Tensor):
