@@ -60,3 +60,4 @@ bt_planner:
     reverse:
       allow_behind_goal: false           # true 면 후방 목표+양방향 링크에서도 후진 허용 (초기 OFF)
     groot2_port: 0
+    tick_stats_sec: 60.0                 # [TICK] 틱 비용 통계(avg/max/주기 초과) 로그 주기 [s], 0 = 끔

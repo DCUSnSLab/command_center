@@ -79,15 +79,35 @@ struct Context {
   void resetTick();
 
   // ---------- 파생 조회 ----------
+  // zone()·turnDegAtTarget() 은 한 틱에 여러 노드(ZoneIs ×5, IsTurn ×2, Drive, 발행부)가 부르므로 목표 노드별로
+  // 한 번만 계산해 둔다. 캐시는 resetTick() 에서 비우고, 같은 틱 안에서 목표가 바뀌면(위험 경유점 건너뜀) 목표 포인터
+  // 불일치로 다시 계산한다. 경로 교체(setPath)는 콜백에서 일어나고 틱과 같은 스레드라 틱 중간에는 바뀌지 않는다.
   const PathNode* target() const { return path.currentTarget(); }
-  std::string zone() const;                 // 현재 목표 노드의 Zone (기본 sidewalk)
+  const std::string& zone() const;          // 현재 목표 노드의 Zone (기본 sidewalk)
   int effectiveNodeType() const;            // reverse_forced 면 2
   // 현재 목표 노드에서의 진행 방향 변화 (도, +좌/-우). 다음 노드 없으면 0.
   double turnDegAtTarget() const;
   double distToTarget() const;              // pose 기준, 미상이면 +inf
   bool baseListening() const { return control_mode < 0 || control_mode == 1; }
   bool shouldBeMoving() const;
+
+private:
+  double computeTurnDeg() const;
+  void refreshCache() const;
+  mutable const PathNode* cache_target_ = nullptr;   // 캐시가 유효한 목표 노드(nullptr = 무효)
+  mutable std::string cache_zone_ = ZoneTable::DEFAULT_ZONE;
+  mutable double cache_turn_deg_ = 0.0;
 };
+
+// 포트는 XML 리터럴(정적)이라 첫 틱에 한 번만 읽는다 — getInput 은 호출마다 포트 표 탐색 + 문자열 파싱을 한다.
+// 블랙보드 재매핑({var})을 쓰면 첫 틱 값만 반영되므로, 틱마다 바뀌는 값은 Context 로 넣을 것.
+template <class T>
+T readPortOnce(const BT::TreeNode& n, const char* key, T dflt)
+{
+  T v = dflt;
+  n.getInput(key, v);
+  return v;
+}
 
 // ---- 조건 ----
 class IsEmergencyStop : public BT::ConditionNode {
@@ -106,6 +126,8 @@ public:
 private: Context& ctx_;
 };
 
+// node_type 2/4 (후진·정밀 후진) 이면 SUCCESS. 후방 목표 자동 후진(allow_behind_reverse)은 map 프레임 목표가 필요해
+// 아직 판정하지 않는다(README "미이식 / 보류").
 class NeedsReverse : public BT::ConditionNode {
 public:
   NeedsReverse(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::ConditionNode(n, c), ctx_(ctx) {}
@@ -124,7 +146,10 @@ public:
             BT::InputPort<double>("window_m", 6.0, "목표 노드까지 이 거리 안에서만 회전으로 본다")};
   }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  struct Cfg { bool want_left; double min_deg; double window_m; };
+  std::optional<Cfg> cfg_;
 };
 
 class ZoneIs : public BT::ConditionNode {
@@ -132,7 +157,9 @@ public:
   ZoneIs(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::ConditionNode(n, c), ctx_(ctx) {}
   static BT::PortsList providedPorts() { return {BT::InputPort<std::string>("zone")}; }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  std::optional<std::string> zone_;
 };
 
 // ---- 액션 ----
@@ -163,7 +190,9 @@ public:
   Stop(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::SyncActionNode(n, c), ctx_(ctx) {}
   static BT::PortsList providedPorts() { return {BT::InputPort<std::string>("reason", "guard", "")}; }
   BT::NodeStatus tick() override;   // 항상 FAILURE — 이번 틱의 나머지를 중단
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  std::optional<std::string> reason_, behavior_;
 };
 
 class SafetyPause : public BT::SyncActionNode {
@@ -179,7 +208,9 @@ public:
   PauseBeforeEntry(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::SyncActionNode(n, c), ctx_(ctx) {}
   static BT::PortsList providedPorts() { return {BT::InputPort<double>("sec", 2.0, "진입 전 정지 시간")}; }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  std::optional<double> sec_;
 };
 
 class Drive : public BT::SyncActionNode {
@@ -187,7 +218,10 @@ public:
   Drive(const std::string& n, const BT::NodeConfig& c, Context& ctx) : BT::SyncActionNode(n, c), ctx_(ctx) {}
   static BT::PortsList providedPorts() { return {BT::InputPort<std::string>("profile", "sidewalk", "")}; }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  struct Cfg { std::string profile; std::string overlay; };   // overlay "" = node_type 프로필만 (동등성 경로)
+  std::optional<Cfg> cfg_;
 };
 
 class RefreshWaypoints : public BT::SyncActionNode {
@@ -198,7 +232,10 @@ public:
     return {BT::InputPort<double>("move_m", 0.5, ""), BT::InputPort<double>("yaw_deg", 5.0, "")};
   }
   BT::NodeStatus tick() override;
-private: Context& ctx_;
+private:
+  Context& ctx_;
+  struct Cfg { double move_m; double yaw_deg; };
+  std::optional<Cfg> cfg_;
 };
 
 // ---- 데코레이터: 정체 에스컬레이션 ----

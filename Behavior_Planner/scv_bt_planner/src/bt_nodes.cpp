@@ -23,14 +23,27 @@ void Context::resetTick()
   pause_requests.clear();
   localization_hint.reset();
   hazard_log.clear();
+  cache_target_ = nullptr;
 }
 
-std::string Context::zone() const
+void Context::refreshCache() const
 {
   const PathNode* t = target();
-  if (!t) return ZoneTable::DEFAULT_ZONE;
-  if (!zones) return ZoneTable::DEFAULT_ZONE;
-  return zones->zoneOf(t->id);
+  if (t && t == cache_target_) return;
+  cache_target_ = t;
+  if (!t) {
+    cache_zone_ = ZoneTable::DEFAULT_ZONE;
+    cache_turn_deg_ = 0.0;
+    return;
+  }
+  cache_zone_ = zones ? zones->zoneRef(t->id) : ZoneTable::DEFAULT_ZONE;
+  cache_turn_deg_ = computeTurnDeg();
+}
+
+const std::string& Context::zone() const
+{
+  refreshCache();
+  return cache_zone_;
 }
 
 int Context::effectiveNodeType() const
@@ -51,6 +64,12 @@ double Context::distToTarget() const
 }
 
 double Context::turnDegAtTarget() const
+{
+  refreshCache();
+  return cache_turn_deg_;
+}
+
+double Context::computeTurnDeg() const
 {
   const auto& nodes = path.nodes();
   const int i = path.currentIndex();
@@ -99,45 +118,45 @@ BT::NodeStatus NeedsReverse::tick()
   const PathNode* t = ctx_.target();
   if (!t) return BT::NodeStatus::FAILURE;
   if (t->node_type == 2 || t->node_type == 4) return BT::NodeStatus::SUCCESS;
-  if (ctx_.allow_behind_reverse && ctx_.pose) {
-    // 후방 목표 판정은 map 프레임 좌표가 필요한데 노드는 절대 UTM 이라 여기서는 판단하지 않는다.
-    // (ROS 노드가 datum 을 알고 있으므로 향후 ctx 에 map-frame 목표를 넣어 확장)
-    return BT::NodeStatus::FAILURE;
-  }
+  // 후방 목표 자동 후진(allow_behind_reverse): 판정에 map 프레임 목표가 필요한데 노드 좌표는 절대 UTM 이라 미구현.
+  // (ROS 노드가 datum 을 알고 있으므로 향후 ctx 에 map-frame 목표를 넣어 확장)
   return BT::NodeStatus::FAILURE;
 }
 
 BT::NodeStatus IsTurn::tick()
 {
-  std::string dir = "left";
-  double min_deg = 35.0, window_m = 6.0;
-  getInput("dir", dir);
-  getInput("min_deg", min_deg);
-  getInput("window_m", window_m);
+  if (!cfg_) {
+    cfg_ = Cfg{readPortOnce<std::string>(*this, "dir", "left") == "left",
+               readPortOnce<double>(*this, "min_deg", 35.0), readPortOnce<double>(*this, "window_m", 6.0)};
+  }
   const double deg = ctx_.turnDegAtTarget();
-  if (std::fabs(deg) < min_deg) return BT::NodeStatus::FAILURE;
-  if (ctx_.distToTarget() > window_m) return BT::NodeStatus::FAILURE;
+  if (std::fabs(deg) < cfg_->min_deg) return BT::NodeStatus::FAILURE;
+  if (ctx_.distToTarget() > cfg_->window_m) return BT::NodeStatus::FAILURE;
   const bool left = deg > 0;
-  if ((dir == "left") == left) return BT::NodeStatus::SUCCESS;
-  return BT::NodeStatus::FAILURE;
+  return (cfg_->want_left == left) ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
 }
 
 BT::NodeStatus ZoneIs::tick()
 {
-  std::string zone;
-  if (!getInput("zone", zone)) return BT::NodeStatus::FAILURE;
-  return ctx_.zone() == zone ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  if (!zone_) {
+    std::string z;
+    if (!getInput("zone", z)) return BT::NodeStatus::FAILURE;   // 포트 미지정은 매 틱 FAILURE(캐시하지 않음)
+    zone_ = std::move(z);
+  }
+  return ctx_.zone() == *zone_ ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
 }
 
 // ---------------- 액션 ----------------
 
 BT::NodeStatus Stop::tick()
 {
-  std::string reason = "guard";
-  getInput("reason", reason);
+  if (!reason_) {
+    reason_ = readPortOnce<std::string>(*this, "reason", "guard");
+    behavior_ = "STOP:" + *reason_;
+  }
   ctx_.request_stop = true;
-  ctx_.stop_reason = reason;
-  ctx_.behavior_name = "STOP:" + reason;
+  ctx_.stop_reason = *reason_;
+  ctx_.behavior_name = *behavior_;
   return BT::NodeStatus::FAILURE;
 }
 
@@ -151,25 +170,27 @@ BT::NodeStatus SafetyPause::tick()
 
 BT::NodeStatus PauseBeforeEntry::tick()
 {
-  double sec = 2.0;
-  getInput("sec", sec);
+  if (!sec_) sec_ = readPortOnce<double>(*this, "sec", 2.0);
   const PathNode* t = ctx_.target();
   if (!t || !ctx_.goal_distance) return BT::NodeStatus::SUCCESS;
   if (*ctx_.goal_distance > ctx_.pause_trigger_distance) return BT::NodeStatus::SUCCESS;
   if (ctx_.pause_sent_for.count(t->id)) return BT::NodeStatus::SUCCESS;
-  ctx_.pause_requests.push_back({sec, t->id, "zone entry pause (" + ctx_.zone() + ")"});
+  ctx_.pause_requests.push_back({*sec_, t->id, "zone entry pause (" + ctx_.zone() + ")"});
   ctx_.pause_sent_for.insert(t->id);
-  ctx_.pause_until = ctx_.now + sec + 1.0;
+  ctx_.pause_until = ctx_.now + *sec_ + 1.0;
   return BT::NodeStatus::SUCCESS;
 }
 
 BT::NodeStatus Drive::tick()
 {
-  std::string profile = "sidewalk";
-  getInput("profile", profile);
-  // sidewalk / reverse 는 node_type 프로필 그대로 (동등성 경로). 그 외는 오버레이.
-  ctx_.overlay = (profile == "sidewalk" || profile == "reverse") ? "" : profile;
-  ctx_.behavior_name = profile;
+  if (!cfg_) {
+    std::string profile = readPortOnce<std::string>(*this, "profile", "sidewalk");
+    // sidewalk / reverse 는 node_type 프로필 그대로 (동등성 경로). 그 외는 오버레이.
+    std::string overlay = (profile == "sidewalk" || profile == "reverse") ? "" : profile;
+    cfg_ = Cfg{std::move(profile), std::move(overlay)};
+  }
+  ctx_.overlay = cfg_->overlay;
+  ctx_.behavior_name = cfg_->profile;
   ctx_.last_selected_zone = ctx_.zone();
   ctx_.localization_hint = (ctx_.last_selected_zone == "gps_denied") ? "pcd_hold" : "gps";
   return BT::NodeStatus::SUCCESS;
@@ -177,11 +198,9 @@ BT::NodeStatus Drive::tick()
 
 BT::NodeStatus RefreshWaypoints::tick()
 {
-  double move_m = 0.5, yaw_deg = 5.0;
-  getInput("move_m", move_m);
-  getInput("yaw_deg", yaw_deg);
+  if (!cfg_) cfg_ = Cfg{readPortOnce<double>(*this, "move_m", 0.5), readPortOnce<double>(*this, "yaw_deg", 5.0)};
   if (ctx_.waypoints_published &&
-      (ctx_.anchor_moved_m > move_m || std::fabs(ctx_.anchor_moved_deg) > yaw_deg)) {
+      (ctx_.anchor_moved_m > cfg_->move_m || std::fabs(ctx_.anchor_moved_deg) > cfg_->yaw_deg)) {
     ctx_.need_publish_waypoints = true;
   }
   return BT::NodeStatus::SUCCESS;

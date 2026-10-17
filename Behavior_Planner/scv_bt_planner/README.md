@@ -39,6 +39,16 @@ colcon build --packages-up-to scv_bt_planner --cmake-args -DBTCPP_EXAMPLES=OFF -
 colcon test --packages-select scv_bt_planner && colcon test-result --verbose
 ```
 
+gtest 는 ROS 없이 돈다: `test_path_manager`(합류 규칙 동등성) · `test_blocked_wait_monitor` · `test_zone_and_profiles` ·
+`test_hazard_waypoints` · `test_behavior_tree`(실제 `scv_behavior.xml` 을 로드해 결정 순서·포트 값·에스컬레이션을 틱 단위로
+확인, 마지막 케이스가 틱 비용 `[BENCH] tick avg … us, heap allocs/tick …` 를 찍는다 — 2026-10-17 x86 Release 기준 약 2 µs·0 회).
+`bt_nodes.cpp` 는 `scv_bt_planner_bt` 라이브러리로 분리돼 노드와 이 시험이 같은 코드를 링크한다.
+
+### 틱 비용
+- 노드 안의 파생값(`zone()`·`turnDegAtTarget()`)은 목표 노드별 틱 캐시에서 읽고, XML 리터럴 포트는 첫 틱에 한 번만 파싱한다
+  (`readPortOnce`). 틱마다 바뀌는 값은 포트가 아니라 `Context` 로 넘길 것.
+- 노드 로그 `[TICK] n ticks / s: avg, max, >period` (`tick_stats_sec`, 기본 60 s, 0 = 끔). 한 틱이 주기(1/`tick_hz`)를 넘기면 즉시 경고.
+
 ## 미이식 / 보류
 
 - probe(탐침 전진)의 far_wall 코스트맵 분류 — `probe.enabled` 를 켜도 경고만.

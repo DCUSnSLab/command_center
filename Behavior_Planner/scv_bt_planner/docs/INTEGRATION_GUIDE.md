@@ -64,7 +64,7 @@ cd ~/SCV && colcon build --packages-select scv_bt_planner command_center_launch
 | 회전 판정 | `turn.min_deg`(35) `turn.window_m`(6) |
 | 트리 편집 | Groot2 로 XML 편집 가능(노드 모델은 `registerScvNodes` 의 포트 정의) |
 
-변경 뒤 확인 순서: `colcon test --packages-select scv_bt_planner`(gtest 33건) → `test/tools/shadow_smoke.py` → bag 재생 `test/tools/run_replay_compare.sh` → 챔버(Gazebo) `test/tools/chamber/`.
+변경 뒤 확인 순서: `colcon test --packages-select scv_bt_planner`(gtest 47건 — `test_behavior_tree` 가 실제 XML 을 로드해 결정 순서·포트 값·에스컬레이션을 틱 단위로 확인하고 틱 비용 `[BENCH]` 를 찍는다) → `test/tools/shadow_smoke.py` → bag 재생 `test/tools/run_replay_compare.sh` → 챔버(Gazebo) `test/tools/chamber/`.
 
 ## 6. 검증 도구
 
@@ -75,6 +75,7 @@ cd ~/SCV && colcon build --packages-select scv_bt_planner command_center_launch
 | `test/tools/scvsys_modes.sh <install/setup.bash> [domain]` | scv_system 3모드 기동 가용성 점검 |
 | `test/tools/replay_compare.py`, `run_replay_compare.sh` | bag 재생 simple vs BT 결정 비교 |
 | `test/tools/chamber/` | Gazebo 챔버 A/B 하니스(V100 Pod 스크립트 포함) |
+| 노드 로그 `[TICK]` | 틱 비용 통계(평균·최대·주기 초과 횟수), `tick_stats_sec`(기본 60 s, 0 = 끔). 한 틱이 주기(50 ms)를 넘기면 즉시 경고 |
 
 ## 7. 알려진 제약·미구현
 

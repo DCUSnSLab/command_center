@@ -54,17 +54,18 @@ target_include_directories(${PROJECT_NAME}_core PUBLIC
 target_link_libraries(${PROJECT_NAME}_core PUBLIC
   nlohmann_json::nlohmann_json yaml-cpp)
 
-# ---- BT 노드 + ROS 노드 ---------------------------------------------------
-add_executable(bt_planner_node
-  src/bt_nodes.cpp
-  src/bt_planner_node.cpp
-)
-target_link_libraries(bt_planner_node ${PROJECT_NAME}_core behaviortree_cpp::behaviortree_cpp)
+# ---- BT 노드(Context·조건·액션·데코레이터) — ROS 무의존, 트리 수준 시험 대상 ----------------
+add_library(${PROJECT_NAME}_bt src/bt_nodes.cpp)
+target_link_libraries(${PROJECT_NAME}_bt PUBLIC ${PROJECT_NAME}_core behaviortree_cpp::behaviortree_cpp)
+
+# ---- ROS 노드 ---------------------------------------------------------------
+add_executable(bt_planner_node src/bt_planner_node.cpp)
+target_link_libraries(bt_planner_node ${PROJECT_NAME}_bt)
 ament_target_dependencies(bt_planner_node
   rclcpp std_msgs geometry_msgs nav_msgs tf2 tf2_ros tf2_geometry_msgs
   command_center_interfaces map_interfaces hunter_msgs ament_index_cpp)
 
-install(TARGETS ${PROJECT_NAME}_core
+install(TARGETS ${PROJECT_NAME}_core ${PROJECT_NAME}_bt
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS bt_planner_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
@@ -83,6 +84,12 @@ if(BUILD_TESTING)
   target_link_libraries(test_hazard_waypoints ${PROJECT_NAME}_core)
   target_compile_definitions(test_zone_and_profiles PRIVATE
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
+  # 트리 수준(실제 XML) 결정 시험 + 틱 비용 벤치마크
+  ament_add_gtest(test_behavior_tree test/test_behavior_tree.cpp)
+  target_link_libraries(test_behavior_tree ${PROJECT_NAME}_bt)
+  target_compile_definitions(test_behavior_tree PRIVATE
+    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data"
+    BT_TREE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees")
 endif()
 
 ament_export_include_directories(include)

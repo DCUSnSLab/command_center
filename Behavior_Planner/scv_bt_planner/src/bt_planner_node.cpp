@@ -51,8 +51,14 @@ public:
     loadAssets();
     setupIo();
     buildTree();
-    const double hz = get_parameter("tick_hz").as_double();
-    timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / hz), [this] { onTick(); });
+    double hz = get_parameter("tick_hz").as_double();
+    if (!(hz > 0.0) || !std::isfinite(hz)) {
+      RCLCPP_ERROR(get_logger(), "tick_hz=%g 는 쓸 수 없다 — 20 Hz 로 대체", hz);
+      hz = 20.0;
+    }
+    tick_period_ = 1.0 / hz;
+    tick_stats_sec_ = get_parameter("tick_stats_sec").as_double();
+    timer_ = create_wall_timer(std::chrono::duration<double>(tick_period_), [this] { onTick(); });
     RCLCPP_INFO(get_logger(), "[BT] mode=%s prefix='%s' tree=%s zones=%zu/%zu profiles=%zu+%zu",
                 mode_.c_str(), prefix_.c_str(), tree_file_.c_str(), zones_.size(), zones_.nodeCount(),
                 profiles_.nodeProfileCount(), profiles_.overlayCount());
@@ -120,12 +126,15 @@ private:
     declare_parameter("turn.window_m", 6.0);
     declare_parameter("reverse.allow_behind_goal", false);
     declare_parameter("groot2_port", 0);
+    // 틱 비용 통계([TICK] 로그) 주기 [s]. 0 = 끔. 한 틱이 주기(1/tick_hz)를 넘기면 주기와 무관하게 경고.
+    declare_parameter("tick_stats_sec", 60.0);
     // 틱 단위 노드 상태 전이 기록(BT.CPP FileLogger2, .btlog — Groot2 재생·btlog_to_csv.py 변환).
     // "" = 끔, "auto" = ~/.ros/btlog/bt_<시각>.btlog, 그 외 = 파일 경로(.btlog 접미 자동)
     declare_parameter("bt_log_file", std::string(""));
 
     mode_ = get_parameter("mode").as_string();
-    prefix_ = (mode_ == "active") ? "" : "/bt";
+    shadow_ = (mode_ != "active");
+    prefix_ = shadow_ ? "/bt" : "";
     waypoint_mode_ = get_parameter("waypoint_mode").as_string();
     ctx_.pause_trigger_distance = get_parameter("pause_trigger_distance").as_double();
     ctx_.near_goal_hold_off = get_parameter("blocked.near_goal_hold_off").as_double();
@@ -500,7 +509,7 @@ private:
   void onGoalStatus(const cci::ControllerGoalStatus& m)
   {
     const PathNode* t = ctx_.target();
-    if (t && m.goal_id != t->id && mode_ != "active") shadowResync(m.goal_id);
+    if (t && m.goal_id != t->id && shadow_) shadowResync(m.goal_id);
     t = ctx_.target();
     if (!t || m.goal_id != t->id) {
       if (m.goal_reached && t) {
@@ -568,6 +577,35 @@ private:
   }
 
   void onTick()
+  {
+    const double t0 = steadyNow();
+    tickBody();
+    recordTickCost(steadyNow() - t0);
+  }
+
+  // 틱 비용 통계: 평균·최대·주기 초과 횟수. 차량(Jetson)에서 20 Hz 여유를 수치로 확인하기 위한 것.
+  void recordTickCost(double dt)
+  {
+    ++tick_n_;
+    tick_sum_ += dt;
+    if (dt > tick_max_) tick_max_ = dt;
+    if (dt > tick_period_) {
+      ++tick_over_;
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "[TICK] %.1f ms 소요 — 주기 %.0f ms 초과", dt * 1e3,
+                           tick_period_ * 1e3);
+    }
+    if (tick_stats_sec_ <= 0.0) return;
+    const double now = steadyNow();
+    if (tick_stats_t0_ <= 0.0) tick_stats_t0_ = now;
+    if (now - tick_stats_t0_ < tick_stats_sec_) return;
+    RCLCPP_INFO(get_logger(), "[TICK] %zu ticks / %.0f s: avg %.3f ms, max %.2f ms, >period %zu", tick_n_,
+                now - tick_stats_t0_, tick_sum_ / tick_n_ * 1e3, tick_max_ * 1e3, tick_over_);
+    tick_n_ = tick_over_ = 0;
+    tick_sum_ = tick_max_ = 0.0;
+    tick_stats_t0_ = now;
+  }
+
+  void tickBody()
   {
     ctx_.now = steadyNow();
     ctx_.resetTick();
@@ -648,10 +686,9 @@ private:
     const auto toff = tgt ? ctx_.hazard.offset(tgt->id) : std::make_pair(0.0, 0.0);
     const bool shifted = (toff.first != 0.0 || toff.second != 0.0);
     const bool hazard_slow = hazard_enable_ && ctx_.hazardRecent();
-    const std::string key = std::to_string(node_type) + "|" + ctx_.overlay + "|" + (is_final ? "F" : "V") +
-                            (shifted ? "|S" : "") + (hazard_slow ? "|H" : "");
-    if (key == last_behavior_key_ && !creep_active_) return;
+    const BehaviorKey key{node_type, is_final, shifted, hazard_slow, ctx_.overlay};
     if (creep_active_) return;   // creep 중에는 creep_off 에서 복원
+    if (last_behavior_key_ && key == *last_behavior_key_) return;
     std::string desc; int code = 0;
     ParamMap p = profiles_.compute(node_type, ctx_.overlay, &desc, &code);
     p["goal_reached_threshold"] = is_final ? goal_final_ : (shifted ? std::min(goal_via_, hazard_reach_m_) : goal_via_);
@@ -659,7 +696,8 @@ private:
     if (hazard_slow) p["max_linear_velocity"] = std::min(p["max_linear_velocity"], hazard_slow_v_);
     std::string why;
     if (!Profiles::validate(p, &why)) {
-      RCLCPP_ERROR(get_logger(), "invalid behavior params (%s): %s", key.c_str(), why.c_str());
+      RCLCPP_ERROR(get_logger(), "invalid behavior params (type=%d overlay='%s' final=%d): %s", node_type,
+                   ctx_.overlay.c_str(), is_final ? 1 : 0, why.c_str());
       return;
     }
     sendMppiParams(p, code, desc);
@@ -724,7 +762,7 @@ private:
       RCLCPP_WARN(get_logger(), "[BLOCKED] creep mode ON: max_v=%.2f m/s", ctx_.blocked.params().creep_speed);
     } else if (a == "creep_off") {
       creep_active_ = false;
-      last_behavior_key_.clear();   // 다음 applyBehavior 에서 복원 발행
+      last_behavior_key_.reset();   // 다음 applyBehavior 에서 복원 발행
       applyBehavior();
       RCLCPP_INFO(get_logger(), "[BLOCKED] behavior params restored");
     } else if (a == "assist") {
@@ -833,18 +871,38 @@ private:
     last_target_republish_t_ = ctx_.now;
   }
 
+  // /bt/behavior: "행동|에스컬레이션|목표노드|zone=..|type=.." — 구성 요소가 바뀐 틱에만 문자열을 만들어 발행한다.
   void publishBehaviorIfChanged()
   {
     const PathNode* t = ctx_.target();
-    const std::string s = ctx_.behavior_name + "|" + ctx_.blocked.state() + "|" + (t ? t->id : "-") +
-                          "|zone=" + ctx_.zone() + "|type=" + std::to_string(ctx_.effectiveNodeType());
-    if (s == last_behavior_pub_) return;
-    std_msgs::msg::String m; m.data = s;
+    static const std::string kNoTarget = "-";
+    const BehaviorPub cur{ctx_.behavior_name, ctx_.blocked.state(), t ? t->id : kNoTarget, ctx_.zone(),
+                          ctx_.effectiveNodeType()};
+    if (last_behavior_pub_ && cur == *last_behavior_pub_) return;
+    std_msgs::msg::String m;
+    m.data = cur.behavior + "|" + cur.blocked + "|" + cur.target + "|zone=" + cur.zone + "|type=" +
+             std::to_string(cur.node_type);
     behavior_pub_->publish(m);
-    last_behavior_pub_ = s;
+    last_behavior_pub_ = cur;
   }
 
   // ------------------------------------------------------------ 멤버
+  struct BehaviorKey {   // applyBehavior 가 마지막으로 발행한 MPPIParams 의 결정 요소
+    int node_type; bool is_final, shifted, hazard_slow; std::string overlay;
+    bool operator==(const BehaviorKey& o) const
+    {
+      return node_type == o.node_type && is_final == o.is_final && shifted == o.shifted &&
+             hazard_slow == o.hazard_slow && overlay == o.overlay;
+    }
+  };
+  struct BehaviorPub {   // /bt/behavior 마지막 발행 내용
+    std::string behavior, blocked, target, zone; int node_type;
+    bool operator==(const BehaviorPub& o) const
+    {
+      return node_type == o.node_type && behavior == o.behavior && blocked == o.blocked && target == o.target &&
+             zone == o.zone;
+    }
+  };
   Context ctx_;
   ZoneTable zones_;
   Profiles profiles_;
@@ -853,6 +911,9 @@ private:
   std::unique_ptr<BT::Groot2Publisher> groot_;
   std::unique_ptr<BT::FileLogger2> file_logger_;   // tree_ 뒤에 선언 → 먼저 파괴(flush)
   std::string mode_, prefix_, waypoint_mode_, tree_file_;
+  bool shadow_ = true;
+  double tick_period_ = 0.05, tick_stats_sec_ = 60.0, tick_stats_t0_ = 0.0, tick_sum_ = 0.0, tick_max_ = 0.0;
+  size_t tick_n_ = 0, tick_over_ = 0;
   double goal_via_ = 1.6, goal_final_ = 0.4;
   bool join_nearest_ = false, join_check_approach_ = true, realign_on_engage_ = true;
   double join_max_approach_ = 40.0, join_clear_half_w_ = 0.45, join_pass_radius_ = 2.0, realign_move_m_ = 2.0;
@@ -869,7 +930,9 @@ private:
   bool unpinned_route_ = false, pause_signal_sent_ = false, creep_active_ = false, completed_logged_ = false;
   std::optional<Pose2D> align_pose_, last_tf_, tf_at_publish_;
   double prev_pose_t_ = 0.0, last_safety_pause_t_ = 0.0, last_target_republish_t_ = 0.0;
-  std::string last_behavior_key_, last_behavior_pub_, last_hint_, last_desc_;
+  std::optional<BehaviorKey> last_behavior_key_;
+  std::optional<BehaviorPub> last_behavior_pub_;
+  std::string last_hint_, last_desc_;
   ParamMap last_params_;
   int last_code_ = 1;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr costmap_;
@@ -898,7 +961,15 @@ private:
 int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<scv_bt_planner::BtPlannerNode>();
+  std::shared_ptr<scv_bt_planner::BtPlannerNode> node;
+  try {
+    node = std::make_shared<scv_bt_planner::BtPlannerNode>();
+  } catch (const std::exception& e) {
+    // 트리 XML 파싱 실패(미등록 노드·포트 오타)·파라미터 형 불일치 등 — 스택 덤프 대신 원인 한 줄
+    RCLCPP_FATAL(rclcpp::get_logger("bt_planner"), "bt_planner 기동 실패: %s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;

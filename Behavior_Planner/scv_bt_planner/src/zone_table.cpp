@@ -64,8 +64,14 @@ bool ZoneTable::loadFromString(const std::string& json_text, std::string* error)
 
 std::string ZoneTable::zoneOf(const std::string& node_id) const
 {
+  return zoneRef(node_id);
+}
+
+const std::string& ZoneTable::zoneRef(const std::string& node_id) const
+{
+  static const std::string kDefault = DEFAULT_ZONE;
   auto it = zones_.find(node_id);
-  if (it == zones_.end()) return DEFAULT_ZONE;
+  if (it == zones_.end()) return kDefault;
   return it->second;
 }
 

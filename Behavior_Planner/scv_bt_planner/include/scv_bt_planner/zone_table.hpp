@@ -21,6 +21,8 @@ public:
   bool loadFromString(const std::string& json_text, std::string* error = nullptr);
 
   std::string zoneOf(const std::string& node_id) const;
+  // 복사 없는 조회 — 표에 있으면 저장된 문자열, 없으면 정적 기본값(sidewalk) 참조
+  const std::string& zoneRef(const std::string& node_id) const;
   bool has(const std::string& node_id) const { return zones_.count(node_id) > 0; }
   size_t size() const { return zones_.size(); }
   size_t nodeCount() const { return node_count_; }

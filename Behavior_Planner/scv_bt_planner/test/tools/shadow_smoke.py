@@ -10,7 +10,7 @@
 
 기대:
   1) /bt/multiple_waypoints 가 발행되고 current_goal.header.frame_id == 'N0001'
-  2) /bt/mppi_params 가 발행되고 current_behavior_type == 1 (Zone 없음 → 동등성 경로)
+  2) /bt/mppi_update_params 가 발행되고 current_behavior_type == 1 (Zone 없음 → 동등성 경로)
   3) 목표를 N0002 로 넘기면(goal_status reached) road 오버레이(코드 21, max_v 1.25×)로 바뀐다
   4) N0003 접근(goal_distance 0.5) 시 좌회전 창 → turn_left(코드 25) 또는 crosswalk pause 발행
 사용: ros2 run scv_bt_planner bt_planner_node --ros-args -p mode:=shadow -p map_file_path:=<graph_zones.json> &
@@ -46,7 +46,7 @@ class Smoke(Node):
         self.tf = StaticTransformBroadcaster(self)
         self.wps, self.params, self.behav, self.pauses = [], [], [], []
         self.create_subscription(MultipleWaypoints, '/bt/multiple_waypoints', lambda m: self.wps.append(m), 10)
-        self.create_subscription(MPPIParams, '/bt/mppi_params', lambda m: self.params.append(m), 10)
+        self.create_subscription(MPPIParams, '/bt/mppi_update_params', lambda m: self.params.append(m), 10)
         self.create_subscription(String, '/bt/behavior', lambda m: self.behav.append(m.data), 10)
         self.create_subscription(PauseCommand, '/bt/pause_command', lambda m: self.pauses.append(m), 10)
         self.pose = (0.0, 0.0)
