@@ -62,9 +62,13 @@ double Context::turnDegAtTarget() const
     in_x = cur.x - nodes[i - 1].x;
     in_y = cur.y - nodes[i - 1].y;
   } else {
-    // 첫 노드: 진입 방향은 노드 heading (ENU) 으로 대체
-    in_x = std::cos(cur.heading_deg * M_PI / 180.0);
-    in_y = std::sin(cur.heading_deg * M_PI / 180.0);
+    // 첫 노드: 진입 방향 = 차량 yaw (map 은 UTM 평행이동이라 yaw 는 ENU).
+    // 노드 heading 은 쓰지 않는다 — 계획기가 GPS_START 임시 노드에 heading 0(동쪽)을 넣어 차량 자세와 무관한
+    // 각이 나왔다(10/21: 차량 38°, 경로 -129° → 실제 -167° 인데 -129° 로 계산). 차량→노드 벡터도 쓰지 않는다 —
+    // GPS_START 는 링크 투영점이라 차량과 측면으로 1~2 m 어긋나 방향이 뒤집힌다(10/21 재생에서 좌회전으로 오판).
+    if (!pose) return 0.0;
+    in_x = std::cos(pose->yaw);
+    in_y = std::sin(pose->yaw);
   }
   const double out_x = nxt.x - cur.x, out_y = nxt.y - cur.y;
   const double cross = in_x * out_y - in_y * out_x;
