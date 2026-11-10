@@ -23,11 +23,18 @@
 #     shadow : simple 이 명령하고 scv_bt_planner 는 /bt/* 로 결정만 방송 (무위험 비교)
 #     bt/shadow 는 scv_bt_planner 빌드 필요(BehaviorTree.CPP v4). bt_log_file:=auto 로 틱 단위 전이 기록.
 #
+#   record_bag (기본 false): 판단 근거용 bag 기록 — 결정 입력·출력 토픽 + 라이다 + 전방 컬러 카메라(compressed).
+#     bag_dir:='' 이면 ~/.ros/bags/scv_<일시>, 경로를 주면 그 디렉토리. BT 판단과 센서를 같은 시간축에 두려면
+#     behavior_planner:=bt|shadow bt_log_file:=auto 와 함께 켠다. 카메라 depth·d435 3대는 제외(이미지 릴레이만으로
+#     57 MB/s 가 나와 디스크가 금방 찬다 — Pod 10/16 실측). 끝낼 때 ctrl-c 가 bag 을 닫는다.
+#
 #   예)  ros2 launch command_center_launch scv_system.launch.py use_sim_time:=false controller:=sa_mppi
 #        ros2 launch command_center_launch scv_system.launch.py behavior_planner:=shadow
+#        ros2 launch command_center_launch scv_system.launch.py behavior_planner:=shadow bt_log_file:=auto record_bag:=true
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+import datetime
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PythonExpression,
@@ -63,6 +70,11 @@ def generate_launch_description():
                               description="simple(현행) | bt(scv_bt_planner 명령) | shadow(simple 명령 + BT 결정 방송)"),
         DeclareLaunchArgument('bt_log_file', default_value='',
                               description="BT 틱 단위 전이 기록(.btlog): '' 끔 | 'auto' | 경로 (bt/shadow 에서만)"),
+        DeclareLaunchArgument('record_bag', default_value='false', choices=['true', 'false'],
+                              description='판단 근거용 bag 기록(결정 토픽+라이다+전방 카메라 compressed)'),
+        DeclareLaunchArgument('bag_dir', default_value=os.path.expanduser(
+            datetime.datetime.now().strftime('~/.ros/bags/scv_%Y%m%d_%H%M%S')),
+            description='record_bag 출력 디렉토리 (기본 ~/.ros/bags/scv_<일시>)'),
         # 경로 지정 GUI. path_planner.launch.py 가 DISPLAY 유무로 기본값을 정하므로
         # 여기서는 빈 값을 넘겨 그 판단을 그대로 쓴다 ('true'/'false' 로 덮어쓸 수 있다).
         DeclareLaunchArgument('route_tool', default_value=EnvironmentVariable(
@@ -117,4 +129,21 @@ def generate_launch_description():
             _inc('smppi', 'smppi_controller.launch.py',
                  {'use_sim_time': use_sim_time,
                   'enable_visualization': enable_visualization})]),
+
+        # 판단 근거 bag — BT/simple 의 입력(odom·경로·goal_status·hunter_status·costmap)과 출력(waypoints·MPPIParams·
+        # behavior_status·assist), 제어(cmd_vel·final_cmd), 센서(velodyne·GPS·IMU·2D scan·전방 컬러 카메라 compressed).
+        # 정규식 토픽 선택: 없는 토픽은 그냥 안 잡힌다. 스택이 다 뜬 뒤 시작(4 s).
+        TimerAction(period=4.0, actions=[
+            ExecuteProcess(
+                cmd=['ros2', 'bag', 'record', '-o', LaunchConfiguration('bag_dir'),
+                     '-e', '^/(velodyne_points|velodyne_points_curb|costmap|odom|odometry/.*|ublox_gps_node/fix|'
+                           'ublox_gps_node/fix_velocity|vectornav/imu|vectornav/pose|front/scan|rear/scan|'
+                           'hunter_status|hunter/velocity|current_speed|current_steer_angle|cmd_vel|final_cmd|'
+                           'vehicle/.*|remote/cmd_mode|tf|tf_static|planned_path.*|goal_status|goal_node_id|'
+                           'sub_goal|multiple_waypoints|target_waypoints|mppi_update_params|mppi_optimal_path|'
+                           'emergency_stop|stop_flag|pause_command|behavior_status|blocked_assist_request|'
+                           'bt/.*|behavior/.*|map_provider_node/utm|map_anchor/.*|'
+                           'camera/camera/color/image_raw/compressed|camera/camera/color/camera_info)$'],
+                output='screen', name='scv_bag_record',
+                condition=IfCondition(LaunchConfiguration('record_bag')))]),
     ])
