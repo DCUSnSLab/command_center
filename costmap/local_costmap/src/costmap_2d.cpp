@@ -143,6 +143,50 @@ void Costmap2D::raytraceSetLine(int x0, int y0, int x1, int y1, int8_t value)
   }
 }
 
+void Costmap2D::setPolygonCost(
+  const std::vector<std::pair<double, double>>& polygon, int8_t value)
+{
+  if (polygon.size() < 3) {
+    return;
+  }
+  double min_x = polygon[0].first, max_x = min_x;
+  double min_y = polygon[0].second, max_y = min_y;
+  for (const auto& v : polygon) {
+    min_x = std::min(min_x, v.first);
+    max_x = std::max(max_x, v.first);
+    min_y = std::min(min_y, v.second);
+    max_y = std::max(max_y, v.second);
+  }
+  int x0, y0, x1, y1;
+  worldToMapNoBounds(min_x, min_y, x0, y0);
+  worldToMapNoBounds(max_x, max_y, x1, y1);
+  x0 = std::max(x0, 0);
+  y0 = std::max(y0, 0);
+  x1 = std::min(x1, width_cells_ - 1);
+  y1 = std::min(y1, height_cells_ - 1);
+
+  const size_t n = polygon.size();
+  for (int my = y0; my <= y1; ++my) {
+    for (int mx = x0; mx <= x1; ++mx) {
+      double px, py;
+      mapToWorld(mx, my, px, py);
+      // Ray casting point-in-polygon test on the cell centre
+      bool inside = false;
+      for (size_t i = 0, j = n - 1; i < n; j = i++) {
+        const double xi = polygon[i].first, yi = polygon[i].second;
+        const double xj = polygon[j].first, yj = polygon[j].second;
+        if (((yi > py) != (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+          inside = !inside;
+        }
+      }
+      if (inside) {
+        data_[getIndex(mx, my)] = value;
+      }
+    }
+  }
+}
+
 void Costmap2D::copyFrom(const Costmap2D& other)
 {
   if (other.width_cells_ != width_cells_ || other.height_cells_ != height_cells_) {
