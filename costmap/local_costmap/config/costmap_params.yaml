@@ -46,7 +46,8 @@
     # === Robot Footprint ===
     # Robot footprint polygon vertices [x1,y1,x2,y2,x3,y3,x4,y4] in base_link frame
     # Points within this footprint will be filtered out to remove robot body reflections
-    robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+    # 뒤쪽 x -0.784 는 정확하지 않음: 실측값이 아니라 원래 -0.49 에 뒤로 패딩(전장 0.98 m 의 30%)을 준 값
+    robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.784, -0.3725, -0.784, 0.3725]
 
     # === Semantic Static Layer ===
     # map_provider 가 발행하는 의미 격자(주행가능/횡단보도/주행불가)를 얹는다.
