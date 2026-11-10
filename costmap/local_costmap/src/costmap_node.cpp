@@ -419,6 +419,21 @@ void CostmapNode::updateCostmap()
     }
   }
 
+  // Clear the robot footprint: the robot occupies these cells, so anything
+  // still marked there (from earlier scans, never re-swept by a beam) is stale
+  if (robot_footprint_.size() >= 6 && robot_footprint_.size() % 2 == 0) {
+    const double c = std::cos(pose.yaw);
+    const double s = std::sin(pose.yaw);
+    std::vector<std::pair<double, double>> footprint;
+    footprint.reserve(robot_footprint_.size() / 2);
+    for (size_t i = 0; i + 1 < robot_footprint_.size(); i += 2) {
+      const double fx = robot_footprint_[i];
+      const double fy = robot_footprint_[i + 1];
+      footprint.emplace_back(pose.x + c * fx - s * fy, pose.y + s * fx + c * fy);
+    }
+    obstacle_map_->setPolygonCost(footprint, Costmap2D::FREE_SPACE);
+  }
+
   // Remove isolated noise cells before they get inflated
   denoise_layer_.apply(*obstacle_map_);
 

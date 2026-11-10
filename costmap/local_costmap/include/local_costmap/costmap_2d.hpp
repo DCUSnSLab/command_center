@@ -46,6 +46,10 @@ public:
   // the map; (x0,y0) must be inside or nothing is traced.
   void raytraceSetLine(int x0, int y0, int x1, int y1, int8_t value);
 
+  // Set every cell whose centre lies inside the polygon (world coordinates)
+  // to `value`. Cells only partly covered by the polygon are left unchanged.
+  void setPolygonCost(const std::vector<std::pair<double, double>>& polygon, int8_t value);
+
   // Copy origin and cell data from another costmap of identical dimensions
   void copyFrom(const Costmap2D& other);
 
