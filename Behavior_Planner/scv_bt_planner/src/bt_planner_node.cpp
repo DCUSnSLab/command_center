@@ -303,9 +303,35 @@ private:
   // ------------------------------------------------------------ 콜백 (원본 이식)
   static double yawOf(const geometry_msgs::msg::Quaternion& q) { return tf2::getYaw(q); }
 
+  // 자세를 map 프레임으로. 경로 노드·위험 격자는 map(UTM - datum) 기준인데, 차량 런치는
+  // current_position_topic:=/odom 을 준다. 현 위치추정의 odom 은 기동 지점 기준이라 map 과 무관하다
+  // (map→odom: 10/21 38°·4.8 m, 11/10 109°·54 m) — 출발 회전각·출발 노드 합류·위험 판정이 그만큼 어긋났다.
+  // 구역 판정은 노드 ID 기준이라 영향 없음. TF 가 없으면 자세를 갱신하지 않는다(MissionReady 가 막음).
+  std::optional<Pose2D> toMapPose(const nav_msgs::msg::Odometry& m)
+  {
+    const std::string& frame = m.header.frame_id;
+    if (frame.empty() || frame == "map") {
+      return Pose2D{m.pose.pose.position.x, m.pose.pose.position.y, yawOf(m.pose.pose.orientation)};
+    }
+    try {
+      const auto tr = tf_buffer_->lookupTransform("map", frame, tf2::TimePointZero);
+      geometry_msgs::msg::PoseStamped in, out;
+      in.header = m.header;
+      in.pose = m.pose.pose;
+      tf2::doTransform(in, out, tr);
+      return Pose2D{out.pose.position.x, out.pose.position.y, yawOf(out.pose.orientation)};
+    } catch (const std::exception& e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "%s->map TF 미가용, 자세 갱신 보류: %s",
+                           frame.c_str(), e.what());
+      return std::nullopt;
+    }
+  }
+
   void onOdom(const nav_msgs::msg::Odometry& m)
   {
-    Pose2D p{m.pose.pose.position.x, m.pose.pose.position.y, yawOf(m.pose.pose.orientation)};
+    const std::optional<Pose2D> mp = toMapPose(m);
+    if (!mp) return;
+    const Pose2D p = *mp;
     const std::optional<Pose2D> prev = ctx_.pose;
     const double t = rclcpp::Time(m.header.stamp).seconds();
     ctx_.pose = p;

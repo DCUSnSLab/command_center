@@ -81,6 +81,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_zone_and_profiles ${PROJECT_NAME}_core)
   ament_add_gtest(test_hazard_waypoints test/test_hazard_waypoints.cpp)
   target_link_libraries(test_hazard_waypoints ${PROJECT_NAME}_core)
+  ament_add_gtest(test_turn_deg test/test_turn_deg.cpp src/bt_nodes.cpp)
+  target_link_libraries(test_turn_deg ${PROJECT_NAME}_core behaviortree_cpp::behaviortree_cpp)
   target_compile_definitions(test_zone_and_profiles PRIVATE
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
 endif()
