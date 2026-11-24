@@ -1,0 +1,30 @@
+# traversability_costmap_node: /costmap from the traversability grid.
+# No accumulation here: SCV_Perception/traversability_grid keeps the memory.
+# Run traversability_grid separately (like ground_filter).
+
+/**:
+  ros__parameters:
+    grid_topic: '/perception/traversability/grid'   # 100 blocked / 70 step / 0 free / -1 unobserved
+
+    odom_frame: 'odom'
+    base_frame: 'base_link'
+    map_frame: 'map'
+
+    # No grid for this long -> /costmap all UNKNOWN (smppi treats it as lethal and stops).
+    grid_timeout: 1.0
+
+    # Cost for cells the traversability grid never observed (-1), including the near
+    # blind zone and drop-off shadows. 0 = free (local_costmap with
+    # track_unknown_space: false did the same), -1 = keep UNKNOWN (smppi: lethal, so
+    # the robot cannot start: the ground around it is unseen right after start-up).
+    unknown_cost: 0
+
+    # Cells inside this polygon (base_link) are cleared to free.
+    # HUNTER 2.0 real footprint, same as smppi.
+    robot_footprint: [0.49, 0.3725, 0.49, -0.3725, -0.49, -0.3725, -0.49, 0.3725]
+
+    # map_provider semantic grid -> /costmap/keepout on the same window as /costmap.
+    # keepout: 100 non-drivable / 0 otherwise / -1 no semantic info.
+    use_semantic_layer: true
+    semantic_grid_topic: '/map_provider_node/semantic/grid'
+    semantic_crosswalk_cost: 0
