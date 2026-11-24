@@ -40,11 +40,21 @@ a physical obstacle, which stays visible because /costmap is no longer
 overwritten by the semantic layer.
 
 collision_cost and keepout_cost are absolute; `weight` scales the soft term only.
+
+Cell cost (`cell_cost_weight`, off at 0): costmap values 1..99 read as 0.01..0.99
+(e.g. 70 = traversability step, or inflation if it is turned on). Per pose the
+highest such value under any disc, summed over the distance driven:
+
+    cell = sum_t( cost(pose_t) * |pose_t - pose_t-1| )      t >= 1, [m]
+
+A thin band crossed once costs little, running along it costs a lot, and the
+speed it is crossed at does not change the cost. 100 and UNKNOWN stay with the
+collision term above and count 0 here.
 """
 
 import torch
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, maximum_filter
 from typing import Optional, Any
 
 from .base_critic import BaseCritic
@@ -106,6 +116,9 @@ class ObstacleCritic(BaseCritic):
         # (e.g. sensor timeout) stops the robot instead of freeing all space
         self.unknown_is_lethal = params.get('unknown_is_lethal', True)
 
+        # Weight of the 1..99 cell cost (cost x metres driven over it); 0 = off
+        self.cell_cost_weight = params.get('cell_cost_weight', 0.0)
+
         # 전부 충돌인 사이클 진단용. collides.all() 은 GPU->CPU 동기화라
         # 매 사이클 부르면 optimize 가 26.6 -> 33.2 ms 로 늘어난다 (실측).
         # 20 사이클마다만 확인해 비용을 1/20 로 누른다.
@@ -135,7 +148,7 @@ class ObstacleCritic(BaseCritic):
         vprint(f"[ObstacleCritic] collision_margin={self.collision_margin} m, "
               f"d_req = {self.clearance_min} + {self.clearance_time_gap}*|v| m, "
               f"discs={self.circle_centers.shape[0]} r={self.circle_radius:.3f} m, "
-              f"unknown_is_lethal={self.unknown_is_lethal}")
+              f"unknown_is_lethal={self.unknown_is_lethal}, cell_cost_weight={self.cell_cost_weight}")
 
     def _build_circles(self):
         """Disc centres [C, 2] on device (body frame) and common radius [m]."""
@@ -187,14 +200,16 @@ class ObstacleCritic(BaseCritic):
 
         Returns:
             dict of on-device tensors: clearance [T+1], required [T],
-            soft (weighted), severity, keepout_severity; None without a costmap
+            soft (weighted), severity, keepout_severity, cell (weighted);
+            None without a costmap
         """
         if self.costmap_info is None:
             return None
         c = self._components(trajectory.unsqueeze(0), actions.unsqueeze(0))
         return {'clearance': c['clearance'][0], 'required': c['required'][0],
                 'soft': self.weight * c['soft'][0], 'severity': c['severity'][0],
-                'keepout_severity': c['keepout_severity'][0]}
+                'keepout_severity': c['keepout_severity'][0],
+                'cell': self.cell_cost_weight * c['cell'][0]}
 
     def _components(self, trajectories: torch.Tensor, controls: torch.Tensor) -> dict:
         """All obstacle terms for a batch [K, T+1, 3] (shared by cost and diagnostics)."""
@@ -236,6 +251,16 @@ class ObstacleCritic(BaseCritic):
 
         total_costs = self.weight * soft + self.collision_cost * severity
 
+        # Cell cost (1..99): highest value under the discs, times the distance driven
+        cell = torch.zeros_like(soft)
+        cell_field = info['cell_field']
+        if cell_field is not None:
+            c_pose = self._sample_nearest(cell_field, info, wx, wy).max(dim=2).values   # [K, T+1]
+            step = torch.hypot(trajectories[:, 1:, 0] - trajectories[:, :-1, 0],
+                               trajectories[:, 1:, 1] - trajectories[:, :-1, 1])        # [K, T]
+            cell = (c_pose[:, 1:] * step).sum(dim=1)
+            total_costs = total_costs + self.cell_cost_weight * cell
+
         # Semantic keep-out, own field and own (lower) cost. Indexed with the
         # keep-out grid's own origin: it is published with /costmap but the two
         # callbacks are independent, so the windows can be one cycle apart.
@@ -251,8 +276,18 @@ class ObstacleCritic(BaseCritic):
             total_costs = total_costs + self.keepout_cost * k_severity
 
         return {'total': total_costs, 'soft': soft, 'severity': severity, 'keepout_severity': k_severity,
-                'first_hit': first_hit, 'collides': collides, 'clearance': clearance,
+                'cell': cell, 'first_hit': first_hit, 'collides': collides, 'clearance': clearance,
                 'required': required, 'shortfall': shortfall}
+
+    @staticmethod
+    def _sample_nearest(field: torch.Tensor, info: dict, wx: torch.Tensor, wy: torch.Tensor):
+        """Value of the cell holding each world point, 0 outside the window."""
+        h, w = field.shape
+        i = ((wx - info['origin_x']) / info['resolution']).floor().long()
+        j = ((wy - info['origin_y']) / info['resolution']).floor().long()
+        inside = (i >= 0) & (i < w) & (j >= 0) & (j < h)
+        vals = field.reshape(-1)[j.clamp(0, h - 1) * w + i.clamp(0, w - 1)]
+        return torch.where(inside, vals, torch.zeros_like(vals))
 
     @staticmethod
     def _sample_field(info: dict, wx: torch.Tensor, wy: torch.Tensor):
@@ -314,6 +349,27 @@ class ObstacleCritic(BaseCritic):
             dist = np.full(blocked.shape, 1.0e3)   # nothing to keep away from
         return torch.as_tensor(dist, device=self.device, dtype=self.dtype)
 
+    def _cell_field(self, data: np.ndarray, resolution: float) -> Optional[torch.Tensor]:
+        """Highest 1..99 cost (0.01..0.99) a disc centred in each cell can touch, or None.
+
+        A cell centre within the disc radius of any point of a cell lies within
+        radius + res/sqrt(2) of that cell's centre, so the window uses that radius
+        and the lookup is the nearest cell. Bilinear would read low at the very
+        edge of a cost region.
+        """
+        if self.cell_cost_weight <= 0.0:
+            return None
+        mid = (data > 0) & (data < self.collision_value_threshold)
+        if not mid.any():
+            return None
+        cost = np.where(mid, data, 0).astype(np.float32) / 100.0
+        r = (self.circle_radius + resolution / np.sqrt(2.0)) / resolution
+        k = int(np.ceil(r))
+        a = np.arange(-k, k + 1)
+        disc = a[:, None] ** 2 + a[None, :] ** 2 <= r * r
+        field = maximum_filter(cost, footprint=disc, mode='constant', cval=0.0)
+        return torch.as_tensor(field, device=self.device, dtype=self.dtype)
+
     def _costmap_blocked(self, data: np.ndarray) -> np.ndarray:
         blocked = data >= self.collision_value_threshold
         if self.unknown_is_lethal:
@@ -359,6 +415,7 @@ class ObstacleCritic(BaseCritic):
         # lookup over K*T*C points is a handful of on-device gathers
         info['distance_field'] = self._distance_field(self._costmap_blocked(info['data']),
                                                       info['resolution'])
+        info['cell_field'] = self._cell_field(info['data'], info['resolution'])
         self.costmap_info = info
 
     def update_parameters(self, params: dict):
@@ -391,6 +448,9 @@ class ObstacleCritic(BaseCritic):
             if 'footprint_circles' in params:
                 self.footprint_circles = int(params['footprint_circles'])
             self.circle_centers, self.circle_radius = self._build_circles()
+            # the cell cost field was widened by the old disc radius
+            if self.costmap_info is not None:
+                self.set_costmap_info(self.costmap_info)
 
         vprint(f"[ObstacleCritic] Parameters updated: "
               f"collision={self.collision_cost}, keepout={self.keepout_cost}, "
