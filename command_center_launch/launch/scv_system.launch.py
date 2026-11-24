@@ -6,6 +6,8 @@
 #   전제(별도 런치로 먼저 띄울 것):
 #     - map_provider     : /map_provider_node/graph, /map_provider_node/utm(datum), PCD 경로 토픽
 #     - scv_localization : TF map→odom, odom→base_link, /odom  (REP-105)
+#     - traversability_grid : /perception/traversability/grid (local_costmap 입력)
+#       예)  ros2 launch traversability_grid traversability_grid.launch.py use_sim_time:=<...>
 #       예)  ros2 launch map_provider map_provider.launch.py bundle_dir:=~/scv_maps/d2_library_909_node
 #            ros2 launch scv_localization scv_localization.launch.py use_sim_time:=<...>
 #
@@ -73,9 +75,11 @@ def generate_launch_description():
         _inc('scv_global_planner', 'path_planner.launch.py',
              {'use_sim_time': use_sim_time, 'route_tool': route_tool}),
 
-        # local costmap (odom 프레임; controller가 /costmap 소비하므로 먼저)
+        # local costmap (odom 프레임; controller가 /costmap 소비하므로 먼저).
+        # traversability 격자 -> /costmap, /costmap/keepout (누적 없음).
+        # 기존 누적형은 costmap.launch.py.
         TimerAction(period=1.0, actions=[
-            _inc('local_costmap', 'costmap.launch.py',
+            _inc('local_costmap', 'traversability_costmap.launch.py',
                  {'use_sim_time': use_sim_time})]),
 
         # behavior planner (planner 이후). simple 은 simple|shadow 에서, BT 는 bt|shadow 에서 기동.

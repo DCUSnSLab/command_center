@@ -160,6 +160,7 @@ class MPPIMainNode(Node):
         self.declare_parameter('costs.goal_weight', 6.0)
         self.declare_parameter('costs.collision_cost', 1.0e6)
         self.declare_parameter('costs.keepout_cost', 2.0e5)
+        self.declare_parameter('costs.cell_cost_weight', 0.0)
 
         # Obstacle clearance (ObstacleCritic)
         self.declare_parameter('costs.clearance.collision_margin', 0.08)
@@ -243,6 +244,7 @@ class MPPIMainNode(Node):
             'goal_weight': self.get_parameter('costs.goal_weight').get_parameter_value().double_value,
             'collision_cost': self.get_parameter('costs.collision_cost').get_parameter_value().double_value,
             'keepout_cost': self.get_parameter('costs.keepout_cost').get_parameter_value().double_value,
+            'cell_cost_weight': self.get_parameter('costs.cell_cost_weight').get_parameter_value().double_value,
         }
 
         # Obstacle clearance parameters
@@ -292,6 +294,7 @@ class MPPIMainNode(Node):
             'weight': self.critic_weights['obstacle_weight'],          # soft clearance shortfall
             'collision_cost': self.critic_weights['collision_cost'],   # absolute, dominates soft + goal
             'keepout_cost': self.critic_weights['keepout_cost'],       # absolute, < collision_cost
+            'cell_cost_weight': self.critic_weights['cell_cost_weight'],  # 1..99 cells x metres
             'collision_value_threshold': 100,  # Costmap OCCUPIED value (inflation stays <= 99)
             'unknown_is_lethal': True,         # UNKNOWN (-1) cells are treated as obstacles
             'collision_margin': self.clearance_params['collision_margin'],

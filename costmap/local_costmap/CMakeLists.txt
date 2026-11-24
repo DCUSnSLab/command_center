@@ -63,10 +63,21 @@ ament_target_dependencies(costmap_node
   rclcpp
 )
 
+# /costmap from SCV_Perception/traversability_grid (no accumulation)
+add_executable(traversability_costmap_node src/traversability_costmap_node.cpp)
+target_link_libraries(traversability_costmap_node ${PROJECT_NAME}_lib)
+ament_target_dependencies(traversability_costmap_node
+  rclcpp
+  nav_msgs
+  geometry_msgs
+  tf2_ros
+)
+
 # Install
 install(TARGETS
   ${PROJECT_NAME}_lib
   costmap_node
+  traversability_costmap_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
