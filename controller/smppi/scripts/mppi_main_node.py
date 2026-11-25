@@ -334,9 +334,16 @@ class MPPIMainNode(Node):
         # Subscribers
         # /odom 직구독 (구 costmap_processor 릴레이 제거). 발행측이 SensorDataQoS(BEST_EFFORT)
         # 이므로 RELIABLE 구독은 매칭되지 않는다.
+        # /odom 은 spin 하지 않고 제어 주기에 최신 1개만 꺼낸다 (_take_odom). 200 Hz 를
+        # executor 로 받으면 메시지마다 wait set 재구성 비용이 들어 CPU ~15% 였다.
+        # 구독은 spin 안 하는 별도 노드에 둔다. 전역 인자(__node 리맵)를 받지 않게 하고,
+        # 토픽 이름은 이 노드의 리맵으로 해석해 넘긴다.
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.odom_sub = self.create_subscription(
-            Odometry, self.odom_topic, self.odom_callback, sensor_qos)
+        self._odom_node = rclpy.create_node(
+            self.get_name() + '_odom', namespace=self.get_namespace(), context=self.context,
+            use_global_arguments=False, enable_rosout=False, start_parameter_services=False)
+        self.odom_sub = self._odom_node.create_subscription(
+            Odometry, self.resolve_topic_name(self.odom_topic), lambda _: None, sensor_qos)
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, self.costmap_topic, self.costmap_callback, reliable_qos)
         # Semantic keep-out from local_costmap (semantic_output: separate). If it
@@ -393,9 +400,17 @@ class MPPIMainNode(Node):
         
         self.get_logger().debug(f"Topics configured: odom={self.odom_topic}, costmap={self.costmap_topic}")
     
-    def odom_callback(self, msg: Odometry):
-        """Receive odometry directly and adapt to internal robot state"""
-        self.robot_state = RobotState(msg)
+    def _take_odom(self):
+        """Newest /odom in the subscription queue (depth 1) -> robot_state; kept if none.
+
+        Same take as rclpy's executor (_take_subscription); handle.take_message is not
+        public API, so recheck it when moving off Humble.
+        """
+        sub = self.odom_sub
+        with sub.handle:
+            taken = sub.handle.take_message(sub.msg_type, sub.raw)
+        if taken is not None:
+            self.robot_state = RobotState(taken[0])
 
     def costmap_callback(self, msg: OccupancyGrid):
         """Receive costmap for grid-based collision detection"""
@@ -407,11 +422,6 @@ class MPPIMainNode(Node):
             costmap_data = np.array(msg.data, dtype=np.int8).reshape(
                 (msg.info.height, msg.info.width))
 
-            # One on-device tensor per costmap, shared by all critics
-            # (no per-iteration CPU<->GPU copies)
-            costmap_tensor = torch.as_tensor(
-                costmap_data, device=self.optimizer.device, dtype=self.optimizer.dtype)
-
             costmap_info = {
                 'resolution': msg.info.resolution,
                 'origin_x': msg.info.origin.position.x,
@@ -419,7 +429,6 @@ class MPPIMainNode(Node):
                 'width': msg.info.width,
                 'height': msg.info.height,
                 'data': costmap_data,
-                'costmap_tensor': costmap_tensor
             }
 
             # Set costmap info for all critics that consume it
@@ -577,6 +586,7 @@ class MPPIMainNode(Node):
     
     def control_callback(self):
         """Main control loop callback"""
+        self._take_odom()
         if not self.is_ready():
             return
 
@@ -598,11 +608,7 @@ class MPPIMainNode(Node):
                 
                 # Optionally publish goal status to indicate we're still working
                 if self.goal_state is not None:
-                    robot_pos = torch.tensor([self.robot_state.state_vector[0], self.robot_state.state_vector[1]], 
-                                           device=self.optimizer.device, dtype=self.optimizer.dtype)
-                    goal_distance = torch.norm(robot_pos - self.goal_state[:2])
-                    goal_distance_float = float(goal_distance)
-                    self.publish_goal_status(goal_distance_float)
+                    self.publish_goal_status(self._goal_distance())
                 
                 return  # Skip normal MPPI processing
             else:
@@ -657,10 +663,7 @@ class MPPIMainNode(Node):
             
             # Calculate goal distance and publish status
             if self.goal_state is not None:
-                robot_pos = torch.tensor([self.robot_state.state_vector[0], self.robot_state.state_vector[1]], 
-                                       device=self.optimizer.device, dtype=self.optimizer.dtype)
-                goal_distance = torch.norm(robot_pos - self.goal_state[:2])
-                goal_distance_float = float(goal_distance)
+                goal_distance_float = self._goal_distance()
                 self.publish_goal_status(goal_distance_float)
                 
                 # # Check if goal reached
@@ -699,6 +702,12 @@ class MPPIMainNode(Node):
             cmd_vel = Twist()
             self.cmd_pub.publish(cmd_vel)
     
+    def _goal_distance(self) -> float:
+        """Robot-to-goal distance on the host (latest_goal is set with goal_state)."""
+        g = self.latest_goal.pose.position
+        x, y = self.robot_state.state_vector[0], self.robot_state.state_vector[1]
+        return math.hypot(x - g.x, y - g.y)
+
     def is_ready(self) -> bool:
         """Check if controller is ready to compute commands"""
         if self.robot_state is None:
@@ -1395,10 +1404,16 @@ class MPPIMainNode(Node):
         # Stop the robot
         cmd_vel = Twist()
         self.cmd_pub.publish(cmd_vel)
+        self._odom_node.destroy_node()
 
 
 def main(args=None):
     """Main function"""
+    # The heavy work runs on the GPU. The CPU-side torch ops (per-costmap host->
+    # device copies) are tiny, but each one wakes the OpenMP pool and its idle
+    # workers spin afterwards: ~160% -> ~45% CPU for this node (bag replay).
+    if torch.cuda.is_available():
+        torch.set_num_threads(1)
     rclpy.init(args=args)
     
     try:
