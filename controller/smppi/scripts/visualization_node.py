@@ -34,10 +34,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from smppi_controller.utils.geometry import GeometryUtils
 from smppi_controller.critics.obstacle_critic import cover_footprint
 
-# BEV palette: normal marks stay grey/white, colour only for state
-_WHITE = (0.92, 0.92, 0.92)
-_AMBER = (1.0, 0.70, 0.10)      # clearance shortfall (allowed, costs)
-_RED = (0.92, 0.25, 0.20)       # collision (clearance < collision_margin)
+# BEV palette, dark marks on the light /costmap (rviz 'map' scheme): ink for the
+# robot, one violet for the plan, slate for the samples; amber/red only for state
+_INK = (0.10, 0.11, 0.15)       # footprint, discs at the robot
+_PLAN = (0.33, 0.16, 0.80)      # optimal path, lookahead, discs along the plan
+_ROLL = (0.17, 0.22, 0.42)      # sampled rollouts (alpha by weight)
+_AMBER = (0.90, 0.48, 0.00)     # clearance shortfall (allowed, costs)
+_RED = (0.78, 0.10, 0.12)       # collision (clearance < collision_margin)
 
 
 def _rgba(rgb, a):
@@ -117,8 +120,6 @@ class VisualizationNode(Node):
         self.declare_parameter('costs.clearance.footprint_circles', 3)
         self.declare_parameter('costs.collision_cost', 1.0e6)
         self.declare_parameter('optimizer.time_steps', 60)
-        self.declare_parameter('goal_reached_threshold', 3.0)
-        self.declare_parameter('passed_goal_max_distance', 8.0)
         
         # QoS
         self.declare_parameter('qos.reliable_depth', 5)
@@ -158,8 +159,6 @@ class VisualizationNode(Node):
         # a rollout costs at least collision_cost / T once it collides (graded severity floor)
         self.collision_floor = self.get_parameter('costs.collision_cost').get_parameter_value().double_value / \
             max(1, self.get_parameter('optimizer.time_steps').get_parameter_value().integer_value)
-        self.goal_reached_threshold = self.get_parameter('goal_reached_threshold').get_parameter_value().double_value
-        self.passed_goal_max_distance = self.get_parameter('passed_goal_max_distance').get_parameter_value().double_value
         
         # QoS parameters
         self.reliable_qos_depth = self.get_parameter('qos.reliable_depth').get_parameter_value().integer_value
@@ -283,12 +282,6 @@ class VisualizationNode(Node):
             #     next_waypoint_markers = self.create_next_waypoints_markers()
             #     marker_array.markers.extend(next_waypoint_markers)
 
-            # Goal reached radius + passed-plane (when smppi switches to the next waypoint)
-            if self.latest_goal is not None:
-                goal_region_marker = self.create_goal_region_marker()
-                if goal_region_marker:
-                    marker_array.markers.append(goal_region_marker)
-            
             # Robot footprint (true outline) + the discs the obstacle critic actually checks
             if self.enable_robot_footprint and self.robot_state is not None and len(self.footprint) > 0:
                 footprint_marker = self.create_footprint_marker()
@@ -353,17 +346,14 @@ class VisualizationNode(Node):
             traj_marker.points.append(point)
         
         # Trajectory appearance
-        traj_marker.scale.x = 0.05  # Line width
-        traj_marker.color.r = 1.0
-        traj_marker.color.g = 1.0
-        traj_marker.color.b = 1.0
-        traj_marker.color.a = 1.0
+        traj_marker.scale.x = 0.06  # Line width
+        traj_marker.color = _rgba(_PLAN, 1.0)
 
-        # Per-pose state from the diagnostics of the same plan: white = clear,
+        # Per-pose state from the diagnostics of the same plan: violet = clear,
         # amber = closer than d_req(v), red = collision
         states = self._plan_states(len(traj_marker.points))
         if states is not None:
-            traj_marker.colors = [_rgba((_WHITE, _AMBER, _RED)[k], 1.0) for k in states]
+            traj_marker.colors = [_rgba((_PLAN, _AMBER, _RED)[k], 1.0) for k in states]
         
         return traj_marker
 
@@ -380,7 +370,7 @@ class VisualizationNode(Node):
 
     def create_rollout_markers(self) -> list:
         """
-        Sampled rollouts: grey by softmax weight, red when the rollout collides.
+        Sampled rollouts: slate by softmax weight, red when the rollout collides.
         One LINE_STRIP per rollout with a single colour keeps the message small
         (per-vertex colours on a LINE_LIST were ~300 KB per frame for 60 rollouts).
         Large sample counts fall back to one LINE_LIST in a few colour bins.
@@ -414,7 +404,7 @@ class VisualizationNode(Node):
             for k in range(n):
                 m = base(100 + k, Marker.LINE_STRIP)
                 m.points = [Point(x=float(x), y=float(y), z=0.03) for x, y in xy[k]]
-                m.color = _rgba(_RED, 0.6 * float(alpha[k])) if colliding[k] else _rgba(_WHITE, float(alpha[k]))
+                m.color = _rgba(_RED, 0.6 * float(alpha[k])) if colliding[k] else _rgba(_ROLL, float(alpha[k]))
                 out.append(m)
             return out
         # many samples: LINE_LIST per colour bin, vertex count bounded
@@ -433,7 +423,7 @@ class VisualizationNode(Node):
                 for a, c in zip(line[:-1], line[1:]):
                     pts += (a, c)
             m.points = pts
-            m.color = _rgba(_RED, 0.35) if b == 0 else _rgba(_WHITE, 0.15 + 0.2 * b)
+            m.color = _rgba(_RED, 0.35) if b == 0 else _rgba(_ROLL, 0.15 + 0.2 * b)
             out.append(m)
         return out
 
@@ -473,12 +463,8 @@ class VisualizationNode(Node):
             if len(footprint_marker.points) > 0:
                 footprint_marker.points.append(footprint_marker.points[0])
             
-            # Blue color for footprint boundary
             footprint_marker.scale.x = 0.05  # Line width
-            footprint_marker.color.r = 0.9
-            footprint_marker.color.g = 0.9
-            footprint_marker.color.b = 0.9
-            footprint_marker.color.a = 0.8
+            footprint_marker.color = _rgba(_INK, 0.9)
             
             return footprint_marker
             
@@ -511,11 +497,7 @@ class VisualizationNode(Node):
             lookahead_marker.scale.y = 0.12  # Arrow width
             lookahead_marker.scale.z = 0.12  # Arrow height
             
-            # Bright green color for lookahead direction
-            lookahead_marker.color.r = 0.55
-            lookahead_marker.color.g = 0.55
-            lookahead_marker.color.b = 0.55
-            lookahead_marker.color.a = 0.9
+            lookahead_marker.color = _rgba(_PLAN, 0.9)
             
             # Short lifetime for real-time updates
             lookahead_marker.lifetime.sec = 0
@@ -606,37 +588,11 @@ class VisualizationNode(Node):
                 m.scale.x = 0.02
                 m.pose.orientation.w = 1.0
                 m.lifetime.nanosec = 500000000
-                m.color = _rgba((_WHITE, _AMBER, _RED)[state], 0.9 if j == 0 else 0.45)
+                # at the robot: ink; along the plan: violet; amber/red by clearance state
+                m.color = _rgba(((_INK if j == 0 else _PLAN), _AMBER, _RED)[state], 0.9 if j == 0 else 0.5)
                 m.points = self._circle_points(x + bx * cs - by * sn, y + bx * sn + by * cs, self.circle_radius)
                 out.append(m)
         return out
-
-    def create_goal_region_marker(self) -> Optional[Marker]:
-        """Goal reached radius, and the passed-plane through the goal normal to its heading"""
-        g = self.latest_goal.pose
-        gx, gy = g.position.x, g.position.y
-        gyaw = 2.0 * math.atan2(g.orientation.z, g.orientation.w)
-        marker = Marker()
-        marker.header.frame_id = "odom"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "goal_region"
-        marker.id = 70
-        marker.type = Marker.LINE_LIST
-        marker.action = Marker.ADD
-        marker.scale.x = 0.03
-        marker.pose.orientation.w = 1.0
-        marker.color = _rgba(_WHITE, 0.55)
-        ring = self._circle_points(gx, gy, self.goal_reached_threshold, 48)
-        pts = [q for a, b in zip(ring[:-1], ring[1:]) for q in (a, b)]
-        final = self.multiple_waypoints is not None and self.multiple_waypoints.is_final_waypoint
-        if self.passed_goal_max_distance > 0.0 and not final:
-            half = max(self.passed_goal_max_distance, self.goal_reached_threshold)
-            nx, ny = -math.sin(gyaw), math.cos(gyaw)
-            pts += [Point(x=gx - half * nx, y=gy - half * ny, z=0.03), Point(x=gx + half * nx, y=gy + half * ny, z=0.03)]
-            # entry direction: crossing the line along this tick counts as passed
-            pts += [Point(x=gx, y=gy, z=0.03), Point(x=gx + 1.0 * math.cos(gyaw), y=gy + 1.0 * math.sin(gyaw), z=0.03)]
-        marker.points = pts
-        return marker
 
 
 def main(args=None):
