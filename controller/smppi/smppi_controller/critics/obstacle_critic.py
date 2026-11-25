@@ -54,7 +54,7 @@ collision term above and count 0 here.
 
 import torch
 import numpy as np
-from scipy.ndimage import distance_transform_edt, maximum_filter
+from scipy.ndimage import distance_transform_edt
 from typing import Optional, Any
 
 from .base_critic import BaseCritic
@@ -118,6 +118,8 @@ class ObstacleCritic(BaseCritic):
 
         # Weight of the 1..99 cell cost (cost x metres driven over it); 0 = off
         self.cell_cost_weight = params.get('cell_cost_weight', 0.0)
+        # (radius, resolution, k, disc offsets as flat indices into a (2k+1)^2 window)
+        self._disc = None
 
         # 전부 충돌인 사이클 진단용. collides.all() 은 GPU->CPU 동기화라
         # 매 사이클 부르면 optimize 가 26.6 -> 33.2 ms 로 늘어난다 (실측).
@@ -355,20 +357,26 @@ class ObstacleCritic(BaseCritic):
         A cell centre within the disc radius of any point of a cell lies within
         radius + res/sqrt(2) of that cell's centre, so the window uses that radius
         and the lookup is the nearest cell. Bilinear would read low at the very
-        edge of a cost region.
+        edge of a cost region. The max filter runs on the device (~4 ms on CPU).
         """
         if self.cell_cost_weight <= 0.0:
             return None
         mid = (data > 0) & (data < self.collision_value_threshold)
         if not mid.any():
             return None
-        cost = np.where(mid, data, 0).astype(np.float32) / 100.0
-        r = (self.circle_radius + resolution / np.sqrt(2.0)) / resolution
-        k = int(np.ceil(r))
-        a = np.arange(-k, k + 1)
-        disc = a[:, None] ** 2 + a[None, :] ** 2 <= r * r
-        field = maximum_filter(cost, footprint=disc, mode='constant', cval=0.0)
-        return torch.as_tensor(field, device=self.device, dtype=self.dtype)
+        if self._disc is None or self._disc[:2] != (self.circle_radius, resolution):
+            r = (self.circle_radius + resolution / np.sqrt(2.0)) / resolution
+            k = int(np.ceil(r))
+            a = np.arange(-k, k + 1)
+            disc = (a[:, None] ** 2 + a[None, :] ** 2 <= r * r).ravel()
+            self._disc = (self.circle_radius, resolution, k,
+                          torch.as_tensor(np.flatnonzero(disc), device=self.device))
+        _, _, k, idx = self._disc
+        # Upload int8 and cast on the device
+        cost = torch.as_tensor(np.where(mid, data, 0), device=self.device).to(self.dtype) / 100.0
+        # Every cell's (2k+1)^2 window, zero outside the map; max over the disc part
+        win = torch.nn.functional.unfold(cost[None, None], 2 * k + 1, padding=k)[0]
+        return win[idx].amax(dim=0).view(data.shape)
 
     def _costmap_blocked(self, data: np.ndarray) -> np.ndarray:
         blocked = data >= self.collision_value_threshold
